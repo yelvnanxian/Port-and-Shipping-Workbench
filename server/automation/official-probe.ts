@@ -4,7 +4,7 @@ import type { TrackingQuery, TrackingResult } from './types.js';
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
-function probeUrl(input: TrackingQuery) {
+export function probeUrl(input: TrackingQuery) {
   const queryValue = input.queryType === 'container' ? input.containerNo.trim().toUpperCase() : input.queryBillNo.trim().toUpperCase();
   const url = new URL(input.rule.url);
   switch (input.rule.code) {

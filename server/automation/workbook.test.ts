@@ -16,6 +16,7 @@ test('automation settings persist across engine instances', async () => {
     const second = new AutomationEngine(new WorkbookStore(root));
     const settings = await second.settings();
     assert.equal(settings.enabled, false);
+    assert.equal(settings.browserAutomationEnabled, true);
     assert.equal(settings.wechatWebhookUrl, 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test');
   } finally {
     await fs.rm(root, { recursive: true, force: true });

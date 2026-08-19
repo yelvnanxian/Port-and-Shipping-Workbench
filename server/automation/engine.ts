@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { resolveCarrierRule } from './carriers.js';
+import { BrowserTrackingProvider, FallbackTrackingProvider } from './browser.js';
 import { classifyTrackingError } from './errors.js';
 import { EvergreenTrackingProvider } from './evergreen.js';
 import { MatsonTrackingProvider } from './matson.js';
@@ -18,7 +19,7 @@ function isQueryable(record: WorkbookRecord) {
 }
 
 function failedNote(detail: FailedTrackingDetail) {
-  return `失败分类=${detail.category}；船司=${detail.carrier}；提单号=${detail.billNo}；柜号=${detail.containerNo || '未提供'}；原因=${detail.reason}；来源=${detail.sourceUrl}`;
+  return `失败分类=${detail.category}；船司=${detail.carrier}；提单号=${detail.billNo}；柜号=${detail.containerNo || '未提供'}；原因=${detail.reason}；来源=${detail.sourceUrl}${detail.evidencePath ? `；浏览器证据=${detail.evidencePath}` : ''}`;
 }
 
 function publicTime(value: TrackingTime) {
@@ -41,14 +42,18 @@ export class AutomationEngine {
     return this.running;
   }
 
-  private provider(): TrackingProvider {
+  private provider(settings: AutomationSettings): TrackingProvider {
+    const browser = settings.browserAutomationEnabled
+      ? new BrowserTrackingProvider(path.join(this.store.dataDirectory, 'browser-evidence'))
+      : null;
+    const withBrowserFallback = (primary: TrackingProvider) => browser ? new FallbackTrackingProvider(primary, browser) : primary;
     return new CarrierRoutingTrackingProvider(new Map<string, TrackingProvider>([
-      ['OOCL', new OoclTrackingProvider()],
-      ['HEDE', new HedeTrackingProvider()],
-      ['SMLINE', new SmLineTrackingProvider()],
-      ['EVERGREEN', new EvergreenTrackingProvider()],
-      ['MATSON', new MatsonTrackingProvider()],
-    ]), new OfficialSiteProbeProvider());
+      ['OOCL', withBrowserFallback(new OoclTrackingProvider())],
+      ['HEDE', withBrowserFallback(new HedeTrackingProvider())],
+      ['SMLINE', withBrowserFallback(new SmLineTrackingProvider())],
+      ['EVERGREEN', withBrowserFallback(new EvergreenTrackingProvider())],
+      ['MATSON', withBrowserFallback(new MatsonTrackingProvider())],
+    ]), withBrowserFallback(new OfficialSiteProbeProvider()));
   }
 
   async listRuns(): Promise<RunSummary[]> {
@@ -63,6 +68,7 @@ export class AutomationEngine {
   async settings(): Promise<AutomationSettings> {
     const fallback: AutomationSettings = {
       enabled: true,
+      browserAutomationEnabled: true,
       schedule: [
         { time: '09:00', cron: '0 9 * * *' },
         { time: '11:00', cron: '0 11 * * *' },
@@ -81,11 +87,12 @@ export class AutomationEngine {
     }
   }
 
-  async updateSettings(patch: Partial<Pick<AutomationSettings, 'enabled' | 'wechatWebhookUrl'>>) {
+  async updateSettings(patch: Partial<Pick<AutomationSettings, 'enabled' | 'browserAutomationEnabled' | 'wechatWebhookUrl'>>) {
     const current = await this.settings();
     const next = {
       ...current,
       enabled: patch.enabled ?? current.enabled,
+      browserAutomationEnabled: patch.browserAutomationEnabled ?? current.browserAutomationEnabled,
       wechatWebhookUrl: patch.wechatWebhookUrl ?? current.wechatWebhookUrl,
     };
     await fs.writeFile(this.settingsPath, JSON.stringify(next, null, 2));
@@ -104,12 +111,15 @@ export class AutomationEngine {
     const startedAt = new Date();
     const id = `RUN-${startedAt.toISOString().replace(/\D/g, '').slice(0, 14)}`;
     let backupPath: string | null = null;
+    let provider: TrackingProvider | null = null;
     try {
+      const settings = await this.settings();
       const { workbook, sheet, headerMap } = await this.store.open();
       const allRecords = this.store.readRecords(sheet, headerMap);
       const records = allRecords.filter(isQueryable);
       backupPath = await this.store.backup(`${reason === 'manual' ? '手动' : '定时'}更新前备份`);
-      const provider = this.provider();
+      provider = this.provider(settings);
+      const activeProvider = provider;
       const failedDetails: FailedTrackingDetail[] = [];
       let success = 0;
       let unfinished = 0;
@@ -125,7 +135,7 @@ export class AutomationEngine {
         while (cursor < records.length) {
           const record = records[cursor++];
           try {
-            const { rule, result } = await trackRecord(record, provider);
+            const { rule, result } = await trackRecord(record, activeProvider);
             record.carrierHint = record.carrierHint || rule.name;
             record.arrivalTime = result.arrivalTimeText || result.arrivalTime;
             record.dischargeTime = result.dischargeTimeText || result.dischargeTime;
@@ -158,7 +168,8 @@ export class AutomationEngine {
               containerNo: record.containerNo,
               category: failure.category,
               reason: failure.reason,
-              sourceUrl,
+              sourceUrl: failure.sourceUrl || sourceUrl,
+              evidencePath: failure.evidencePath,
             };
             record.lastUpdated = new Date();
             record.progress = '失败';
@@ -187,11 +198,15 @@ export class AutomationEngine {
         backupPath,
         notification: 'skipped',
       };
-      const settings = await this.settings();
       summary.notification = await notifyWeCom(summary, settings.wechatWebhookUrl);
       await this.saveRun(summary);
       return summary;
     } finally {
+      try {
+        await provider?.close?.();
+      } catch (error) {
+        console.error('Browser provider close failed:', error instanceof Error ? error.message : error);
+      }
       this.running = false;
     }
   }
@@ -204,6 +219,7 @@ export class AutomationEngine {
       running: this.running,
       mode: 'live' as const,
       enabled: settings.enabled,
+      browserAutomationEnabled: settings.browserAutomationEnabled,
       workbook,
       schedule: settings.schedule,
       timezone: settings.timezone,

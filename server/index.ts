@@ -33,6 +33,7 @@ function publicSettings(settings: Awaited<ReturnType<AutomationEngine['settings'
   const webhook = settings.wechatWebhookUrl;
   return {
     enabled: settings.enabled,
+    browserAutomationEnabled: settings.browserAutomationEnabled,
     schedule: settings.schedule,
     timezone: settings.timezone,
     notificationConfigured: Boolean(webhook),
@@ -127,10 +128,14 @@ app.get('/api/automation/settings', async (_req, res, next) => {
 
 app.patch('/api/automation/settings', async (req, res, next) => {
   try {
-    const patch: { enabled?: boolean; wechatWebhookUrl?: string } = {};
+    const patch: { enabled?: boolean; browserAutomationEnabled?: boolean; wechatWebhookUrl?: string } = {};
     if (req.body?.enabled !== undefined) {
       if (typeof req.body.enabled !== 'boolean') throw new Error('enabled 必须是布尔值');
       patch.enabled = req.body.enabled;
+    }
+    if (req.body?.browserAutomationEnabled !== undefined) {
+      if (typeof req.body.browserAutomationEnabled !== 'boolean') throw new Error('browserAutomationEnabled 必须是布尔值');
+      patch.browserAutomationEnabled = req.body.browserAutomationEnabled;
     }
     if (req.body?.wechatWebhookUrl !== undefined) {
       if (typeof req.body.wechatWebhookUrl !== 'string') throw new Error('企业微信 Webhook 必须是文本');
@@ -174,6 +179,11 @@ app.get('/api/automation/runs', async (_req, res, next) => {
 app.get('/api/carriers', (_req, res) => {
   res.json({ carriers: ALL_CARRIER_RULES });
 });
+
+app.use('/api/browser-evidence', express.static(path.join(engine.store.dataDirectory, 'browser-evidence'), {
+  fallthrough: false,
+  index: false,
+}));
 
 app.get('/api/backups', async (_req, res, next) => {
   try {

@@ -23,7 +23,7 @@ async function sendText(webhook: string | undefined, content: string): Promise<'
 export async function notifyWeCom(summary: RunSummary, configuredWebhook?: string): Promise<'sent' | 'skipped' | 'failed'> {
   const webhook = (configuredWebhook ?? process.env.WECHAT_WEBHOOK_URL)?.trim();
   const failed = summary.failedDetails.length
-    ? summary.failedDetails.map((detail, index) => `${index + 1}. ${detail.carrier}｜提单 ${detail.billNo}｜柜号 ${detail.containerNo || '未提供'}｜${detail.category}｜${detail.reason}`).join('\n')
+    ? summary.failedDetails.map((detail, index) => `${index + 1}. ${detail.carrier}｜提单 ${detail.billNo}｜柜号 ${detail.containerNo || '未提供'}｜${detail.category}｜${detail.reason}${detail.evidencePath ? `｜浏览器证据 ${detail.evidencePath}` : ''}`).join('\n')
     : '无';
   const content = [
     '【船期自动更新完成】',

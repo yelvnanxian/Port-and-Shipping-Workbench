@@ -4,6 +4,7 @@ import type { TrackingQuery, TrackingResult, WorkbookRecord } from './types.js';
 
 export interface TrackingProvider {
   query(input: TrackingQuery): Promise<TrackingResult>;
+  close?(): Promise<void>;
 }
 
 export class CarrierRoutingTrackingProvider implements TrackingProvider {
@@ -16,6 +17,11 @@ export class CarrierRoutingTrackingProvider implements TrackingProvider {
     const provider = this.providers.get(input.rule.code) || this.fallback;
     if (!provider) throw trackingError('解析失败', `${input.rule.name} 没有可用的真实官网查询通道`);
     return provider.query(input);
+  }
+
+  async close() {
+    const unique = new Set([...this.providers.values(), this.fallback].filter((provider): provider is TrackingProvider => Boolean(provider)));
+    await Promise.all([...unique].map((provider) => provider.close?.()));
   }
 }
 

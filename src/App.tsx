@@ -15,6 +15,7 @@ import {
   FileSpreadsheet,
   FileCheck2,
   Filter,
+  Globe2,
   LayoutDashboard,
   LoaderCircle,
   Menu,
@@ -38,6 +39,7 @@ type PageId = 'overview' | 'tracking' | 'sources' | 'automation' | 'exports' | '
 
 interface SettingsView {
   enabled: boolean;
+  browserAutomationEnabled: boolean;
   schedule: Array<{ time: string; cron: string }>;
   timezone: string;
   notificationConfigured: boolean;
@@ -538,6 +540,7 @@ interface FailedTrackingView {
   category: '订单号验证失败' | '官网拒绝访问' | '验证码或风控' | '官网接口异常' | '解析失败' | '查询超时';
   reason: string;
   sourceUrl: string;
+  evidencePath?: string;
 }
 
 interface RunView {
@@ -586,6 +589,7 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
   const [webhookInput, setWebhookInput] = useState('');
   const [webhookSaving, setWebhookSaving] = useState(false);
   const [webhookTesting, setWebhookTesting] = useState(false);
+  const [browserSaving, setBrowserSaving] = useState(false);
   const [moduleLoading, setModuleLoading] = useState(false);
 
   async function refreshModuleData() {
@@ -643,6 +647,24 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
     }
   }
 
+  async function saveBrowserAutomation(enabled: boolean) {
+    setBrowserSaving(true);
+    try {
+      const payload = await apiRequest<{ settings: SettingsView; automation: AutomationStatus }>('/api/automation/settings', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ browserAutomationEnabled: enabled }),
+      });
+      setSettingsView(payload.settings);
+      onAutomationUpdated(payload.automation);
+      onToast(enabled ? '网页模拟点击已启用' : '网页模拟点击已停用');
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '浏览器采集设置保存失败');
+    } finally {
+      setBrowserSaving(false);
+    }
+  }
+
   const pageInfo = {
     tracking: ['SHIPMENT TRACKING', '船期追踪', '按 Excel 字段查看全部单号的到港、卸船和查询进度。'],
     sources: ['DATA SOURCES', '数据源管理', '查看船司识别规则、查询方式和官网解析器接入状态。'],
@@ -669,7 +691,7 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
 
     {page === 'sources' && <section className="carrier-grid">
       {carrierRules.map((rule) => {
-        const integrationLabel = { ready: '已接入', blocked: '官网风控阻断', limited: '已请求·动态响应', error: '官网接口异常' }[rule.integration];
+        const integrationLabel = { ready: '已接入', blocked: '浏览器仍受风控', limited: '浏览器备用已接入', error: '官网接口异常' }[rule.integration];
         return <article className="carrier-rule-card" key={`${rule.code}-${rule.name}`}><div className="carrier-rule-head"><CarrierMark code={rule.code} /><div><strong>{carrierLabel(rule.code, rule.name)}</strong><span>{rule.prefix} · {rule.code}</span></div><span className={`integration-tag ${rule.integration}`}>{integrationLabel}</span></div><dl><div><dt>查询号码</dt><dd>{rule.removePrefix ? `去除 ${rule.code === 'SMLINE' ? 'SMLM' : rule.prefix} 前缀` : '保留完整提单号'}</dd></div><div><dt>查询方式</dt><dd>{rule.queryMode === 'bill-and-container' ? '提单号 + 柜号双查' : '仅提单号'}</dd></div></dl><p className="integration-message">{rule.integrationMessage}</p><a href={rule.url} target="_blank" rel="noreferrer">打开船司查询页面<ExternalLink size={13} /></a></article>;
       })}
     </section>}
@@ -678,7 +700,7 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
       <section className="schedule-grid">
         {(automation?.schedule || []).map((schedule, index) => <article className="schedule-card" key={schedule.time}><div className="schedule-index">0{index + 1}</div><div><span>每日定时任务</span><strong>{schedule.time}</strong><small>Asia/Shanghai · {schedule.cron}</small></div><span className={`enabled-pill ${automation?.enabled ? '' : 'disabled'}`}>{automation?.enabled ? '已启用' : '已停用'}</span></article>)}
       </section>
-      <section className="module-card automation-controls"><div><div className="control-icon"><FileSpreadsheet size={18} /></div><div><strong>真实官网查询</strong><span>只查询 Excel 中的真实提单号和柜号，官网异常会写入失败原因</span></div></div><label className="setting-toggle"><span>{automation?.enabled ? '定时任务已启用' : '定时任务已停用'}</span><input type="checkbox" checked={Boolean(automation?.enabled)} onChange={(event) => onToggleAutomation(event.target.checked)} /><span className="switch-slider" /></label></section>
+      <section className="module-card automation-controls"><div><div className="control-icon"><FileSpreadsheet size={18} /></div><div><strong>官方接口 + 网页模拟点击</strong><span>接口失败后使用系统 Chrome 串行查询；页面数据无法核验时保存截图并记录原因</span></div></div><label className="setting-toggle"><span>{automation?.enabled ? '定时任务已启用' : '定时任务已停用'}</span><input type="checkbox" checked={Boolean(automation?.enabled)} onChange={(event) => onToggleAutomation(event.target.checked)} /><span className="switch-slider" /></label></section>
       <RunHistory runs={runs} />
     </>}
 
@@ -690,13 +712,14 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
     {page === 'settings' && <section className="settings-grid">
       <article className="settings-card"><div className="settings-card-title"><Server size={19} /><div><strong>采集服务</strong><span>本地服务器运行状态</span></div><span className="setting-ok">运行中</span></div><div className="setting-row"><span>运行模式</span><strong>真实官网数据</strong></div><div className="setting-row"><span>支持船司规则</span><strong>{automation?.supportedCarriers || 15} 家</strong></div><div className="setting-row"><span>服务端口</span><strong>{window.location.port || '8787'}</strong></div></article>
       <article className="settings-card"><div className="settings-card-title"><Timer size={19} /><div><strong>计划任务</strong><span>仅在服务持续运行时执行</span></div><span className={automation?.enabled ? 'setting-ok' : 'setting-warn'}>{automation?.enabled ? '已启用' : '已停用'}</span></div><div className="setting-row"><span>定时任务开关</span><label className="setting-toggle"><span>{automation?.enabled ? '启用' : '停用'}</span><input type="checkbox" checked={Boolean(automation?.enabled)} onChange={(event) => onToggleAutomation(event.target.checked)} /><span className="switch-slider" /></label></div><div className="setting-row"><span>执行时区</span><strong>{automation?.timezone || 'Asia/Shanghai'}</strong></div><div className="setting-row"><span>执行时间</span><strong>{automation?.schedule.map((item) => item.time).join(' / ')}</strong></div><div className="setting-row"><span>查询范围</span><strong>未到港或未卸船</strong></div></article>
+      <article className="settings-card"><div className="settings-card-title"><Globe2 size={19} /><div><strong>网页模拟点击</strong><span>官方接口失败后的自动备用通道</span></div><span className={settingsView?.browserAutomationEnabled ? 'setting-ok' : 'setting-warn'}>{settingsView?.browserAutomationEnabled ? '已启用' : '已停用'}</span></div><div className="setting-row"><span>浏览器备用查询</span><label className="setting-toggle"><span>{settingsView?.browserAutomationEnabled ? '启用' : '停用'}</span><input type="checkbox" checked={Boolean(settingsView?.browserAutomationEnabled)} disabled={browserSaving} onChange={(event) => saveBrowserAutomation(event.target.checked)} /><span className="switch-slider" /></label></div><div className="setting-row"><span>运行方式</span><strong>系统 Chrome · 无界面</strong></div><div className="setting-row"><span>并发策略</span><strong>单线程串行，降低风控</strong></div><div className="setting-help">页面必须同时显示对应提单号/柜号和明确时间字段才会写入；验证码、空页面或无法核验的数据仍按失败处理，并保存证据截图。</div></article>
       <article className="settings-card wecom-settings"><div className="settings-card-title"><MessageSquare size={19} /><div><strong>企业微信通知</strong><span>任务完成后发送汇总</span></div><span className={settingsView?.notificationConfigured || automation?.notificationConfigured ? 'setting-ok' : 'setting-warn'}>{settingsView?.notificationConfigured || automation?.notificationConfigured ? '已配置' : '待配置'}</span></div><div className="setting-help">可直接在这里保存企业微信机器人 Webhook。密钥只保存在本机服务端，不会回显完整地址。</div><label className="setting-field"><span>机器人 Webhook</span><input type="url" value={webhookInput} onChange={(event) => setWebhookInput(event.target.value)} placeholder={settingsView?.webhookPreview || 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…'} /></label><div className="setting-preview">{settingsView?.notificationConfigured ? `当前配置：${settingsView.webhookPreview}` : '当前未配置企业微信通知'}</div><div className="setting-actions"><button className="secondary-button" onClick={testWebhook} disabled={webhookTesting || (!webhookInput.trim() && !settingsView?.notificationConfigured)}><Send size={15} />{webhookTesting ? '发送中…' : '发送测试'}</button><button className="primary-button" onClick={saveWebhook} disabled={webhookSaving}>{webhookSaving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}{webhookSaving ? '保存中…' : '保存配置'}</button></div></article>
     </section>}
   </div>;
 }
 
 function RunHistory({ runs }: { runs: RunView[] }) {
-  return <section className="module-card"><div className="module-card-header"><div><strong>任务运行记录</strong><span>最近 {runs.length} 次 · 失败记录包含船司、提单号、柜号与官网原因</span></div></div><div className="run-list">{runs.length ? runs.map((run) => <article className="run-entry" key={run.id}><div className="run-summary"><span className={`run-state ${run.failed ? 'failed' : 'success'}`}>{run.failed ? <CircleAlert size={15} /> : <Check size={15} />}</span><div className="run-main"><strong>{run.reason === 'scheduled' ? '定时更新' : '手动更新'}</strong><span>{run.id} · {fullDate(run.finishedAt)}</span></div><div className="run-stats"><span>查询 <strong>{run.total}</strong></span><span>成功 <strong>{run.success}</strong></span><span>未完成 <strong>{run.unfinished}</strong></span><span className={run.failed ? 'danger-text' : ''}>失败 <strong>{run.failed}</strong></span></div><span className={`notify-state ${run.notification}`}>{run.notification === 'sent' ? '通知已发送' : run.notification === 'failed' ? '通知失败' : '未配置通知'}</span></div>{run.failedDetails?.length ? <div className="run-failures">{run.failedDetails.map((detail) => <div key={`${run.id}-${detail.billNo}-${detail.containerNo}`}><span className="failure-category">{detail.category}</span><strong>{detail.carrier} · {detail.billNo}</strong><span>柜号：{detail.containerNo || '未提供'}</span><p>{detail.reason}</p></div>)}</div> : null}</article>) : <div className="empty-module">尚无运行记录。</div>}</div></section>;
+  return <section className="module-card"><div className="module-card-header"><div><strong>任务运行记录</strong><span>最近 {runs.length} 次 · 失败记录包含船司、提单号、柜号、官网原因和浏览器证据</span></div></div><div className="run-list">{runs.length ? runs.map((run) => <article className="run-entry" key={run.id}><div className="run-summary"><span className={`run-state ${run.failed ? 'failed' : 'success'}`}>{run.failed ? <CircleAlert size={15} /> : <Check size={15} />}</span><div className="run-main"><strong>{run.reason === 'scheduled' ? '定时更新' : '手动更新'}</strong><span>{run.id} · {fullDate(run.finishedAt)}</span></div><div className="run-stats"><span>查询 <strong>{run.total}</strong></span><span>成功 <strong>{run.success}</strong></span><span>未完成 <strong>{run.unfinished}</strong></span><span className={run.failed ? 'danger-text' : ''}>失败 <strong>{run.failed}</strong></span></div><span className={`notify-state ${run.notification}`}>{run.notification === 'sent' ? '通知已发送' : run.notification === 'failed' ? '通知失败' : '未配置通知'}</span></div>{run.failedDetails?.length ? <div className="run-failures">{run.failedDetails.map((detail) => <div key={`${run.id}-${detail.billNo}-${detail.containerNo}`}><span className="failure-category">{detail.category}</span><strong>{detail.carrier} · {detail.billNo}</strong><span>柜号：{detail.containerNo || '未提供'}</span><p>{detail.reason}</p>{detail.evidencePath ? <a className="evidence-link" href={detail.evidencePath} target="_blank" rel="noreferrer">查看浏览器失败截图<ExternalLink size={12} /></a> : null}</div>)}</div> : null}</article>) : <div className="empty-module">尚无运行记录。</div>}</div></section>;
 }
 
 function MetricCard({ title, value, suffix, trend, icon, tone, alert = false }: { title: string; value: number; suffix: string; trend: string; icon: React.ReactNode; tone: string; alert?: boolean }) {

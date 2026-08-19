@@ -61,6 +61,7 @@ export interface FailedTrackingDetail {
   category: TrackingFailureCategory;
   reason: string;
   sourceUrl: string;
+  evidencePath?: string;
 }
 
 export interface RunSummary {
@@ -81,6 +82,7 @@ export interface RunSummary {
 
 export interface AutomationSettings {
   enabled: boolean;
+  browserAutomationEnabled: boolean;
   schedule: Array<{ time: string; cron: string }>;
   timezone: 'Asia/Shanghai';
   wechatWebhookUrl: string;

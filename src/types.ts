@@ -39,6 +39,7 @@ export interface AutomationStatus {
   running: boolean;
   mode: 'live';
   enabled: boolean;
+  browserAutomationEnabled: boolean;
   workbook: null | {
     path: string;
     fileName: string;

@@ -4,18 +4,27 @@ export class TrackingProviderError extends Error {
   constructor(
     readonly category: TrackingFailureCategory,
     message: string,
+    readonly evidencePath?: string,
+    readonly sourceUrl?: string,
   ) {
     super(message);
     this.name = 'TrackingProviderError';
   }
 }
 
-export function trackingError(category: TrackingFailureCategory, message: string) {
-  return new TrackingProviderError(category, message);
+export function trackingError(category: TrackingFailureCategory, message: string, metadata: { evidencePath?: string; sourceUrl?: string } = {}) {
+  return new TrackingProviderError(category, message, metadata.evidencePath, metadata.sourceUrl);
 }
 
-export function classifyTrackingError(error: unknown): { category: TrackingFailureCategory; reason: string } {
-  if (error instanceof TrackingProviderError) return { category: error.category, reason: error.message };
+export function classifyTrackingError(error: unknown): { category: TrackingFailureCategory; reason: string; evidencePath?: string; sourceUrl?: string } {
+  if (error instanceof TrackingProviderError) {
+    return {
+      category: error.category,
+      reason: error.message,
+      ...(error.evidencePath ? { evidencePath: error.evidencePath } : {}),
+      ...(error.sourceUrl ? { sourceUrl: error.sourceUrl } : {}),
+    };
+  }
   const reason = error instanceof Error ? error.message : String(error || '未知抓取错误');
   if (/超时|timeout|aborted/i.test(reason)) return { category: '查询超时', reason };
   if (/cloudflare|captcha|验证码|验证页面|风控|HTTP\s*(403|412)\b/i.test(reason)) return { category: '验证码或风控', reason };
