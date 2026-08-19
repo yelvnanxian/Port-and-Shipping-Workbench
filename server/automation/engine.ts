@@ -10,6 +10,7 @@ import { OoclTrackingProvider } from './oocl.js';
 import { HedeTrackingProvider } from './hede.js';
 import { OfficialSiteProbeProvider } from './official-probe.js';
 import { SmLineTrackingProvider } from './smline.js';
+import { RateLimiter } from './rate-limiter.js';
 import { CarrierRoutingTrackingProvider, trackRecord, type TrackingProvider } from './tracker.js';
 import type { AutomationSettings, FailedTrackingDetail, RunSummary, TrackingTime, WorkbookRecord } from './types.js';
 import { WorkbookStore } from './workbook.js';
@@ -132,6 +133,16 @@ export class AutomationEngine {
       let success = 0;
       let unfinished = 0;
 
+      // 创建速率限制器
+      const defaultLimit = Number(process.env.RATE_LIMIT_REQUESTS_PER_MINUTE) || 10;
+      const rateLimiter = new RateLimiter(defaultLimit);
+      const rateLimitedProvider: TrackingProvider = {
+        async query(input) {
+          await rateLimiter.throttle(input.rule.code);
+          return activeProvider.query(input);
+        },
+      };
+
       for (const record of records) {
         record.progress = '查询中';
         this.store.writeRecord(sheet, headerMap, record);
@@ -142,8 +153,9 @@ export class AutomationEngine {
       const worker = async () => {
         while (cursor < records.length) {
           const record = records[cursor++];
+
           try {
-            const { rule, result } = await trackRecord(record, activeProvider);
+            const { rule, result } = await trackRecord(record, rateLimitedProvider);
             record.carrierHint = rule.name;
             record.arrivalTime = result.arrivalTimeText || result.arrivalTime;
             record.dischargeTime = result.dischargeTimeText || result.dischargeTime;

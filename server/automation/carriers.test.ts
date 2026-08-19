@@ -104,8 +104,9 @@ test('万海提单查询失败后自动使用柜号查询', async () => {
   };
   const record: WorkbookRecord = { rowNumber: 2, carrierHint: '万海', billNo: 'WHLC025G709663', containerNo: 'WHSU8284656', arrivalTime: null, dischargeTime: null, vesselState: '', lastUpdated: null, note: '', progress: '' };
   const tracked = await trackRecord(record, provider);
-  assert.deepEqual(calls, ['bill', 'container']);
-  assert.match(tracked.result.rawSummary, /提单查询失败后已自动改用柜号查询/);
+  assert.ok(calls.includes('bill'));
+  assert.ok(calls.includes('container'));
+  assert.match(tracked.result.rawSummary, /OR 规则采用成功结果/);
 });
 
 test('万海提单和柜号均失败时保留两次失败原因', async () => {
@@ -115,7 +116,15 @@ test('万海提单和柜号均失败时保留两次失败原因', async () => {
     },
   };
   const record: WorkbookRecord = { rowNumber: 2, carrierHint: '万海', billNo: 'WHLC025G709663', containerNo: 'WHSU8284656', arrivalTime: null, dischargeTime: null, vesselState: '', lastUpdated: null, note: '', progress: '' };
-  await assert.rejects(() => trackRecord(record, provider), /提单查询失败.*柜号 WHSU8284656 备用查询也失败/);
+  await assert.rejects(() => trackRecord(record, provider), /提单号与柜号查询均失败/);
+});
+
+test('万海两路都成功且数据一致时精简合并备注', async () => {
+  const result: TrackingResult = { arrivalTime: new Date('2026-08-20T09:00:00Z'), arrivalKind: 'ETA', arrived: false, dischargeTime: null, rawSummary: '万海查询成功', sourceUrl: 'https://cn.wanhai.com' };
+  const provider: TrackingProvider = { async query() { return result; } };
+  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '万海', billNo: 'WHLC025G709663', containerNo: 'WHSU8284656', arrivalTime: null, dischargeTime: null, vesselState: '', lastUpdated: null, note: '', progress: '' };
+  const tracked = await trackRecord(record, provider);
+  assert.match(tracked.result.rawSummary, /OR 双查核验一致/);
 });
 
 test('森罗按 OR 规则采用任一路成功结果', async () => {

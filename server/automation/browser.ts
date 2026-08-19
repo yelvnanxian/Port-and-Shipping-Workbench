@@ -18,6 +18,95 @@ const CHROME_PATHS = [
   '/usr/bin/chromium-browser',
 ];
 
+// User-Agent 池 - 用于反检测轮换
+const USER_AGENTS = [
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+];
+
+// 反检测启动参数
+const STEALTH_ARGS = [
+  '--disable-blink-features=AutomationControlled',
+  '--disable-dev-shm-usage',
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-features=IsolateOrigins,site-per-process',
+  '--disable-site-isolation-trials',
+  '--disable-web-security',
+  '--window-size=1920,1080',
+];
+
+// 反检测初始化脚本 - 隐藏 webdriver 特征
+const STEALTH_INIT_SCRIPT = `
+  // 隐藏 webdriver 标记
+  Object.defineProperty(navigator, 'webdriver', {
+    get: () => undefined
+  });
+
+  // 伪装 chrome 对象
+  if (!window.chrome) {
+    window.chrome = { runtime: {} };
+  }
+
+  // 伪装 plugins（headless 模式默认为空数组）
+  Object.defineProperty(navigator, 'plugins', {
+    get: () => [
+      { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+      { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+      { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+    ]
+  });
+
+  // 伪装 languages
+  Object.defineProperty(navigator, 'languages', {
+    get: () => ['zh-CN', 'zh', 'en-US', 'en']
+  });
+
+  // 伪装 Permissions API
+  if (window.navigator.permissions) {
+    const originalQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = (parameters) => (
+      parameters.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission, name: 'notifications', onchange: null, addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => true })
+        : originalQuery(parameters)
+    );
+  }
+
+  // 隐藏 CDP 特征
+  delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+  delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+  delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+`;
+
+function getRandomUserAgent(): string {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
+/**
+ * 随机延迟 - 模拟真人操作
+ */
+async function humanDelay(min = 500, max = 2000) {
+  const delay = Math.floor(Math.random() * (max - min + 1)) + min;
+  await new Promise(resolve => setTimeout(resolve, delay));
+}
+
+/**
+ * 模拟真人打字 - 逐字符输入，带随机间隔
+ */
+async function humanType(locator: Locator, text: string) {
+  await locator.click({ timeout: 5_000 }).catch(() => undefined);
+  await humanDelay(200, 500);
+  // Cookie 会话可能保留上一次查询值；先清空，避免把新号码追加到旧号码后面。
+  await locator.fill('');
+  // 使用 pressSequentially 逐字符输入，模拟真人打字节奏
+  await locator.pressSequentially(text, {
+    delay: 50 + Math.random() * 100
+  });
+}
+
 const INPUT_SELECTORS = [
   'input[type="search"]',
   'input[name*="track" i]',
@@ -228,9 +317,14 @@ export class BrowserTrackingProvider implements TrackingProvider {
 
   private async getBrowser() {
     if (!this.browser) {
+      // 允许通过环境变量控制是否使用有头模式（有头模式反检测效果更好）
+      const headless = process.env.BROWSER_HEADLESS !== 'false';
       this.browser = await chromium.launch({
-        headless: true,
+        headless,
         executablePath: await executablePath(),
+        args: STEALTH_ARGS,
+        // 忽略 HTTPS 证书错误（某些船司使用自签证书）
+        ignoreDefaultArgs: ['--enable-automation'],
       });
     }
     return this.browser;
@@ -261,12 +355,29 @@ export class BrowserTrackingProvider implements TrackingProvider {
       await fs.access(statePath);
       storageState = statePath;
     } catch { /* 首次访问还没有 Cookie 状态 */ }
+
+    // 每个船司使用不同的 User-Agent，进一步降低指纹相似度
+    const userAgent = getRandomUserAgent();
+
     const context = await browser.newContext({
       locale: 'zh-CN',
       timezoneId: 'Asia/Shanghai',
-      viewport: { width: 1440, height: 1000 },
+      viewport: { width: 1920, height: 1080 },
+      userAgent,
+      // 额外的真实浏览器请求头
+      extraHTTPHeaders: {
+        'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'no-cache',
+      },
+      // 忽略 HTTPS 错误
+      ignoreHTTPSErrors: true,
       ...(storageState ? { storageState } : {}),
     });
+
+    // 注入反检测脚本 - 所有页面加载时执行
+    await context.addInitScript(STEALTH_INIT_SCRIPT);
+
     this.contexts.set(input.rule.code, context);
     return context;
   }
@@ -306,7 +417,15 @@ export class BrowserTrackingProvider implements TrackingProvider {
       if (!normalizedReference(initialText).includes(normalizedReference(queryValue))) {
         const inputElement = await firstVisibleInput(page);
         if (inputElement) {
-          await inputElement.fill(queryValue);
+          // 真人行为模拟：环境变量控制是否启用
+          const humanBehavior = process.env.BROWSER_HUMAN_BEHAVIOR !== 'false';
+          if (humanBehavior) {
+            await humanDelay(300, 800);       // 查看页面
+            await humanType(inputElement, queryValue);  // 模拟打字
+            await humanDelay(500, 1200);      // 思考时间
+          } else {
+            await inputElement.fill(queryValue);
+          }
           await submitTrackingQuery(inputElement);
         }
       }

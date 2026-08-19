@@ -102,6 +102,9 @@ macOS 示例：
 PORT=8787
 WECHAT_WEBHOOK_URL=
 BROWSER_EXECUTABLE_PATH=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+BROWSER_HEADLESS=true
+BROWSER_HUMAN_BEHAVIOR=true
+RATE_LIMIT_REQUESTS_PER_MINUTE=10
 ```
 
 Windows 示例：
@@ -110,6 +113,9 @@ Windows 示例：
 PORT=8787
 WECHAT_WEBHOOK_URL=
 BROWSER_EXECUTABLE_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe
+BROWSER_HEADLESS=true
+BROWSER_HUMAN_BEHAVIOR=true
+RATE_LIMIT_REQUESTS_PER_MINUTE=10
 ```
 
 Ubuntu 示例：
@@ -118,10 +124,16 @@ Ubuntu 示例：
 PORT=8787
 WECHAT_WEBHOOK_URL=
 BROWSER_EXECUTABLE_PATH=/usr/bin/google-chrome
+BROWSER_HEADLESS=true
+BROWSER_HUMAN_BEHAVIOR=true
+RATE_LIMIT_REQUESTS_PER_MINUTE=10
 ```
 
-- `WECHAT_WEBHOOK_URL` 可以暂时留空，启动后在“系统设置”中保存和测试企业微信机器人地址。
+- `WECHAT_WEBHOOK_URL` 可以暂时留空，启动后在"系统设置"中保存和测试企业微信机器人地址。
 - 如果 Chrome 安装在其他位置，请将 `BROWSER_EXECUTABLE_PATH` 改成实际可执行文件路径。
+- `BROWSER_HEADLESS=false` 可切换为有头模式，反检测效果更好但需要图形界面；服务器环境保持 `true`。
+- `BROWSER_HUMAN_BEHAVIOR=true` 启用真人行为模拟（随机延迟、逐字符打字），可降低风控触发率。
+- `RATE_LIMIT_REQUESTS_PER_MINUTE=10` 控制默认每分钟请求数，风控严重的船司（万海 3 次/分钟、以星达飞 5 次/分钟）在代码中单独限流。
 - 修改 `.env` 后必须重启服务。
 - `.env`、`data/settings.json`、浏览器 Cookie 和查询截图均为本地敏感数据，禁止提交到 Git。
 
@@ -278,6 +290,10 @@ pm2 restart port-ops-workbench
 - 东方海外 OOCL 解析器：保留 `OOLU` 前缀查询，优先 ATA、其次 ETA，按指定柜号识别卸船事件，并统一换算为北京时间
 - MAEU 马士基、MEDU 地中海固定映射；马士基去前缀、完整提单号、柜号三级回退；ZIM 提单号/柜号双查合并逻辑
 - 森罗提单号按官网要求去除 `SMLM` 前缀，并与柜号分别查询；任一路成功即可采用，两路成功时合并结果
+- 万海提单号去除前缀后与柜号并行查询；任一路成功即可采用，相比旧版串行兜底，并行查询速度更快且容错性更高
+- 浏览器反指纹优化：隐藏 webdriver 特征、User-Agent 轮换、伪装 plugins 和 chrome 对象，降低风控检测率
+- 真人行为模拟：随机延迟、逐字符打字、思考时间，模拟真人操作节奏
+- 按船司分别限流：风控严重的船司（万海 3 次/分钟、以星达飞 5 次/分钟）使用更严格的速率限制
 - 最近 30 次运行历史、成功/失败统计和通知状态
 - 失败明细会记录船司、提单号、柜号、失败分类、官网具体原因和数据来源，并同步写入 Excel 备注、运行历史及企业微信通知
 - 自动备份列表与历史 `.xlsx` 文件下载
