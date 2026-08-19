@@ -3,9 +3,14 @@ import path from 'node:path';
 import { resolveCarrierRule } from './carriers.js';
 import { notifyWeCom } from './notifier.js';
 import { OoclTrackingProvider } from './oocl.js';
+import { HedeTrackingProvider } from './hede.js';
 import { CarrierRoutingTrackingProvider, DemoTrackingProvider, trackRecord, type TrackingProvider } from './tracker.js';
 import type { RunSummary, WorkbookRecord } from './types.js';
 import { WorkbookStore } from './workbook.js';
+
+function isDemoMode() {
+  return process.env.SCRAPER_MODE === 'demo';
+}
 
 function isQueryable(record: WorkbookRecord) {
   return !record.vesselState || record.vesselState === '未到港未卸船' || record.vesselState === '已到港未卸船';
@@ -26,9 +31,12 @@ export class AutomationEngine {
   }
 
   private provider(): TrackingProvider {
-    return process.env.SCRAPER_MODE === 'live'
-      ? new CarrierRoutingTrackingProvider(new Map([['OOCL', new OoclTrackingProvider()]]))
-      : new DemoTrackingProvider();
+    return isDemoMode()
+      ? new DemoTrackingProvider()
+      : new CarrierRoutingTrackingProvider(new Map<string, TrackingProvider>([
+        ['OOCL', new OoclTrackingProvider()],
+        ['HEDE', new HedeTrackingProvider()],
+      ]));
   }
 
   async listRuns(): Promise<RunSummary[]> {
@@ -121,7 +129,7 @@ export class AutomationEngine {
     const runs = await this.listRuns();
     return {
       running: this.running,
-      mode: process.env.SCRAPER_MODE === 'live' ? 'live' : 'demo',
+      mode: isDemoMode() ? 'demo' : 'live',
       workbook,
       schedule: [
         { time: '09:00', cron: '0 9 * * *' },

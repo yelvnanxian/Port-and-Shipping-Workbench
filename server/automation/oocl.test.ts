@@ -36,7 +36,7 @@ test('OOCL 响应优先 ATA 并识别卸船事件', () => {
 test('OOCL 官方错误响应不会生成假时间', () => {
   assert.throws(
     () => parseOoclTrackingResponse({ result: { responseCode: 'SVC_ERR_001', exceptionCode: 'UPSTREAM_ERROR' } }),
-    /官方查询暂不可用.*UPSTREAM_ERROR/,
+    /官方查询暂不可用.*responseCode=SVC_ERR_001.*exceptionCode=UPSTREAM_ERROR/,
   );
 });
 

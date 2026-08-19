@@ -3,6 +3,7 @@ import type { CarrierRule, WorkbookRecord } from './types.js';
 export const CARRIER_RULES: CarrierRule[] = [
   { prefix: 'ONEY', code: 'ONE', name: '海洋网联 ONE', removePrefix: true, queryMode: 'bill', url: 'https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking', integration: 'pending' },
   { prefix: 'MAEU', code: 'MAERSK', name: '马士基 Maersk', removePrefix: true, queryMode: 'bill', url: 'https://www.maersk.com/tracking/', integration: 'pending' },
+  { prefix: 'MEDU', code: 'MSC', name: '地中海 MSC', removePrefix: false, queryMode: 'bill', url: 'https://www.msccargo.cn/en/track-a-shipment?agencyPath=hkg', integration: 'pending' },
   { prefix: 'EGLV', code: 'EVERGREEN', name: '长荣 Evergreen', removePrefix: true, queryMode: 'bill', url: 'https://www.evergreen-shipping.cn/servlet/TDB1_CargoTracking.do', integration: 'pending' },
   { prefix: 'OOLU', code: 'OOCL', name: '东方海外 OOCL', removePrefix: false, queryMode: 'bill', url: 'https://www.oocl.com/schi/Pages/default.aspx', integration: 'ready' },
   { prefix: 'WHLC', code: 'WANHAI', name: '万海 Wan Hai', removePrefix: true, queryMode: 'bill', url: 'https://cn.wanhai.com/cec/#/cargotracking?q=N', integration: 'pending' },

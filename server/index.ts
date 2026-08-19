@@ -12,6 +12,7 @@ import type { CarrierSource, Shipment } from './types.js';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
+const isDemoMode = () => process.env.SCRAPER_MODE === 'demo';
 const adapters = [new DemoCarrierAdapter()];
 const engine = new AutomationEngine();
 await engine.store.initialize();
@@ -83,8 +84,9 @@ async function dashboardPayload() {
       vesselState: record.vesselState || '未到港未卸船',
       progress: record.progress || '待查询',
     }));
-    return { shipments, sources: buildSources(shipments, process.env.SCRAPER_MODE === 'live' ? 'live' : 'demo'), generatedAt: lastSync };
+    return { shipments, sources: buildSources(shipments, isDemoMode() ? 'demo' : 'live'), generatedAt: lastSync };
   }
+  if (!isDemoMode()) return { shipments: [], sources: [], generatedAt: lastSync };
   if (!demoShipments.length) await collectDemo();
   return { shipments: demoShipments, sources: buildSources(demoShipments, 'demo'), generatedAt: lastSync };
 }
@@ -140,7 +142,7 @@ app.get('/api/backups/:name', async (req, res, next) => {
 
 app.post('/api/demo/seed', async (_req, res, next) => {
   try {
-    if (process.env.SCRAPER_MODE === 'live') throw new Error('官网模式下不能加载演示数据');
+    if (!isDemoMode()) throw new Error('官网模式下不能加载演示数据；如需演示，请显式设置 SCRAPER_MODE=demo');
     const workbook = await engine.store.seedFullDemo();
     res.json({ workbook, automation: await engine.status(), dashboard: await dashboardPayload() });
   } catch (error) {
@@ -179,6 +181,8 @@ app.post('/api/sync', async (_req, res, next) => {
     if (await engine.store.exists()) {
       const run = await engine.run('manual');
       lastSync = run.finishedAt;
+    } else if (!isDemoMode()) {
+      throw new Error('官网模式下请先导入 Excel 或新增单号');
     } else {
       await collectDemo();
     }

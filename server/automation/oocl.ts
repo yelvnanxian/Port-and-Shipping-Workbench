@@ -163,8 +163,9 @@ export function parseOoclTrackingResponse(payload: unknown, expectedContainerNo 
   const response = payload as OoclResponse;
   const result = response.result;
   if (!result || result.responseCode !== 'SVC_OK_001') {
-    const detail = result?.exceptionCode || result?.responseCode || '缺少业务响应码';
-    throw new Error(`OOCL 官方查询暂不可用（${detail}）`);
+    const responseCode = result?.responseCode || '缺少业务响应码';
+    const exceptionCode = result?.exceptionCode ? `；exceptionCode=${result.exceptionCode}` : '';
+    throw new Error(`OOCL 官方查询暂不可用（responseCode=${responseCode}${exceptionCode}）`);
   }
   const record = result.searchResultRecord;
   if (!record) throw new Error('OOCL 未返回该提单的追踪记录');
