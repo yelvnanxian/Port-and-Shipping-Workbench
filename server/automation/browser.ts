@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Frame, type Locator, type Page } from 'playwright-core';
 import { classifyTrackingError, trackingError } from './errors.js';
+import { parseMaerskTrackingText } from './maersk.js';
 import { parseOoclDate } from './oocl.js';
 import { probeUrl } from './official-probe.js';
 import type { TrackingProvider } from './tracker.js';
@@ -468,7 +469,9 @@ export class BrowserTrackingProvider implements TrackingProvider {
       await waitForRenderedOutcome(page, queryValue, Math.min(this.timeoutMs, RESULT_TIMEOUT_MS));
       sourceUrl = page.url();
       const renderedText = await renderedPageText(page);
-      const result = parseRenderedTrackingText(renderedText, input);
+      const result = input.rule.code === 'MAERSK'
+        ? parseMaerskTrackingText(renderedText, input)
+        : parseRenderedTrackingText(renderedText, input);
       const evidencePath = await this.saveEvidence(page, input, 'success');
       return { ...result, sourceUrl, evidencePath };
     } catch (error) {
