@@ -1,5 +1,5 @@
 import { buildQueryBillNo, resolveCarrierRule } from './carriers.js';
-import { trackingError } from './errors.js';
+import { classifyTrackingError, trackingError } from './errors.js';
 import type { TrackingQuery, TrackingResult, WorkbookRecord } from './types.js';
 
 export interface TrackingProvider {
@@ -47,7 +47,32 @@ export async function trackRecord(record: WorkbookRecord, provider: TrackingProv
     queryBillNo: buildQueryBillNo(record.billNo, rule),
     containerNo: record.containerNo,
   };
-  const billResult = await provider.query({ ...baseQuery, queryType: 'bill' });
+  let billResult: TrackingResult;
+  try {
+    billResult = await provider.query({ ...baseQuery, queryType: 'bill' });
+  } catch (billError) {
+    if (rule.queryMode !== 'bill-then-container') throw billError;
+    if (!record.containerNo) throw trackingError('订单号验证失败', `${rule.name}提单查询失败，且没有柜号可供备用查询`);
+    try {
+      const containerResult = await provider.query({ ...baseQuery, queryType: 'container' });
+      const billFailure = classifyTrackingError(billError);
+      return {
+        rule,
+        result: {
+          ...containerResult,
+          rawSummary: `${containerResult.rawSummary}；提单查询失败后已自动改用柜号查询（${billFailure.category}：${billFailure.reason}）`,
+        },
+      };
+    } catch (containerError) {
+      const billFailure = classifyTrackingError(billError);
+      const containerFailure = classifyTrackingError(containerError);
+      throw trackingError(
+        containerFailure.category,
+        `${rule.name}提单查询失败（${billFailure.category}：${billFailure.reason}）；柜号 ${record.containerNo} 备用查询也失败（${containerFailure.category}：${containerFailure.reason}）`,
+        { evidencePath: containerFailure.evidencePath || billFailure.evidencePath, sourceUrl: containerFailure.sourceUrl || billFailure.sourceUrl },
+      );
+    }
+  }
   if (rule.queryMode !== 'bill-and-container') return { rule, result: billResult };
   if (!record.containerNo) throw new Error('以星提单需要同时提供柜号');
   const containerResult = await provider.query({ ...baseQuery, queryType: 'container' });

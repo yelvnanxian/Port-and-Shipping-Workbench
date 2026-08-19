@@ -1,5 +1,6 @@
 node_modules/
 dist/
+.DS_Store
 dist-server/
 .env
 data/current.xlsx
@@ -8,6 +9,7 @@ data/uploads/
 data/runs.json
 data/settings.json
 data/browser-evidence/
+data/browser-state/
 scripts/node_modules
 *.log
 *.tsbuildinfo

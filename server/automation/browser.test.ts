@@ -50,3 +50,22 @@ test('浏览器网关错误归类为官网接口异常', () => {
   }
   assert.equal(classifyTrackingError(captured).category, '官网接口异常');
 });
+
+test('中远多港口轨迹取最后一个目的港到港时间', () => {
+  const coscoQuery: TrackingQuery = {
+    ...query,
+    rule: { ...query.rule, prefix: 'COSU', code: 'COSCO', name: '中远海运' },
+    originalBillNo: 'COSU6503130310',
+    queryBillNo: '6503130310',
+  };
+  const result = parseRenderedTrackingText([
+    '提单号 6503130310',
+    '中转港 Ningbo',
+    '实际到港',
+    '2026-07-03 09:23:25',
+    '目的港 Houston',
+    '实际到港',
+    '2026-08-06 11:07:44',
+  ].join('\n'), coscoQuery);
+  assert.equal(result.arrivalTime?.toISOString(), '2026-08-06T03:07:44.000Z');
+});

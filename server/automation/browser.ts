@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { chromium, type Browser, type Page } from 'playwright-core';
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
 import { classifyTrackingError, trackingError } from './errors.js';
 import { parseOoclDate } from './oocl.js';
 import { probeUrl } from './official-probe.js';
@@ -8,6 +8,7 @@ import type { TrackingProvider } from './tracker.js';
 import type { ArrivalKind, TrackingQuery, TrackingResult } from './types.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const RESULT_TIMEOUT_MS = 20_000;
 const CHROME_PATHS = [
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
@@ -54,8 +55,10 @@ function extractDate(source: string) {
   return null;
 }
 
-function findLabeledDate(lines: string[], label: RegExp, excluded?: RegExp) {
-  for (let index = 0; index < lines.length; index += 1) {
+function findLabeledDate(lines: string[], label: RegExp, excluded?: RegExp, preferLast = false) {
+  const indexes = Array.from({ length: lines.length }, (_, index) => index);
+  if (preferLast) indexes.reverse();
+  for (const index of indexes) {
     if (!label.test(lines[index])) continue;
     const context = lines.slice(index, index + 3).join(' ');
     if (excluded?.test(context)) continue;
@@ -84,8 +87,9 @@ export function parseRenderedTrackingText(text: string, input: TrackingQuery): T
   }
 
   const lines = compactText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const actualArrival = findLabeledDate(lines, /\bATA\b|actual(?: time of)? arrival|actual arrival|实际到港|实际抵达/i, /estimated|expected|预计/i);
-  const estimatedArrival = findLabeledDate(lines, /\bETA\b|estimated(?: time of)? arrival|expected arrival|预计到港|预计抵达/i);
+  const preferDestinationEvent = input.rule.code === 'COSCO';
+  const actualArrival = findLabeledDate(lines, /\bATA\b|actual(?: time of)? arrival|actual arrival|实际到港|实际抵达/i, /estimated|expected|预计/i, preferDestinationEvent);
+  const estimatedArrival = findLabeledDate(lines, /\bETA\b|estimated(?: time of)? arrival|expected arrival|预计到港|预计抵达/i, undefined, preferDestinationEvent);
   const discharge = findLabeledDate(lines, /actual[^\n]{0,30}discharg|container discharged|discharged|discharge completed|卸船完成|实际卸船|卸载完成|卸船时间/i, /estimated|expected|planned|预计|计划/i);
   const arrivalTime = actualArrival || estimatedArrival;
   if (!arrivalTime && !discharge) {
@@ -118,23 +122,48 @@ async function executablePath() {
 }
 
 async function firstVisibleInput(page: Page) {
-  for (const selector of INPUT_SELECTORS) {
-    const locator = page.locator(selector);
-    for (let index = 0; index < await locator.count(); index += 1) {
-      const candidate = locator.nth(index);
-      if (await candidate.isVisible().catch(() => false)) return candidate;
+  for (const frame of page.frames()) {
+    for (const selector of INPUT_SELECTORS) {
+      const locator = frame.locator(selector);
+      for (let index = 0; index < await locator.count(); index += 1) {
+        const candidate = locator.nth(index);
+        if (await candidate.isVisible().catch(() => false)) return candidate;
+      }
     }
   }
   return null;
 }
 
-async function dismissCookieDialog(page: Page) {
-  const button = page.getByRole('button', { name: /accept all|allow all|同意全部|全部接受|接受所有/i }).first();
-  if (await button.isVisible().catch(() => false)) await button.click({ timeout: 3_000 }).catch(() => undefined);
+async function renderedPageText(page: Page) {
+  const texts = await Promise.all(page.frames().map((frame) => frame.locator('body').innerText().catch(() => '')));
+  return texts.filter(Boolean).join('\n');
+}
+
+async function dismissCookieDialog(page: Page, waitMs = 0) {
+  const label = /accept all|allow all|同意全部|全部接受|接受所有|允许全部/i;
+  const button = page.locator('button, a, [role="button"]').filter({ hasText: label }).first();
+  if (waitMs > 0) await button.waitFor({ state: 'visible', timeout: waitMs }).catch(() => undefined);
+  if (await button.isVisible().catch(() => false)) {
+    await button.click({ timeout: 3_000 }).catch(() => undefined);
+    return true;
+  }
+  return false;
+}
+
+async function waitForRenderedOutcome(page: Page, queryValue: string, timeout = RESULT_TIMEOUT_MS) {
+  const deadline = Date.now() + timeout;
+  do {
+    const text = await renderedPageText(page);
+    if (/cloudflare|verify you are human|security check|attention required|access denied|captcha|验证码|安全验证|被阻止|no result|not found|no shipment|invalid (?:booking|bill|cargo|tracking)|未找到|查无|无记录|不存在|bad gateway|service unavailable|internal server error|gateway timeout/i.test(text)) return;
+    if (normalizedReference(text).includes(normalizedReference(queryValue))
+      && /\bATA\b|\bETA\b|actual(?: time of)? arrival|estimated(?: time of)? arrival|expected arrival|实际到港|预计到港|实际抵达|预计抵达|discharg|卸船|卸载完成/i.test(text)) return;
+    await page.waitForTimeout(250);
+  } while (Date.now() < deadline);
 }
 
 export class BrowserTrackingProvider implements TrackingProvider {
   private browser: Browser | null = null;
+  private contexts = new Map<string, BrowserContext>();
   private queue: Promise<void> = Promise.resolve();
   private closing: Promise<void> | null = null;
 
@@ -167,15 +196,40 @@ export class BrowserTrackingProvider implements TrackingProvider {
     return `/api/browser-evidence/${encodeURIComponent(fileName)}`;
   }
 
-  private async execute(input: TrackingQuery): Promise<TrackingResult> {
-    const queryValue = input.queryType === 'container' ? input.containerNo.trim().toUpperCase() : input.queryBillNo.trim().toUpperCase();
-    if (!queryValue) throw trackingError('订单号验证失败', `${input.rule.name}${input.queryType === 'container' ? '柜号' : '提单号'}为空`);
-    const browser = await this.getBrowser();
+  private statePath(input: TrackingQuery) {
+    return path.join(path.dirname(this.evidenceDirectory), 'browser-state', `${input.rule.code}.json`);
+  }
+
+  private async getContext(browser: Browser, input: TrackingQuery): Promise<BrowserContext> {
+    const existing = this.contexts.get(input.rule.code);
+    if (existing) return existing;
+    const statePath = this.statePath(input);
+    let storageState: string | undefined;
+    try {
+      await fs.access(statePath);
+      storageState = statePath;
+    } catch { /* 首次访问还没有 Cookie 状态 */ }
     const context = await browser.newContext({
       locale: 'zh-CN',
       timezoneId: 'Asia/Shanghai',
       viewport: { width: 1440, height: 1000 },
+      ...(storageState ? { storageState } : {}),
     });
+    this.contexts.set(input.rule.code, context);
+    return context;
+  }
+
+  private async saveState(context: BrowserContext, input: TrackingQuery) {
+    const statePath = this.statePath(input);
+    await fs.mkdir(path.dirname(statePath), { recursive: true });
+    await context.storageState({ path: statePath });
+  }
+
+  private async execute(input: TrackingQuery): Promise<TrackingResult> {
+    const queryValue = input.queryType === 'container' ? input.containerNo.trim().toUpperCase() : input.queryBillNo.trim().toUpperCase();
+    if (!queryValue) throw trackingError('订单号验证失败', `${input.rule.name}${input.queryType === 'container' ? '柜号' : '提单号'}为空`);
+    const browser = await this.getBrowser();
+    const context = await this.getContext(browser, input);
     const page = await context.newPage();
     page.setDefaultTimeout(this.timeoutMs);
     let sourceUrl = input.rule.url;
@@ -188,9 +242,14 @@ export class BrowserTrackingProvider implements TrackingProvider {
         else throw error;
       }
       sourceUrl = page.url();
-      await dismissCookieDialog(page);
-      await page.waitForTimeout(3_000);
-      const initialText = await page.locator('body').innerText().catch(() => '');
+      const cookies = await context.cookies(sourceUrl);
+      let acceptedCookies = await dismissCookieDialog(page);
+      await waitForRenderedOutcome(page, queryValue, 1_500);
+      if (!acceptedCookies && input.rule.code === 'COSCO' && !cookies.some((cookie) => cookie.name === 'cookieClause')) {
+        acceptedCookies = await dismissCookieDialog(page, 2_000);
+      }
+      if (acceptedCookies) await this.saveState(context, input);
+      const initialText = await renderedPageText(page);
       if (!normalizedReference(initialText).includes(normalizedReference(queryValue))) {
         const inputElement = await firstVisibleInput(page);
         if (inputElement) {
@@ -198,12 +257,11 @@ export class BrowserTrackingProvider implements TrackingProvider {
           const submit = page.getByRole('button', { name: /track|search|submit|查询|追踪/i }).first();
           if (await submit.isVisible().catch(() => false)) await submit.click();
           else await inputElement.press('Enter');
-          await page.waitForTimeout(5_000);
         }
       }
-      await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => undefined);
+      await waitForRenderedOutcome(page, queryValue, Math.min(this.timeoutMs, RESULT_TIMEOUT_MS));
       sourceUrl = page.url();
-      const renderedText = await page.locator('body').innerText().catch(() => '');
+      const renderedText = await renderedPageText(page);
       const result = parseRenderedTrackingText(renderedText, input);
       return { ...result, sourceUrl };
     } catch (error) {
@@ -212,7 +270,8 @@ export class BrowserTrackingProvider implements TrackingProvider {
       const evidencePath = await this.saveEvidence(page, input);
       throw trackingError(failure.category, `${failure.reason}${navigationWarning ? `；${navigationWarning}` : ''}`, { evidencePath, sourceUrl });
     } finally {
-      await context.close();
+      await this.saveState(context, input).catch(() => undefined);
+      await page.close();
     }
   }
 
@@ -220,6 +279,7 @@ export class BrowserTrackingProvider implements TrackingProvider {
     if (!this.closing) {
       this.closing = (async () => {
         await this.queue;
+        this.contexts.clear();
         const browser = this.browser;
         this.browser = null;
         await browser?.close();
