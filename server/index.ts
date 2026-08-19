@@ -225,6 +225,15 @@ app.post('/api/backups/:name/restore', async (req, res, next) => {
   }
 });
 
+app.delete('/api/backups/:name', async (req, res, next) => {
+  try {
+    await engine.store.deleteBackup(req.params.name);
+    res.json({ ok: true, backups: await engine.store.listBackups() });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/intake', async (req, res, next) => {
   try {
     const entries = Array.isArray(req.body?.entries) ? req.body.entries : [];

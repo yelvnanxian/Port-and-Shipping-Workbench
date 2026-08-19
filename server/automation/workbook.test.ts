@@ -40,6 +40,27 @@ test('restoring a backup replaces the workbook and creates a safety backup', asy
   }
 });
 
+test('deleting a backup also removes its metadata and rejects unsafe names', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-delete-backup-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([{ billNo: 'OOLU2171963250', containerNo: 'OOCU7496887' }]);
+    const backup = await store.backup('测试删除');
+    assert.ok(backup);
+    const name = path.basename(backup!);
+    await fs.access(`${backup}.json`);
+
+    await store.deleteBackup(name);
+
+    assert.equal((await store.listBackups()).length, 0);
+    await assert.rejects(() => fs.access(backup!));
+    await assert.rejects(() => fs.access(`${backup}.json`));
+    await assert.rejects(() => store.deleteBackup('../current.xlsx'), /备份文件名不合法/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('writing results preserves empty cells and makes failure details readable', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-layout-'));
   try {

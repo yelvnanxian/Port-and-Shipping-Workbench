@@ -12,7 +12,7 @@ import { OfficialSiteProbeProvider } from './official-probe.js';
 import { SmLineTrackingProvider } from './smline.js';
 import { RateLimiter } from './rate-limiter.js';
 import { CarrierRoutingTrackingProvider, trackRecord, type TrackingProvider } from './tracker.js';
-import type { AutomationSettings, FailedTrackingDetail, RunSummary, TrackingTime, WorkbookRecord } from './types.js';
+import type { AutomationSettings, FailedTrackingDetail, RunProgress, RunSummary, TrackingTime, WorkbookRecord } from './types.js';
 import { WorkbookStore } from './workbook.js';
 
 function isQueryable(record: WorkbookRecord) {
@@ -37,6 +37,7 @@ export function evidencePathFromNote(note: string) {
 
 export class AutomationEngine {
   private running = false;
+  private currentRun: RunProgress | null = null;
   readonly store: WorkbookStore;
   readonly runLogPath: string;
   readonly settingsPath: string;
@@ -119,6 +120,18 @@ export class AutomationEngine {
     this.running = true;
     const startedAt = new Date();
     const id = `RUN-${startedAt.toISOString().replace(/\D/g, '').slice(0, 14)}`;
+    this.currentRun = {
+      id,
+      reason,
+      phase: 'preparing',
+      total: 0,
+      completed: 0,
+      success: 0,
+      failed: 0,
+      skipped: 0,
+      currentBills: [],
+      startedAt: startedAt.toISOString(),
+    };
     let backupPath: string | null = null;
     let provider: TrackingProvider | null = null;
     try {
@@ -126,12 +139,37 @@ export class AutomationEngine {
       const { workbook, sheet, headerMap } = await this.store.open();
       const allRecords = this.store.readRecords(sheet, headerMap);
       const records = allRecords.filter(isQueryable);
+      this.currentRun.total = records.length;
+      this.currentRun.skipped = allRecords.length - records.length;
       backupPath = await this.store.backup(`${reason === 'manual' ? '手动' : '定时'}更新前备份`);
       provider = this.provider(settings);
       const activeProvider = provider;
       const failedDetails: FailedTrackingDetail[] = [];
       let success = 0;
       let unfinished = 0;
+
+      if (!records.length) {
+        const finishedAt = new Date();
+        const summary: RunSummary = {
+          id,
+          reason,
+          startedAt: startedAt.toISOString(),
+          finishedAt: finishedAt.toISOString(),
+          total: 0,
+          success: 0,
+          unfinished: 0,
+          failed: 0,
+          skipped: allRecords.length,
+          failedBills: [],
+          failedDetails: [],
+          backupPath,
+          notification: 'skipped',
+        };
+        this.currentRun.phase = 'notifying';
+        summary.notification = await notifyWeCom(summary, settings.wechatWebhookUrl);
+        await this.saveRun(summary);
+        return summary;
+      }
 
       // 创建速率限制器
       const defaultLimit = Number(process.env.RATE_LIMIT_REQUESTS_PER_MINUTE) || 10;
@@ -148,11 +186,18 @@ export class AutomationEngine {
         this.store.writeRecord(sheet, headerMap, record);
       }
       await this.store.save(workbook);
+      this.currentRun.phase = 'querying';
 
       let cursor = 0;
       const worker = async () => {
         while (cursor < records.length) {
           const record = records[cursor++];
+          let carrier = record.carrierHint || '未知船司';
+          try {
+            carrier = resolveCarrierRule(record).name;
+          } catch { /* 前缀错误会在查询结果中记录 */ }
+          const activeBill = { billNo: record.billNo, carrier };
+          this.currentRun?.currentBills.push(activeBill);
 
           try {
             const { rule, result } = await trackRecord(record, rateLimitedProvider);
@@ -197,9 +242,16 @@ export class AutomationEngine {
             failedDetails.push(detail);
           }
           this.store.writeRecord(sheet, headerMap, record);
+          if (this.currentRun) {
+            this.currentRun.completed += 1;
+            this.currentRun.success = success;
+            this.currentRun.failed = failedDetails.length;
+            this.currentRun.currentBills = this.currentRun.currentBills.filter((item) => item !== activeBill);
+          }
         }
       };
       await Promise.all(Array.from({ length: Math.min(5, records.length) }, () => worker()));
+      this.currentRun.phase = 'saving';
       await this.store.save(workbook);
 
       const finishedAt = new Date();
@@ -218,6 +270,7 @@ export class AutomationEngine {
         backupPath,
         notification: 'skipped',
       };
+      this.currentRun.phase = 'notifying';
       summary.notification = await notifyWeCom(summary, settings.wechatWebhookUrl);
       await this.saveRun(summary);
       return summary;
@@ -228,6 +281,7 @@ export class AutomationEngine {
         console.error('Browser provider close failed:', error instanceof Error ? error.message : error);
       }
       this.running = false;
+      this.currentRun = null;
     }
   }
 
@@ -237,6 +291,7 @@ export class AutomationEngine {
     const settings = await this.settings();
     return {
       running: this.running,
+      currentRun: this.currentRun ? { ...this.currentRun, currentBills: [...this.currentRun.currentBills] } : null,
       mode: 'live' as const,
       enabled: settings.enabled,
       browserAutomationEnabled: settings.browserAutomationEnabled,

@@ -81,6 +81,19 @@ export interface RunSummary {
   notification: 'sent' | 'skipped' | 'failed';
 }
 
+export interface RunProgress {
+  id: string;
+  reason: RunSummary['reason'];
+  phase: 'preparing' | 'querying' | 'saving' | 'notifying';
+  total: number;
+  completed: number;
+  success: number;
+  failed: number;
+  skipped: number;
+  currentBills: Array<{ billNo: string; carrier: string }>;
+  startedAt: string;
+}
+
 export interface AutomationSettings {
   enabled: boolean;
   browserAutomationEnabled: boolean;

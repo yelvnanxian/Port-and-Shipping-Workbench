@@ -30,6 +30,7 @@ import {
   Ship,
   SlidersHorizontal,
   Timer,
+  Trash2,
   Upload,
   X,
 } from 'lucide-react';
@@ -177,6 +178,7 @@ export default function App() {
   const [automation, setAutomation] = useState<AutomationStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const [pollingRun, setPollingRun] = useState(false);
   const [query, setQuery] = useState('');
   const [carrier, setCarrier] = useState('全部船司');
   const [status, setStatus] = useState<(typeof statusOptions)[number]>('全部状态');
@@ -199,6 +201,7 @@ export default function App() {
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const moreFilterRef = useRef<HTMLDivElement>(null);
   const uploadInput = useRef<HTMLInputElement>(null);
+  const runRequestPending = useRef(false);
 
   function navigate(page: PageId) {
     setActivePage(page);
@@ -228,6 +231,39 @@ export default function App() {
   useEffect(() => {
     Promise.all([load(), loadAutomation()]).catch((error) => setToast(error.message)).finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (automation?.running) {
+      setSyncing(true);
+      setPollingRun(true);
+    }
+  }, [automation?.running]);
+
+  useEffect(() => {
+    if (!pollingRun) return;
+    let disposed = false;
+    const poll = async () => {
+      try {
+        const next = await apiRequest<AutomationStatus>('/api/automation');
+        if (!disposed) {
+          setAutomation(next);
+          if (!next.running && !runRequestPending.current) {
+            setSyncing(false);
+            setPollingRun(false);
+            await Promise.all([load(), loadAutomation()]).catch(() => undefined);
+          }
+        }
+      } catch {
+        // The run request remains authoritative; a transient polling error should not stop it.
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 1000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [pollingRun]);
 
   const filtered = useMemo(() => {
     if (!data) return [];
@@ -271,15 +307,19 @@ export default function App() {
 
   async function handleSync() {
     setSyncing(true);
+    setPollingRun(true);
+    runRequestPending.current = true;
     try {
       if (!automation?.workbook) throw new Error('请先导入 Excel 或新增单号');
-      const payload = await apiRequest<{ run: { total: number; failed: number }; dashboard: DashboardData; automation: AutomationStatus }>('/api/automation/run', { method: 'POST' });
+      const payload = await apiRequest<{ run: { total: number; success: number; failed: number; skipped: number }; dashboard: DashboardData; automation: AutomationStatus }>('/api/automation/run', { method: 'POST' });
       setData(payload.dashboard);
       setAutomation(payload.automation);
-      setToast(`已完成 ${payload.run.total} 条查询，失败 ${payload.run.failed} 条`);
+      setToast(`本次查询 ${payload.run.total} 条：成功 ${payload.run.success} 条，失败 ${payload.run.failed} 条，跳过 ${payload.run.skipped} 条`);
     } catch (error) {
       setToast(error instanceof Error ? error.message : '同步失败');
     } finally {
+      runRequestPending.current = false;
+      setPollingRun(false);
       setSyncing(false);
     }
   }
@@ -315,6 +355,9 @@ export default function App() {
     setIntakeSaving(true);
     try {
       const payload = await apiRequest<{ added: unknown[]; duplicates: unknown[] }>('/api/intake', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ entries }) });
+      setSyncing(true);
+      setPollingRun(true);
+      runRequestPending.current = true;
       const runPayload = await apiRequest<{ run: { success: number }; dashboard: DashboardData; automation: AutomationStatus }>('/api/automation/run', { method: 'POST' });
       setData(runPayload.dashboard);
       setAutomation(runPayload.automation);
@@ -324,6 +367,9 @@ export default function App() {
     } catch (error) {
       setToast(error instanceof Error ? error.message : '单号添加失败');
     } finally {
+      runRequestPending.current = false;
+      setPollingRun(false);
+      setSyncing(false);
       setIntakeSaving(false);
     }
   }
@@ -398,6 +444,7 @@ export default function App() {
 
   const allSelected = visibleRows.length > 0 && visibleRows.every((item) => selected.has(item.id));
   const carriers = Array.from(new Set(data?.shipments.map((item) => item.carrierCode) || []));
+  const successfulSources = data?.sources.filter((source) => source.status === 'online').length || 0;
 
   return (
     <div className="app-shell">
@@ -431,6 +478,7 @@ export default function App() {
         </header>
 
         <div className="content">
+          {(syncing || automation?.running) && automation?.currentRun && <SyncProgress progress={automation.currentRun} />}
           <div className={activePage === 'overview' ? '' : 'hidden-page'}>
           <section className="page-heading">
             <div><p className="eyebrow">OPERATIONS OVERVIEW</p><h1>运营总览</h1><p>集中追踪船期、靠泊与卸船动态，及时掌握异常变化。</p></div>
@@ -464,7 +512,7 @@ export default function App() {
           </section>
 
           <section className="source-strip">
-            <div className="source-title"><div className="source-icon"><Database size={19} /></div><div><strong>数据源状态</strong><span>真实官网解析器模式 · 未完成联调的官网会明确记录失败原因</span></div></div>
+            <div className="source-title"><div className="source-icon"><Database size={19} /></div><div><strong>数据源状态</strong><span>当前 Excel 累计 {successfulSources} 家成功{automation?.lastRun ? ` · 最近一次：查询 ${automation.lastRun.total} 条，成功 ${automation.lastRun.success}、失败 ${automation.lastRun.failed}、跳过 ${automation.lastRun.skipped}` : ''}</span></div></div>
             <div className="source-list">
               {(data?.sources || []).map((source) => <SourcePill key={source.id} source={source} />)}
             </div>
@@ -616,6 +664,7 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
   const [webhookSaving, setWebhookSaving] = useState(false);
   const [webhookTesting, setWebhookTesting] = useState(false);
   const [browserSaving, setBrowserSaving] = useState(false);
+  const [deletingBackup, setDeletingBackup] = useState('');
   const [moduleLoading, setModuleLoading] = useState(false);
 
   async function refreshModuleData() {
@@ -691,6 +740,20 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
     }
   }
 
+  async function deleteBackup(name: string) {
+    if (!window.confirm(`确认永久删除备份 ${name}？删除后无法恢复。`)) return;
+    setDeletingBackup(name);
+    try {
+      const payload = await apiRequest<{ backups: BackupView[] }>(`/api/backups/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      setBackups(payload.backups || []);
+      onToast('备份文件已删除');
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '删除备份失败');
+    } finally {
+      setDeletingBackup('');
+    }
+  }
+
   const pageInfo = {
     tracking: ['SHIPMENT TRACKING', '船期追踪', '按 Excel 字段查看全部单号的到港、卸船和查询进度。'],
     sources: ['DATA SOURCES', '数据源管理', '查看船司识别规则、查询方式和官网解析器接入状态。'],
@@ -732,7 +795,7 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
 
     {page === 'exports' && <>
       <section className="export-summary-grid"><article><FileCheck2 size={20} /><div><span>当前工作簿</span><strong>{automation?.workbook?.records || 0} 条记录</strong><small>{automation?.workbook ? fullDate(automation.workbook.modifiedAt) : '尚未导入'}</small></div><a href={automation?.workbook ? '/api/workbooks/current' : '#'} onClick={(event) => { if (!automation?.workbook) { event.preventDefault(); onToast('请先导入 Excel 或新增单号'); } }}>下载<Download size={14} /></a></article><article><Archive size={20} /><div><span>备份文件</span><strong>{backups.length} 个文件</strong><small>更新前自动生成，也可手动创建</small></div><button className="secondary-button backup-create" onClick={async () => { await onCreateBackup(); await refreshModuleData(); }} disabled={!automation?.workbook}>创建备份</button></article><article><FileSpreadsheet size={20} /><div><span>运行记录</span><strong>{runs.length} 次</strong><small>最多保留最近 30 次</small></div></article></section>
-      <section className="module-card"><div className="module-card-header"><div><strong>备份文件</strong><span>按时间倒序排列，恢复前会再次自动备份当前文件</span></div></div><div className="backup-list">{backups.length ? backups.map((backup) => <div key={backup.name}><div className="backup-icon"><Archive size={17} /></div><div><strong>{backup.name}</strong><span>{backup.reason} · {(backup.size / 1024).toFixed(1)} KB · {fullDate(backup.createdAt)}</span></div><div className="backup-actions"><a href={`/api/backups/${encodeURIComponent(backup.name)}`}><Download size={15} />下载</a><button className="danger-button" onClick={async () => { await onRestoreBackup(backup.name); await refreshModuleData(); }} disabled={!automation?.workbook}>恢复</button></div></div>) : <div className="empty-module">尚无备份文件，执行一次更新或手动创建备份后会显示。</div>}</div></section>
+      <section className="module-card"><div className="module-card-header"><div><strong>备份文件</strong><span>按时间倒序排列；恢复会先备份当前文件，删除后不可恢复</span></div></div><div className="backup-list">{backups.length ? backups.map((backup) => <div key={backup.name}><div className="backup-icon"><Archive size={17} /></div><div><strong>{backup.name}</strong><span>{backup.reason} · {(backup.size / 1024).toFixed(1)} KB · {fullDate(backup.createdAt)}</span></div><div className="backup-actions"><a href={`/api/backups/${encodeURIComponent(backup.name)}`}><Download size={15} />下载</a><button className="restore-button" onClick={async () => { await onRestoreBackup(backup.name); await refreshModuleData(); }} disabled={!automation?.workbook || Boolean(deletingBackup)}>恢复</button><button className="danger-button" onClick={() => deleteBackup(backup.name)} disabled={Boolean(deletingBackup)}><Trash2 size={13} />{deletingBackup === backup.name ? '删除中…' : '删除'}</button></div></div>) : <div className="empty-module">尚无备份文件，执行一次更新或手动创建备份后会显示。</div>}</div></section>
     </>}
 
     {page === 'settings' && <section className="settings-grid">
@@ -754,6 +817,21 @@ function MetricCard({ title, value, suffix, trend, icon, tone, alert = false }: 
 
 function SourcePill({ source }: { source: CarrierSource }) {
   return <div className="source-pill"><span className="source-color" style={{ background: source.color }} /><div><strong>{carrierLabel(source.code, source.name)}</strong><span>{source.recordCount} 条 · {source.status === 'online' ? '真实查询成功' : source.status === 'warning' ? '官网返回异常' : '等待本次真实查询'}</span></div><span className={`source-status ${source.status}`} /></div>;
+}
+
+function SyncProgress({ progress }: { progress: NonNullable<AutomationStatus['currentRun']> }) {
+  const percent = progress.total ? Math.min(100, Math.round((progress.completed / progress.total) * 100)) : 0;
+  const phaseLabel = {
+    preparing: '准备查询数据',
+    querying: '正在查询船司官网',
+    saving: '正在保存 Excel',
+    notifying: '正在发送企业微信通知',
+  }[progress.phase];
+  return <section className="sync-progress" aria-live="polite">
+    <div className="sync-progress-head"><div><strong>{phaseLabel}</strong><span>任务 {progress.id} · {progress.completed} / {progress.total} 条已处理</span></div><strong>{percent}%</strong></div>
+    <div className="sync-progress-track"><span style={{ width: `${percent}%` }} /></div>
+    <div className="sync-progress-foot"><span>成功 {progress.success}</span><span>失败 {progress.failed}</span><span>跳过 {progress.skipped}</span><span className="sync-current">{progress.currentBills.length ? `当前：${progress.currentBills.slice(0, 3).map((item) => `${item.carrier} ${item.billNo}`).join('、')}${progress.currentBills.length > 3 ? '…' : ''}` : '正在切换下一条'}</span></div>
+  </section>;
 }
 
 function DetailItem({ label, value }: { label: string; value: React.ReactNode }) {

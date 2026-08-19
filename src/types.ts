@@ -40,6 +40,18 @@ export interface DashboardData {
 
 export interface AutomationStatus {
   running: boolean;
+  currentRun: null | {
+    id: string;
+    reason: 'manual' | 'scheduled';
+    phase: 'preparing' | 'querying' | 'saving' | 'notifying';
+    total: number;
+    completed: number;
+    success: number;
+    failed: number;
+    skipped: number;
+    currentBills: Array<{ billNo: string; carrier: string }>;
+    startedAt: string;
+  };
   mode: 'live';
   enabled: boolean;
   browserAutomationEnabled: boolean;
@@ -62,6 +74,7 @@ export interface AutomationStatus {
     success: number;
     unfinished: number;
     failed: number;
+    skipped: number;
     notification: 'sent' | 'skipped' | 'failed';
   };
 }

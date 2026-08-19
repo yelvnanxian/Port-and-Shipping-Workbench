@@ -229,6 +229,13 @@ export class WorkbookStore {
     return this.metadata();
   }
 
+  async deleteBackup(name: string) {
+    const backupPath = this.backupPath(name);
+    await fs.access(backupPath);
+    await fs.rm(backupPath);
+    await fs.rm(`${backupPath}.json`, { force: true });
+  }
+
   async appendRecords(entries: Array<{ billNo: string; containerNo?: string; carrierHint?: string }>) {
     await this.initialize();
     let workbook: ExcelJS.Workbook;
