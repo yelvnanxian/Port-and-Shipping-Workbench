@@ -18,6 +18,7 @@ export interface Shipment {
   progress?: '待查询' | '查询中' | '已完成' | '失败';
   sourceUrl?: string;
   evidencePath?: string;
+  verificationNo?: string;
 }
 
 export interface CarrierSource {

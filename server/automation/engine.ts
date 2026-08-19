@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { resolveCarrierRule } from './carriers.js';
+import { buildQueryBillNo, resolveCarrierRule } from './carriers.js';
 import { BrowserTrackingProvider, FallbackTrackingProvider } from './browser.js';
 import { classifyTrackingError } from './errors.js';
 import { EvergreenTrackingProvider } from './evergreen.js';
@@ -244,11 +244,15 @@ export class AutomationEngine {
       let carrier = record.carrierHint || '未知船司';
       let carrierCode = 'UNKNOWN';
       let sourceUrl = '';
+      let verificationNo = record.billNo;
       try {
         const rule = resolveCarrierRule(record);
         carrier = rule.name;
         carrierCode = rule.code;
         sourceUrl = rule.url;
+        verificationNo = rule.code === 'SMLINE' && record.containerNo && record.note.includes('本次通道=柜号')
+          ? record.containerNo
+          : buildQueryBillNo(record.billNo, rule);
       } catch { /* 错误展示在 Excel 备注中 */ }
       return {
         record: {
@@ -260,6 +264,7 @@ export class AutomationEngine {
         carrierCode,
         sourceUrl: sourceUrlFromNote(record.note) || sourceUrl,
         evidencePath: evidencePathFromNote(record.note),
+        verificationNo,
       };
     });
   }

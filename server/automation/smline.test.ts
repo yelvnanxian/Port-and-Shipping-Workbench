@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseSmLineTrackingResponses } from './smline.js';
+import { SmLineTrackingProvider, parseSmLineTrackingResponses } from './smline.js';
+import type { TrackingQuery } from './types.js';
 
 const search = {
   TRANS_RESULT_KEY: 'S',
@@ -23,7 +24,7 @@ test('森罗只把实际事件写成到港或卸船', () => {
       { eventDt: '2026-08-22 08:30', actTpCd: 'E', statusNm: 'Unloaded at Port of Discharging' },
     ],
   };
-  const result = parseSmLineTrackingResponses(search, route, events, 'SMCU1312616');
+  const result = parseSmLineTrackingResponses(search, route, events, 'SMCU1312616', 'SMLMNJBD6A755700');
   assert.equal(result.arrivalKind, 'ETA');
   assert.equal(result.arrived, false);
   assert.equal(result.dischargeTime, null);
@@ -39,15 +40,63 @@ test('森罗发现实际卸船事件后标记为已卸船', () => {
       { eventDt: '2026-08-20 21:30', actTpCd: 'A', statusNm: 'Unloaded at Port of Discharging' },
     ],
   };
-  const result = parseSmLineTrackingResponses(search, route, events, 'SMCU1312616');
+  const result = parseSmLineTrackingResponses(search, route, events, 'SMCU1312616', 'SMLMNJBD6A755700');
   assert.equal(result.arrivalKind, 'ATA');
   assert.equal(result.arrived, true);
   assert.equal(result.dischargeTime?.toISOString(), '2026-08-20T13:30:00.000Z');
 });
 
+test('森罗返回其他提单时拒绝写入', () => {
+  assert.throws(
+    () => parseSmLineTrackingResponses(search, route, { TRANS_RESULT_KEY: 'S', list: [] }, 'SMCU1312616', 'SMLMOTHER123456'),
+    /提单号与查询号不一致/,
+  );
+});
+
+test('森罗忽略不属于当前追踪流水号的事件', () => {
+  const events = {
+    TRANS_RESULT_KEY: 'S',
+    count: '1',
+    list: [{ copNo: 'OTHER-COP', eventDt: '2026-08-20 21:30', actTpCd: 'A', statusNm: 'Unloaded at Port of Discharging' }],
+  };
+  const result = parseSmLineTrackingResponses(search, route, events, 'SMCU1312616', 'SMLMNJBD6A755700');
+  assert.equal(result.dischargeTime, null);
+});
+
 test('森罗柜号不一致时明确归为订单验证失败', () => {
   assert.throws(
-    () => parseSmLineTrackingResponses(search, route, { TRANS_RESULT_KEY: 'S', list: [] }, 'WRONG1234567'),
-    /柜号与输入不一致/,
+    () => parseSmLineTrackingResponses(search, route, { TRANS_RESULT_KEY: 'S', list: [] }, 'WRONG1234567', 'SMLMNJBD6A755700', 'container'),
+    /柜号与查询号不一致/,
   );
+});
+
+test('森罗柜号查询使用官方 search_type C 且不要求提单同时匹配', async () => {
+  const requests: URLSearchParams[] = [];
+  const containerSearch = {
+    ...search,
+    list: [{ blNo: 'OTHER-BILL', cntrNo: 'SMCU1312616', bkgNo: 'OTHER-BILL', copNo: 'CNBO6706770811' }],
+  };
+  const fetcher = async (_input: string | URL | Request, init?: RequestInit) => {
+    const params = new URLSearchParams(String(init?.body || ''));
+    requests.push(params);
+    const command = params.get('f_cmd');
+    const payload = command === '121'
+      ? containerSearch
+      : command === '124'
+        ? route
+        : { TRANS_RESULT_KEY: 'S', count: '0', list: [] };
+    return new Response(JSON.stringify(payload), { status: 200 });
+  };
+  const input: TrackingQuery = {
+    rule: { prefix: 'SML', code: 'SMLINE', name: '森罗', removePrefix: true, queryMode: 'bill-or-container', url: 'https://esvc.smlines.com', integration: 'ready', integrationMessage: '' },
+    originalBillNo: 'SMLMNJBD6A755700',
+    queryBillNo: 'NJBD6A755700',
+    containerNo: 'SMCU1312616',
+    queryType: 'container',
+  };
+  const result = await new SmLineTrackingProvider(fetcher as typeof fetch).query(input);
+  assert.equal(requests[0].get('search_type'), 'C');
+  assert.equal(requests[0].get('search_name'), 'SMCU1312616');
+  assert.match(result.rawSummary, /本次通道=柜号 SMCU1312616/);
+  assert.match(result.rawSummary, /关联提单号=OTHER-BILL/);
 });

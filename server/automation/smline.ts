@@ -49,18 +49,40 @@ export function parseSmLineTrackingResponses(
   routePayload: unknown,
   eventPayload: unknown,
   expectedContainerNo = '',
+  expectedBillNo = '',
+  queryType: TrackingQuery['queryType'] = 'bill',
 ): TrackingResult {
-  const shipments = payloadList(searchPayload, '提单查询');
-  if (!shipments.length) throw trackingError('订单号验证失败', '森罗官网未找到该提单号');
+  const shipments = payloadList(searchPayload, '号码查询');
+  if (!shipments.length) throw trackingError('订单号验证失败', '森罗官网未找到对应的提单号或柜号');
   const expected = expectedContainerNo.trim().toUpperCase();
-  const returnedContainers = [...new Set(shipments.map((item) => text(item.cntrNo).toUpperCase()).filter(Boolean))];
-  if (expected && returnedContainers.length && !returnedContainers.includes(expected)) {
-    throw trackingError('订单号验证失败', `森罗官网返回的柜号与输入不一致（输入 ${expected}，官网返回 ${returnedContainers.join('、')}）`);
+  const billNo = expectedBillNo.trim().toUpperCase().replace(/^SMLM/, '');
+  const matchedShipments = queryType === 'container'
+    ? shipments.filter((item) => text(item.cntrNo).toUpperCase() === expected)
+    : billNo
+      ? shipments.filter((item) => [text(item.blNo), text(item.bkgNo)].some((value) => value.toUpperCase() === billNo))
+      : shipments;
+  if (!matchedShipments.length) {
+    if (queryType === 'container') {
+      const returnedContainers = [...new Set(shipments.map((item) => text(item.cntrNo).toUpperCase()).filter(Boolean))];
+      throw trackingError('订单号验证失败', `森罗官网返回的柜号与查询号不一致（查询 ${expected}，官网返回 ${returnedContainers.join('、') || '空'}）`);
+    }
+    const returnedBills = [...new Set(shipments.flatMap((item) => [text(item.blNo), text(item.bkgNo)]).filter(Boolean))];
+    throw trackingError('订单号验证失败', `森罗官网返回的提单号与查询号不一致（查询 ${billNo}，官网返回 ${returnedBills.join('、') || '空'}）`);
   }
 
-  const selected = shipments.find((item) => text(item.cntrNo).toUpperCase() === expected) || shipments[0];
-  const routes = payloadList(routePayload, '航线查询');
-  const events = payloadList(eventPayload, '货柜事件查询');
+  const selected = queryType === 'container'
+    ? matchedShipments.find((item) => [text(item.blNo), text(item.bkgNo)].some((value) => value.toUpperCase() === billNo)) || matchedShipments[0]
+    : matchedShipments.find((item) => text(item.cntrNo).toUpperCase() === expected) || matchedShipments[0];
+  const bookingNo = (text(selected.bkgNo) || text(selected.blNo)).toUpperCase();
+  const copNo = text(selected.copNo).toUpperCase();
+  const containerNo = text(selected.cntrNo).toUpperCase();
+  const routes = payloadList(routePayload, '航线查询').filter((item) => !text(item.bkgNo) || text(item.bkgNo).toUpperCase() === bookingNo);
+  const events = payloadList(eventPayload, '货柜事件查询').filter((item) => {
+    if (text(item.bkgNo) && text(item.bkgNo).toUpperCase() !== bookingNo) return false;
+    if (text(item.copNo) && copNo && text(item.copNo).toUpperCase() !== copNo) return false;
+    if (text(item.cntrNo) && containerNo && text(item.cntrNo).toUpperCase() !== containerNo) return false;
+    return true;
+  });
   const route = routes[0] || {};
   const actualArrivalEvent = events.find((event) => text(event.actTpCd).toUpperCase() === 'A' && isArrivalEvent(event));
   const estimatedArrivalEvent = events.find((event) => text(event.actTpCd).toUpperCase() !== 'A' && isArrivalEvent(event));
@@ -84,7 +106,7 @@ export function parseSmLineTrackingResponses(
     arrivalKind,
     arrived: Boolean(actualArrival || dischargeTime || (routeMarkedActual && routeArrival)),
     dischargeTime,
-    rawSummary: `森罗官方三段追踪解析成功；柜号=${text(selected.cntrNo) || expected || '未提供'}；船名=${vessel}；航次=${voyage}${dischargeTime ? '；已发现实际卸船事件' : '；未发现实际卸船事件'}${estimateNote}`,
+    rawSummary: `森罗官方三段追踪解析成功；本次官网校验=${queryType === 'container' ? `柜号 ${expected}` : `提单号 ${billNo || bookingNo}`}；关联提单号=${bookingNo || '未提供'}；柜号=${text(selected.cntrNo) || expected || '未提供'}；船名=${vessel}；航次=${voyage}${dischargeTime ? '；已发现实际卸船事件' : '；未发现实际卸船事件'}${estimateNote}`,
     sourceUrl: SMLINE_SOURCE,
   };
 }
@@ -120,26 +142,50 @@ export class SmLineTrackingProvider implements TrackingProvider {
 
   async query(input: TrackingQuery): Promise<TrackingResult> {
     if (input.rule.code !== 'SMLINE') throw trackingError('解析失败', `森罗解析器不能查询 ${input.rule.name}`);
-    if (input.queryType !== 'bill') throw trackingError('解析失败', '森罗解析器目前按提单号查询');
     const billNo = input.queryBillNo.trim().toUpperCase();
-    if (!/^[A-Z0-9]{8,}$/.test(billNo)) throw trackingError('订单号验证失败', `森罗提单号格式不正确：${billNo || '空'}`);
+    if (input.queryType === 'bill' && !/^[A-Z0-9]{8,}$/.test(billNo)) {
+      throw trackingError('订单号验证失败', `森罗提单号格式不正确：${billNo || '空'}`);
+    }
+    const expected = input.containerNo.trim().toUpperCase();
+    if (input.queryType === 'container' && !/^[A-Z]{4}\d{7}$/.test(expected)) {
+      throw trackingError('订单号验证失败', `森罗柜号格式不正确：${expected || '空'}`);
+    }
+    const queryValue = input.queryType === 'container' ? expected : billNo;
+    const searchType = input.queryType === 'container' ? 'C' : 'B';
+    const queryLabel = input.queryType === 'container' ? '柜号查询' : '提单查询';
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const searchPayload = await this.post({ f_cmd: '121', search_type: 'B', search_name: billNo }, '提单查询', controller.signal);
-      const shipments = payloadList(searchPayload, '提单查询');
-      if (!shipments.length) throw trackingError('订单号验证失败', `森罗官网未找到提单 ${input.originalBillNo}`);
-      const expected = input.containerNo.trim().toUpperCase();
-      const selected = shipments.find((item) => text(item.cntrNo).toUpperCase() === expected) || shipments[0];
+      const searchPayload = await this.post({ f_cmd: '121', search_type: searchType, search_name: queryValue }, queryLabel, controller.signal);
+      const shipments = payloadList(searchPayload, queryLabel);
+      if (!shipments.length) throw trackingError('订单号验证失败', `森罗官网未找到${input.queryType === 'container' ? `柜号 ${expected}` : `提单 ${input.originalBillNo}`}`);
+      const selected = shipments.find((item) => {
+        const returnedContainer = text(item.cntrNo).toUpperCase();
+        const returnedBills = [text(item.blNo), text(item.bkgNo)].map((value) => value.toUpperCase());
+        return input.queryType === 'container'
+          ? returnedContainer === expected && returnedBills.includes(billNo)
+          : returnedBills.includes(billNo) && returnedContainer === expected;
+      }) || shipments.find((item) => {
+        const returnedContainer = text(item.cntrNo).toUpperCase();
+        const returnedBills = [text(item.blNo), text(item.bkgNo)].map((value) => value.toUpperCase());
+        return input.queryType === 'container' ? returnedContainer === expected : returnedBills.includes(billNo);
+      });
+      if (!selected) {
+        throw trackingError('订单号验证失败', `森罗官网${queryLabel}返回结果与查询的${input.queryType === 'container' ? `柜号 ${expected}` : `提单号 ${billNo}`}不一致`);
+      }
       const containerNo = text(selected.cntrNo);
       const bookingNo = text(selected.bkgNo) || billNo;
       const copNo = text(selected.copNo);
-      if (!containerNo || !copNo) throw trackingError('解析失败', '森罗官网提单结果缺少柜号或追踪流水号');
+      if (!containerNo || !copNo) throw trackingError('解析失败', `森罗官网${queryLabel}结果缺少柜号或追踪流水号`);
       const [routePayload, eventPayload] = await Promise.all([
         this.post({ f_cmd: '124', bkg_no: bookingNo }, '航线查询', controller.signal),
         this.post({ f_cmd: '125', cntr_no: containerNo, bkg_no: bookingNo, cop_no: copNo }, '货柜事件查询', controller.signal),
       ]);
-      return parseSmLineTrackingResponses(searchPayload, routePayload, eventPayload, expected);
+      const result = parseSmLineTrackingResponses(searchPayload, routePayload, eventPayload, expected, billNo, input.queryType);
+      return {
+        ...result,
+        rawSummary: `${result.rawSummary}；本次通道=${input.queryType === 'container' ? `柜号 ${expected}` : `提单号 ${billNo}`}`,
+      };
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') throw trackingError('查询超时', '森罗官网查询超时，请稍后重试');
       throw error;

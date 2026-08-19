@@ -80,6 +80,57 @@ async function queryMaerskAlternatives(
   );
 }
 
+async function queryBillOrContainer(baseQuery: Omit<TrackingQuery, 'queryType'>, provider: TrackingProvider) {
+  const attempts = [
+    { label: `提单号 ${baseQuery.queryBillNo}`, promise: provider.query({ ...baseQuery, queryType: 'bill' }) },
+    ...(baseQuery.containerNo
+      ? [{ label: `柜号 ${baseQuery.containerNo}`, promise: provider.query({ ...baseQuery, queryType: 'container' as const }) }]
+      : []),
+  ];
+  const settled = await Promise.allSettled(attempts.map(({ promise }) => promise));
+  const successes = settled.flatMap((outcome, index) => outcome.status === 'fulfilled'
+    ? [{ label: attempts[index].label, result: outcome.value }]
+    : []);
+  if (successes.length === 2) {
+    const billResult = successes[0].result;
+    const containerResult = successes[1].result;
+    const sameResult = billResult.arrivalTime?.getTime() === containerResult.arrivalTime?.getTime()
+      && billResult.dischargeTime?.getTime() === containerResult.dischargeTime?.getTime()
+      && billResult.arrivalKind === containerResult.arrivalKind
+      && billResult.arrived === containerResult.arrived;
+    if (sameResult) {
+      return {
+        ...billResult,
+        rawSummary: `${billResult.rawSummary}；${successes[1].label} 查询返回相同结果，OR 双查核验一致`,
+      };
+    }
+    return mergeTrackingResults(billResult, containerResult);
+  }
+  if (successes.length === 1) {
+    const failedIndex = settled.findIndex((outcome) => outcome.status === 'rejected');
+    if (failedIndex < 0) return successes[0].result;
+    const failedOutcome = settled[failedIndex] as PromiseRejectedResult;
+    const failure = classifyTrackingError(failedOutcome.reason);
+    return {
+      ...successes[0].result,
+      rawSummary: `${successes[0].result.rawSummary}；${successes[0].label}查询成功；${attempts[failedIndex].label}查询失败（${failure.category}：${failure.reason}），已按 OR 规则采用成功结果`,
+    };
+  }
+  const failures = settled.map((outcome, index) => ({
+    label: attempts[index].label,
+    failure: classifyTrackingError((outcome as PromiseRejectedResult).reason),
+  }));
+  const lastFailure = failures.at(-1)!.failure;
+  throw trackingError(
+    lastFailure.category,
+    `${baseQuery.rule.name}提单号与柜号查询均失败：${failures.map(({ label, failure }) => `${label}（${failure.category}：${failure.reason}）`).join('；')}`,
+    {
+      evidencePath: lastFailure.evidencePath || failures.find(({ failure }) => failure.evidencePath)?.failure.evidencePath,
+      sourceUrl: lastFailure.sourceUrl || failures.find(({ failure }) => failure.sourceUrl)?.failure.sourceUrl,
+    },
+  );
+}
+
 export async function trackRecord(record: WorkbookRecord, provider: TrackingProvider) {
   const rule = resolveCarrierRule(record);
   const baseQuery = {
@@ -88,6 +139,9 @@ export async function trackRecord(record: WorkbookRecord, provider: TrackingProv
     queryBillNo: buildQueryBillNo(record.billNo, rule),
     containerNo: record.containerNo,
   };
+  if (rule.queryMode === 'bill-or-container') {
+    return { rule, result: await queryBillOrContainer(baseQuery, provider) };
+  }
   let billResult: TrackingResult;
   try {
     billResult = await provider.query({ ...baseQuery, queryType: 'bill' });
@@ -117,7 +171,17 @@ export async function trackRecord(record: WorkbookRecord, provider: TrackingProv
     }
   }
   if (rule.queryMode !== 'bill-and-container') return { rule, result: billResult };
-  if (!record.containerNo) throw new Error('以星提单需要同时提供柜号');
-  const containerResult = await provider.query({ ...baseQuery, queryType: 'container' });
+  if (!record.containerNo) throw trackingError('订单号验证失败', `${rule.name}需要同时提供柜号进行交叉查询`);
+  let containerResult: TrackingResult;
+  try {
+    containerResult = await provider.query({ ...baseQuery, queryType: 'container' });
+  } catch (containerError) {
+    const failure = classifyTrackingError(containerError);
+    throw trackingError(
+      failure.category,
+      `${rule.name}提单查询成功，但柜号 ${record.containerNo} 交叉查询失败（${failure.category}：${failure.reason}），拒绝写入未经双重核验的数据`,
+      { evidencePath: failure.evidencePath, sourceUrl: failure.sourceUrl },
+    );
+  }
   return { rule, result: mergeTrackingResults(billResult, containerResult) };
 }

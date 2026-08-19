@@ -28,7 +28,7 @@ export interface CarrierRule {
   code: string;
   name: string;
   removePrefix: boolean;
-  queryMode: 'bill' | 'bill-and-container' | 'bill-then-container';
+  queryMode: 'bill' | 'bill-and-container' | 'bill-then-container' | 'bill-or-container';
   url: string;
   integration: 'ready' | 'blocked' | 'limited' | 'error';
   integrationMessage: string;

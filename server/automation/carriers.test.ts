@@ -58,6 +58,7 @@ test('马士基两个提单号均失败后自动改用柜号', async () => {
 test('森罗官网查询固定移除 SMLM 四位前缀', () => {
   const rule = resolveCarrierRule({ billNo: 'SMLMNJBD6A755700', carrierHint: '森罗' });
   assert.equal(rule.code, 'SMLINE');
+  assert.equal(rule.queryMode, 'bill-or-container');
   assert.equal(buildQueryBillNo('SMLMNJBD6A755700', rule), 'NJBD6A755700');
 });
 
@@ -115,4 +116,27 @@ test('万海提单和柜号均失败时保留两次失败原因', async () => {
   };
   const record: WorkbookRecord = { rowNumber: 2, carrierHint: '万海', billNo: 'WHLC025G709663', containerNo: 'WHSU8284656', arrivalTime: null, dischargeTime: null, vesselState: '', lastUpdated: null, note: '', progress: '' };
   await assert.rejects(() => trackRecord(record, provider), /提单查询失败.*柜号 WHSU8284656 备用查询也失败/);
+});
+
+test('森罗按 OR 规则采用任一路成功结果', async () => {
+  const result: TrackingResult = { arrivalTime: new Date('2026-08-20T09:00:00Z'), arrivalKind: 'ETA', arrived: false, dischargeTime: null, rawSummary: '柜号查询成功', sourceUrl: 'https://esvc.smlines.com' };
+  const provider: TrackingProvider = {
+    async query(input) {
+      if (input.queryType === 'bill') throw new Error('提单查询无数据');
+      return result;
+    },
+  };
+  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '森罗', billNo: 'SMLMNJBD6A755700', containerNo: 'SMCU1312616', arrivalTime: null, dischargeTime: null, vesselState: '', lastUpdated: null, note: '', progress: '' };
+  const tracked = await trackRecord(record, provider);
+  assert.equal(tracked.result.arrivalTime?.toISOString(), '2026-08-20T09:00:00.000Z');
+  assert.match(tracked.result.rawSummary, /OR 规则采用成功结果/);
+});
+
+test('森罗两路返回相同结果时精简合并备注', async () => {
+  const result: TrackingResult = { arrivalTime: new Date('2026-08-20T09:00:00Z'), arrivalKind: 'ETA', arrived: false, dischargeTime: null, rawSummary: '森罗查询成功', sourceUrl: 'https://esvc.smlines.com' };
+  const provider: TrackingProvider = { async query() { return result; } };
+  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '森罗', billNo: 'SMLMNJBD6A755700', containerNo: 'SMCU1312616', arrivalTime: null, dischargeTime: null, vesselState: '', lastUpdated: null, note: '', progress: '' };
+  const tracked = await trackRecord(record, provider);
+  assert.match(tracked.result.rawSummary, /OR 双查核验一致/);
+  assert.equal(tracked.result.rawSummary.match(/森罗查询成功/g)?.length, 1);
 });
