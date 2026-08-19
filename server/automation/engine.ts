@@ -10,6 +10,7 @@ import { notifyWeCom } from './notifier.js';
 import { OoclTrackingProvider } from './oocl.js';
 import { OneTrackingProvider } from './one.js';
 import { HedeTrackingProvider } from './hede.js';
+import { HmmTrackingProvider } from './hmm.js';
 import { OfficialSiteProbeProvider } from './official-probe.js';
 import { SmLineTrackingProvider } from './smline.js';
 import { RateLimiter } from './rate-limiter.js';
@@ -59,6 +60,9 @@ export class AutomationEngine {
       ? new BrowserTrackingProvider(path.join(this.store.dataDirectory, 'browser-evidence'))
       : null;
     const withBrowserFallback = (primary: TrackingProvider) => browser ? new FallbackTrackingProvider(primary, browser) : primary;
+    const hmm = settings.browserAutomationEnabled
+      ? new HmmTrackingProvider(path.join(this.store.dataDirectory, 'browser-evidence'))
+      : new OfficialSiteProbeProvider();
     return new CarrierRoutingTrackingProvider(new Map<string, TrackingProvider>([
       ['OOCL', withBrowserFallback(new OoclTrackingProvider())],
       ['ONE', withBrowserFallback(new OneTrackingProvider())],
@@ -67,6 +71,7 @@ export class AutomationEngine {
       ['EVERGREEN', withBrowserFallback(new EvergreenTrackingProvider())],
       ['MATSON', withBrowserFallback(new MatsonTrackingProvider())],
       ['YANGMING', withBrowserFallback(new YangmingTrackingProvider())],
+      ['HMM', hmm],
     ]), withBrowserFallback(new OfficialSiteProbeProvider()));
   }
 

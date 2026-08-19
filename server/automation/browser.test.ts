@@ -65,9 +65,10 @@ test('中远多港口轨迹取最后一个目的港到港时间', () => {
     '2026-07-03 09:23:25',
     '目的港 Houston',
     '实际到港',
-    '2026-08-06 11:07:44',
+    '2026-08-06 11:07:44 CDT',
   ].join('\n'), coscoQuery);
-  assert.equal(result.arrivalTime?.toISOString(), '2026-08-06T03:07:44.000Z');
+  assert.equal(result.arrivalTime, null);
+  assert.equal(result.arrivalTimeText, '2026-08-06 11:07:44 CDT（官网当地时间）');
 });
 
 test('地中海时间线支持日期位于实际卸船事件之前', () => {

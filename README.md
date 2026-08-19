@@ -103,6 +103,7 @@ PORT=8787
 WECHAT_WEBHOOK_URL=
 BROWSER_EXECUTABLE_PATH=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
 BROWSER_HEADLESS=true
+HMM_BROWSER_HEADLESS=false
 BROWSER_HUMAN_BEHAVIOR=true
 RATE_LIMIT_REQUESTS_PER_MINUTE=10
 ```
@@ -114,6 +115,7 @@ PORT=8787
 WECHAT_WEBHOOK_URL=
 BROWSER_EXECUTABLE_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe
 BROWSER_HEADLESS=true
+HMM_BROWSER_HEADLESS=false
 BROWSER_HUMAN_BEHAVIOR=true
 RATE_LIMIT_REQUESTS_PER_MINUTE=10
 ```
@@ -125,6 +127,7 @@ PORT=8787
 WECHAT_WEBHOOK_URL=
 BROWSER_EXECUTABLE_PATH=/usr/bin/google-chrome
 BROWSER_HEADLESS=true
+HMM_BROWSER_HEADLESS=false
 BROWSER_HUMAN_BEHAVIOR=true
 RATE_LIMIT_REQUESTS_PER_MINUTE=10
 ```
@@ -132,6 +135,7 @@ RATE_LIMIT_REQUESTS_PER_MINUTE=10
 - `WECHAT_WEBHOOK_URL` 可以暂时留空，启动后在"系统设置"中保存和测试企业微信机器人地址。
 - 如果 Chrome 安装在其他位置，请将 `BROWSER_EXECUTABLE_PATH` 改成实际可执行文件路径。
 - `BROWSER_HEADLESS=false` 可切换为有头模式，反检测效果更好但需要图形界面；服务器环境保持 `true`。
+- `HMM_BROWSER_HEADLESS=false` 是韩新海运专用设置。其官网会拦截无头 Chrome，必须在已登录图形桌面的电脑上运行；定时查询时会短暂打开 Chrome 窗口。
 - `BROWSER_HUMAN_BEHAVIOR=true` 启用真人行为模拟（随机延迟、逐字符打字），可降低风控触发率。
 - `RATE_LIMIT_REQUESTS_PER_MINUTE=10` 控制默认每分钟请求数，风控严重的船司（万海 3 次/分钟、以星达飞 5 次/分钟）在代码中单独限流。
 - 修改 `.env` 后必须重启服务。
@@ -291,6 +295,7 @@ pm2 restart port-ops-workbench
 - MAEU 马士基、MEDU 地中海固定映射；马士基去前缀、完整提单号、柜号三级回退；ZIM 提单号/柜号双查合并逻辑
 - 森罗提单号按官网要求去除 `SMLM` 前缀，并与柜号分别查询；任一路成功即可采用，两路成功时合并结果
 - 万海提单号去除前缀后与柜号并行查询；任一路成功即可采用，相比旧版串行兜底，并行查询速度更快且容错性更高
+- 韩新海运使用有界面 Chrome 调用官网真实查询，并校验返回提单号和柜号；时间按官网注明保留为港口当地时间，实际到港、预计到港和实际卸船不会混写
 - 浏览器反指纹优化：隐藏 webdriver 特征、User-Agent 轮换、伪装 plugins 和 chrome 对象，降低风控检测率
 - 真人行为模拟：随机延迟、逐字符打字、思考时间，模拟真人操作节奏
 - 按船司分别限流：风控严重的船司（万海 3 次/分钟、以星达飞 5 次/分钟）使用更严格的速率限制
@@ -302,7 +307,7 @@ pm2 restart port-ops-workbench
 - 导出带表头样式、筛选器、冻结首行及日期格式的 `.xlsx` 文件
 - 响应式桌面与移动端界面
 
-工作台固定使用官网模式，不会展示或写入虚构结果。海洋网联、森罗、长荣、合德、美森和阳明使用各自官方查询接口或页面解析器；其余船司也会真实请求对应官网并检查响应。OOCL 解析器仍保留，但官方旧接口当前持续返回 `SVC_ERR_001`，因此不会在数据源管理中标为实时可用。若官网返回 Cloudflare/验证页面、官方服务错误、动态页面或字段不完整，工作台会保留失败分类、船司、提单号、柜号、官网具体原因和来源地址，不会写入假时间。
+工作台固定使用官网模式，不会展示或写入虚构结果。海洋网联、森罗、长荣、合德、美森、阳明和韩新海运使用各自官方查询接口或专用页面解析器；其余船司也会真实请求对应官网并检查响应。OOCL 解析器仍保留，但官方旧接口当前持续返回 `SVC_ERR_001`，因此不会在数据源管理中标为实时可用。若官网返回 Cloudflare/验证页面、官方服务错误、动态页面或字段不完整，工作台会保留失败分类、船司、提单号、柜号、官网具体原因和来源地址，不会写入假时间。
 
 ## 真实船司接入所需信息
 

@@ -162,6 +162,28 @@ function findLabeledDate(lines: string[], label: RegExp, excluded?: RegExp, pref
   return null;
 }
 
+function findLabeledDateText(lines: string[], label: RegExp, excluded?: RegExp, preferLast = false) {
+  const indexes = Array.from({ length: lines.length }, (_, index) => index);
+  if (preferLast) indexes.reverse();
+  for (const index of indexes) {
+    if (!label.test(lines[index])) continue;
+    const contexts = [
+      lines.slice(index, index + 3).join(' '),
+      lines.slice(Math.max(0, index - 3), index + 1).join(' '),
+    ];
+    for (const context of contexts) {
+      if (excluded?.test(context)) continue;
+      for (const pattern of DATE_PATTERNS) {
+        const matched = context.match(pattern)?.[0];
+        if (!matched) continue;
+        const suffix = context.slice(context.indexOf(matched) + matched.length).match(/^\s+([A-Z]{2,5})\b/)?.[1];
+        return `${matched}${suffix ? ` ${suffix}` : ''}`;
+      }
+    }
+  }
+  return null;
+}
+
 export function parseRenderedTrackingText(text: string, input: TrackingQuery): TrackingResult {
   const compactText = text.replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').trim();
   const queryValue = input.queryType === 'container' ? input.containerNo : input.queryBillNo;
@@ -190,17 +212,31 @@ export function parseRenderedTrackingText(text: string, input: TrackingQuery): T
     throw trackingError('解析失败', `${input.rule.name}浏览器已打开订单结果，但没有发现可验证的 ATA、ETA 或实际卸船时间`);
   }
   const arrivalKind: ArrivalKind = actualArrival ? 'ATA' : estimatedArrival ? 'ETA' : null;
+  const preserveLocalTime = input.rule.code === 'COSCO';
+  const arrivalTimeText = preserveLocalTime
+    ? findLabeledDateText(
+      lines,
+      actualArrival ? /\bATA\b|actual(?: time of)? arrival|actual arrival|实际到港|实际抵达/i : /\bETA\b|estimated(?: time of)? arrival|expected arrival|预计到港|预计抵达/i,
+      actualArrival ? /estimated|expected|预计/i : undefined,
+      true,
+    )
+    : null;
+  const dischargeTimeText = preserveLocalTime && discharge
+    ? findLabeledDateText(lines, /actual[^\n]{0,30}discharg|container discharged|discharged|discharge completed|卸船完成|实际卸船|卸载完成|卸船时间/i, /estimated|expected|planned|预计|计划/i)
+    : null;
   return {
-    arrivalTime,
+    arrivalTime: arrivalTimeText ? null : arrivalTime,
+    arrivalTimeText: arrivalTimeText ? `${arrivalTimeText}（官网当地时间）` : undefined,
     arrivalKind,
     arrived: Boolean(actualArrival || discharge),
-    dischargeTime: discharge,
-    rawSummary: `${input.rule.name}浏览器模拟查询成功；页面已核对${input.queryType === 'container' ? '柜号' : '提单号'}=${queryValue}${discharge ? '；已发现实际卸船字段' : ''}`,
+    dischargeTime: dischargeTimeText ? null : discharge,
+    dischargeTimeText: dischargeTimeText ? `${dischargeTimeText}（官网当地时间）` : undefined,
+    rawSummary: `${input.rule.name}浏览器模拟查询成功；页面已核对${input.queryType === 'container' ? '柜号' : '提单号'}=${queryValue}${discharge ? '；已发现实际卸船字段' : ''}${preserveLocalTime ? '；官网时间按港口当地时间原样保留' : ''}`,
     sourceUrl: input.rule.url,
   };
 }
 
-async function executablePath() {
+export async function browserExecutablePath() {
   const configured = process.env.BROWSER_EXECUTABLE_PATH?.trim();
   if (configured) {
     await fs.access(configured);
@@ -221,7 +257,7 @@ async function firstVisibleInput(page: Page) {
       const locator = frame.locator(selector);
       for (let index = 0; index < await locator.count(); index += 1) {
         const candidate = locator.nth(index);
-        if (await candidate.isVisible().catch(() => false)) return candidate;
+        if (await candidate.isVisible().catch(() => false) && await candidate.isEditable().catch(() => false)) return candidate;
       }
     }
   }
@@ -321,7 +357,7 @@ export class BrowserTrackingProvider implements TrackingProvider {
       const headless = process.env.BROWSER_HEADLESS !== 'false';
       this.browser = await chromium.launch({
         headless,
-        executablePath: await executablePath(),
+        executablePath: await browserExecutablePath(),
         args: STEALTH_ARGS,
         // 忽略 HTTPS 证书错误（某些船司使用自签证书）
         ignoreDefaultArgs: ['--enable-automation'],
@@ -407,7 +443,7 @@ export class BrowserTrackingProvider implements TrackingProvider {
       sourceUrl = page.url();
       const cookies = await context.cookies(sourceUrl);
       let acceptedCookies = await dismissCookieDialog(page);
-      await waitForRenderedOutcome(page, queryValue, 1_500);
+      await waitForRenderedOutcome(page, queryValue, input.rule.code === 'COSCO' ? 8_000 : 1_500);
       if (!acceptedCookies) acceptedCookies = await dismissCookieDialog(page);
       if (!acceptedCookies && input.rule.code === 'COSCO' && !cookies.some((cookie) => cookie.name === 'cookieClause')) {
         acceptedCookies = await dismissCookieDialog(page, 2_000);

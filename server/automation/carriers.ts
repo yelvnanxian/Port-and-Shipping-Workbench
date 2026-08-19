@@ -15,7 +15,7 @@ export const CARRIER_RULES: CarrierRule[] = [
   { prefix: 'COSU', code: 'COSCO', name: '中远海运', removePrefix: true, queryMode: 'bill', url: 'https://elines.coscoshipping.com/ebusiness/cargoTracking?trackingType=BILLOFLADING', integration: 'limited', integrationMessage: '已接入官网直连与浏览器模拟点击；动态结果无法核验时保留截图' },
   { prefix: 'HLCU', code: 'HAPAG', name: '赫伯罗特', removePrefix: true, queryMode: 'bill', url: 'https://www.hapag-lloyd.cn/en/online-business/track/track-by-booking-solution.html', integration: 'blocked', integrationMessage: '已接入直连与浏览器备用查询；Security Check 仍按风控失败并截图' },
   { prefix: 'HDUJ', code: 'HEDE', name: '合德', removePrefix: false, queryMode: 'bill', url: 'http://elines.hedehk.com/cargoDynamic', integration: 'ready', integrationMessage: '已接入合德官方货物动态接口' },
-  { prefix: 'HDMU', code: 'HMM', name: '韩新海运', removePrefix: true, queryMode: 'bill', url: 'https://www.hmm21.com/e-service/general/trackNTrace/TrackNTrace.do', integration: 'limited', integrationMessage: '已接入官网直连与浏览器模拟点击；动态结果必须核对订单号后才写入' },
+  { prefix: 'HDMU', code: 'HMM', name: '韩新海运', removePrefix: true, queryMode: 'bill', url: 'https://www.hmm21.com/e-service/general/trackNTrace/TrackNTrace.do', integration: 'ready', integrationMessage: '已接入官网有界面浏览器查询；核对提单号与柜号，并区分实际到港、预计到港和实际卸船事件' },
 ];
 
 export const ALL_CARRIER_RULES = CARRIER_RULES;
