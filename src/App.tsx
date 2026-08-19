@@ -73,71 +73,6 @@ function timeAgo(value: string) {
   return `${Math.floor(minutes / 60)} 小时前`;
 }
 
-async function downloadExcel(rows: Shipment[]) {
-  const ExcelJS = (await import('exceljs')).default;
-  const workbook = new ExcelJS.Workbook();
-  workbook.creator = '港航工作台';
-  workbook.created = new Date();
-  const sheet = workbook.addWorksheet('船期追踪', {
-    views: [{ state: 'frozen', ySplit: 1 }],
-  });
-
-  sheet.columns = [
-    { header: '船司', key: 'carrier', width: 15 },
-    { header: '提单号', key: 'billNo', width: 20 },
-    { header: '箱号', key: 'containerNo', width: 18 },
-    { header: '船名 / 航次', key: 'vesselVoyage', width: 34 },
-    { header: '码头', key: 'terminal', width: 22 },
-    { header: '预计到港 ETA', key: 'eta', width: 21 },
-    { header: '预计/实际靠泊', key: 'berthingTime', width: 21 },
-    { header: '卸船时间', key: 'dischargeTime', width: 21 },
-    { header: '当前状态', key: 'status', width: 14 },
-    { header: '最后更新', key: 'lastUpdated', width: 21 },
-    { header: '备注', key: 'note', width: 30 },
-  ];
-
-  rows.forEach((row) => sheet.addRow({
-    ...row,
-    eta: row.eta ? new Date(row.eta) : '',
-    berthingTime: row.berthingTime ? new Date(row.berthingTime) : '',
-    dischargeTime: row.dischargeTime ? new Date(row.dischargeTime) : '',
-    lastUpdated: new Date(row.lastUpdated),
-  }));
-
-  sheet.getRow(1).height = 30;
-  sheet.getRow(1).eachCell((cell) => {
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: '0B3347' } };
-    cell.font = { color: { argb: 'FFFFFF' }, bold: true, size: 11 };
-    cell.alignment = { vertical: 'middle' };
-  });
-  [6, 7, 8, 10].forEach((column) => {
-    sheet.getColumn(column).numFmt = 'yyyy-mm-dd hh:mm';
-  });
-  sheet.eachRow((row, rowNumber) => {
-    if (rowNumber > 1) {
-      row.height = 25;
-      row.alignment = { vertical: 'middle' };
-      if (rowNumber % 2 === 1) {
-        row.eachCell((cell) => {
-          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'F3F7F7' } };
-        });
-      }
-    }
-  });
-  sheet.autoFilter = 'A1:K1';
-
-  const buffer = await workbook.xlsx.writeBuffer();
-  const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  const timestamp = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
-    .format(new Date()).replaceAll('/', '');
-  anchor.href = url;
-  anchor.download = `船期追踪_${timestamp}.xlsx`;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
 function StatusBadge({ status }: { status: ShipmentStatus }) {
   const config = {
     待靠泊: { icon: Clock3, className: 'pending' },
@@ -253,17 +188,13 @@ export default function App() {
   async function handleSync() {
     setSyncing(true);
     try {
-      if (automation?.workbook) {
-        const response = await fetch('/api/automation/run', { method: 'POST' });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.message || '自动更新失败');
-        setData(payload.dashboard);
-        setAutomation(payload.automation);
-        setToast(`已完成 ${payload.run.total} 条查询，失败 ${payload.run.failed} 条`);
-      } else {
-        await load('/api/sync');
-        setToast('已刷新演示船期数据');
-      }
+      if (!automation?.workbook) throw new Error('请先导入 Excel 或新增单号');
+      const response = await fetch('/api/automation/run', { method: 'POST' });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || '自动更新失败');
+      setData(payload.dashboard);
+      setAutomation(payload.automation);
+      setToast(`已完成 ${payload.run.total} 条查询，失败 ${payload.run.failed} 条`);
     } catch (error) {
       setToast(error instanceof Error ? error.message : '同步失败');
     } finally {
@@ -289,25 +220,6 @@ export default function App() {
     } finally {
       setSyncing(false);
       if (uploadInput.current) uploadInput.current.value = '';
-    }
-  }
-
-  async function handleSeedDemo() {
-    setSyncing(true);
-    try {
-      const seedResponse = await fetch('/api/demo/seed', { method: 'POST' });
-      const seedPayload = await seedResponse.json();
-      if (!seedResponse.ok) throw new Error(seedPayload.message || '加载演示数据失败');
-      const runResponse = await fetch('/api/automation/run', { method: 'POST' });
-      const runPayload = await runResponse.json();
-      if (!runResponse.ok) throw new Error(runPayload.message || '执行演示查询失败');
-      setData(runPayload.dashboard);
-      setAutomation(runPayload.automation);
-      setToast(`已加载并更新 ${runPayload.run.total} 条全船司演示记录`);
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : '加载演示数据失败');
-    } finally {
-      setSyncing(false);
     }
   }
 
@@ -341,18 +253,54 @@ export default function App() {
   }
 
   async function handleExport() {
-    if (automation?.workbook) {
-      window.location.href = '/api/workbooks/current';
-      setToast('正在下载已更新的原始 Excel');
+    if (!automation?.workbook) {
+      setToast('请先导入 Excel 或新增单号');
       return;
     }
-    const rows = selected.size ? filtered.filter((item) => selected.has(item.id)) : filtered;
-    if (!rows.length) {
-      setToast('当前没有可导出的记录');
-      return;
+    window.location.href = '/api/workbooks/current';
+    setToast('正在下载已更新的 Excel');
+  }
+
+  async function handleToggleAutomation(enabled: boolean) {
+    try {
+      const response = await fetch('/api/automation/settings', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || '自动化设置保存失败');
+      setAutomation(payload.automation);
+      setToast(enabled ? '定时任务已启用' : '定时任务已停用');
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : '自动化设置保存失败');
     }
-    await downloadExcel(rows);
-    setToast(`已导出 ${rows.length} 条船期记录`);
+  }
+
+  async function handleCreateBackup() {
+    try {
+      const response = await fetch('/api/backups/create', { method: 'POST' });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || '创建备份失败');
+      setToast('已创建手动备份');
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : '创建备份失败');
+    }
+  }
+
+  async function handleRestoreBackup(name: string) {
+    if (!window.confirm(`确认恢复备份 ${name}？当前文件会先自动备份。`)) return;
+    try {
+      const response = await fetch(`/api/backups/${encodeURIComponent(name)}/restore`, { method: 'POST' });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message || '恢复备份失败');
+      setData(payload.dashboard);
+      setAutomation(payload.automation);
+      setSelected(new Set());
+      setToast('备份已恢复，恢复前文件也已自动备份');
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : '恢复备份失败');
+    }
   }
 
   function toggleAll() {
@@ -418,7 +366,7 @@ export default function App() {
           <section className="automation-panel">
             <div className="automation-main">
               <div className="automation-symbol"><Timer size={20} /></div>
-              <div><div className="automation-heading"><strong>定时自动更新</strong><span className={`mode-tag ${automation?.mode || 'demo'}`}>{automation?.mode === 'live' ? '官网模式' : '演示模式'}</span></div><p>每天 09:00、11:00、17:30 自动查询未完成记录</p></div>
+              <div><div className="automation-heading"><strong>定时自动更新</strong><span className="mode-tag live">真实官网数据</span></div><p>每天 09:00、11:00、17:30 自动查询未完成记录</p></div>
             </div>
             <div className="automation-facts">
               <div><FileCheck2 size={16} /><span>Excel 文件</span><strong>{automation?.workbook ? `${automation.workbook.records} 条记录` : '尚未导入'}</strong></div>
@@ -442,7 +390,7 @@ export default function App() {
           </section>
 
           <section className="source-strip">
-            <div className="source-title"><div className="source-icon"><Database size={19} /></div><div><strong>数据源状态</strong><span>{automation?.mode === 'live' ? '官网解析器模式' : `已配置 ${automation?.supportedCarriers || 15} 家船司路由，当前使用演示抓取`}</span></div></div>
+            <div className="source-title"><div className="source-icon"><Database size={19} /></div><div><strong>数据源状态</strong><span>真实官网解析器模式 · 未完成联调的官网会明确记录失败原因</span></div></div>
             <div className="source-list">
               {(data?.sources || []).map((source) => <SourcePill key={source.id} source={source} />)}
             </div>
@@ -491,7 +439,7 @@ export default function App() {
           </section>
           <p className="legal-note">数据仅用于运营辅助，最终船期以船司及码头官方信息为准。</p>
           </div>
-          {activePage !== 'overview' && <ModulePage page={activePage} data={data} automation={automation} syncing={syncing} onSync={handleSync} onSeedDemo={handleSeedDemo} onUpload={() => uploadInput.current?.click()} onToast={setToast} onOpenDetail={setDetail} />}
+          {activePage !== 'overview' && <ModulePage page={activePage} data={data} automation={automation} syncing={syncing} onSync={handleSync} onToggleAutomation={handleToggleAutomation} onCreateBackup={handleCreateBackup} onRestoreBackup={handleRestoreBackup} onUpload={() => uploadInput.current?.click()} onToast={setToast} onOpenDetail={setDetail} />}
         </div>
       </main>
 
@@ -556,13 +504,15 @@ function fullDate(value: string) {
   return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value));
 }
 
-function ModulePage({ page, data, automation, syncing, onSync, onSeedDemo, onUpload, onToast, onOpenDetail }: {
+function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomation, onCreateBackup, onRestoreBackup, onUpload, onToast, onOpenDetail }: {
   page: Exclude<PageId, 'overview'>;
   data: DashboardData | null;
   automation: AutomationStatus | null;
   syncing: boolean;
   onSync: () => Promise<void>;
-  onSeedDemo: () => Promise<void>;
+  onToggleAutomation: (enabled: boolean) => Promise<void>;
+  onCreateBackup: () => Promise<void>;
+  onRestoreBackup: (name: string) => Promise<void>;
   onUpload: () => void;
   onToast: (message: string) => void;
   onOpenDetail: (shipment: Shipment) => void;
@@ -616,25 +566,25 @@ function ModulePage({ page, data, automation, syncing, onSync, onSeedDemo, onUpl
     </section>}
 
     {page === 'sources' && <section className="carrier-grid">
-      {carrierRules.map((rule) => <article className="carrier-rule-card" key={`${rule.code}-${rule.name}`}><div className="carrier-rule-head"><CarrierMark code={rule.code} /><div><strong>{rule.name}</strong><span>{rule.prefix} · {rule.code}</span></div><span className={`integration-tag ${rule.integration}`}>{automation?.mode === 'demo' ? '演示可用' : rule.integration === 'ready' ? '已接入' : '待联调'}</span></div><dl><div><dt>查询号码</dt><dd>{rule.removePrefix ? `去除 ${rule.prefix} 前缀` : '保留完整提单号'}</dd></div><div><dt>查询方式</dt><dd>{rule.queryMode === 'bill-and-container' ? '提单号 + 柜号双查' : '仅提单号'}</dd></div></dl><a href={rule.url} target="_blank" rel="noreferrer">打开船司查询页面<ExternalLink size={13} /></a></article>)}
+      {carrierRules.map((rule) => <article className="carrier-rule-card" key={`${rule.code}-${rule.name}`}><div className="carrier-rule-head"><CarrierMark code={rule.code} /><div><strong>{rule.name}</strong><span>{rule.prefix} · {rule.code}</span></div><span className={`integration-tag ${rule.integration}`}>{rule.integration === 'ready' ? '已接入' : '待联调'}</span></div><dl><div><dt>查询号码</dt><dd>{rule.removePrefix ? `去除 ${rule.prefix} 前缀` : '保留完整提单号'}</dd></div><div><dt>查询方式</dt><dd>{rule.queryMode === 'bill-and-container' ? '提单号 + 柜号双查' : '仅提单号'}</dd></div></dl><a href={rule.url} target="_blank" rel="noreferrer">打开船司查询页面<ExternalLink size={13} /></a></article>)}
     </section>}
 
     {page === 'automation' && <>
       <section className="schedule-grid">
-        {(automation?.schedule || []).map((schedule, index) => <article className="schedule-card" key={schedule.time}><div className="schedule-index">0{index + 1}</div><div><span>每日定时任务</span><strong>{schedule.time}</strong><small>Asia/Shanghai · {schedule.cron}</small></div><span className="enabled-pill">已启用</span></article>)}
+        {(automation?.schedule || []).map((schedule, index) => <article className="schedule-card" key={schedule.time}><div className="schedule-index">0{index + 1}</div><div><span>每日定时任务</span><strong>{schedule.time}</strong><small>Asia/Shanghai · {schedule.cron}</small></div><span className={`enabled-pill ${automation?.enabled ? '' : 'disabled'}`}>{automation?.enabled ? '已启用' : '已停用'}</span></article>)}
       </section>
-      <section className="module-card automation-controls"><div><div className="control-icon"><FileSpreadsheet size={18} /></div><div><strong>完整演示数据</strong><span>覆盖 15 条规则记录，用于验证全工作台模块</span></div></div><button className="secondary-button" onClick={async () => { await onSeedDemo(); await refreshModuleData(); }} disabled={syncing}>加载 15 条演示数据</button></section>
+      <section className="module-card automation-controls"><div><div className="control-icon"><FileSpreadsheet size={18} /></div><div><strong>真实官网查询</strong><span>只查询 Excel 中的真实提单号和柜号，官网异常会写入失败原因</span></div></div><label className="setting-toggle"><span>{automation?.enabled ? '定时任务已启用' : '定时任务已停用'}</span><input type="checkbox" checked={Boolean(automation?.enabled)} onChange={(event) => onToggleAutomation(event.target.checked)} /><span className="switch-slider" /></label></section>
       <RunHistory runs={runs} />
     </>}
 
     {page === 'exports' && <>
-      <section className="export-summary-grid"><article><FileCheck2 size={20} /><div><span>当前工作簿</span><strong>{automation?.workbook?.records || 0} 条记录</strong><small>{automation?.workbook ? fullDate(automation.workbook.modifiedAt) : '尚未导入'}</small></div><a href="/api/workbooks/current">下载<Download size={14} /></a></article><article><Archive size={20} /><div><span>自动备份</span><strong>{backups.length} 个文件</strong><small>每次更新前自动生成</small></div></article><article><FileSpreadsheet size={20} /><div><span>运行记录</span><strong>{runs.length} 次</strong><small>最多保留最近 30 次</small></div></article></section>
-      <section className="module-card"><div className="module-card-header"><div><strong>备份文件</strong><span>按时间倒序排列</span></div></div><div className="backup-list">{backups.length ? backups.map((backup) => <div key={backup.name}><div className="backup-icon"><Archive size={17} /></div><div><strong>{backup.name}</strong><span>{backup.reason} · {(backup.size / 1024).toFixed(1)} KB · {fullDate(backup.createdAt)}</span></div><a href={`/api/backups/${encodeURIComponent(backup.name)}`}><Download size={15} />下载</a></div>) : <div className="empty-module">尚无备份文件，执行一次更新后会自动生成。</div>}</div></section>
+      <section className="export-summary-grid"><article><FileCheck2 size={20} /><div><span>当前工作簿</span><strong>{automation?.workbook?.records || 0} 条记录</strong><small>{automation?.workbook ? fullDate(automation.workbook.modifiedAt) : '尚未导入'}</small></div><a href={automation?.workbook ? '/api/workbooks/current' : '#'} onClick={(event) => { if (!automation?.workbook) { event.preventDefault(); onToast('请先导入 Excel 或新增单号'); } }}>下载<Download size={14} /></a></article><article><Archive size={20} /><div><span>备份文件</span><strong>{backups.length} 个文件</strong><small>更新前自动生成，也可手动创建</small></div><button className="secondary-button backup-create" onClick={async () => { await onCreateBackup(); await refreshModuleData(); }} disabled={!automation?.workbook}>创建备份</button></article><article><FileSpreadsheet size={20} /><div><span>运行记录</span><strong>{runs.length} 次</strong><small>最多保留最近 30 次</small></div></article></section>
+      <section className="module-card"><div className="module-card-header"><div><strong>备份文件</strong><span>按时间倒序排列，恢复前会再次自动备份当前文件</span></div></div><div className="backup-list">{backups.length ? backups.map((backup) => <div key={backup.name}><div className="backup-icon"><Archive size={17} /></div><div><strong>{backup.name}</strong><span>{backup.reason} · {(backup.size / 1024).toFixed(1)} KB · {fullDate(backup.createdAt)}</span></div><div className="backup-actions"><a href={`/api/backups/${encodeURIComponent(backup.name)}`}><Download size={15} />下载</a><button className="danger-button" onClick={async () => { await onRestoreBackup(backup.name); await refreshModuleData(); }} disabled={!automation?.workbook}>恢复</button></div></div>) : <div className="empty-module">尚无备份文件，执行一次更新或手动创建备份后会显示。</div>}</div></section>
     </>}
 
     {page === 'settings' && <section className="settings-grid">
-      <article className="settings-card"><div className="settings-card-title"><Server size={19} /><div><strong>采集服务</strong><span>本地服务器运行状态</span></div><span className="setting-ok">运行中</span></div><div className="setting-row"><span>运行模式</span><strong>{automation?.mode === 'live' ? '官网模式' : '演示模式'}</strong></div><div className="setting-row"><span>支持船司规则</span><strong>{automation?.supportedCarriers || 15} 家</strong></div><div className="setting-row"><span>服务端口</span><strong>8787</strong></div></article>
-      <article className="settings-card"><div className="settings-card-title"><Timer size={19} /><div><strong>计划任务</strong><span>仅在服务持续运行时执行</span></div><span className="setting-ok">已启用</span></div><div className="setting-row"><span>执行时区</span><strong>{automation?.timezone || 'Asia/Shanghai'}</strong></div><div className="setting-row"><span>执行时间</span><strong>{automation?.schedule.map((item) => item.time).join(' / ')}</strong></div><div className="setting-row"><span>查询范围</span><strong>未到港或未卸船</strong></div></article>
+      <article className="settings-card"><div className="settings-card-title"><Server size={19} /><div><strong>采集服务</strong><span>本地服务器运行状态</span></div><span className="setting-ok">运行中</span></div><div className="setting-row"><span>运行模式</span><strong>真实官网数据</strong></div><div className="setting-row"><span>支持船司规则</span><strong>{automation?.supportedCarriers || 15} 家</strong></div><div className="setting-row"><span>服务端口</span><strong>{window.location.port || '8787'}</strong></div></article>
+      <article className="settings-card"><div className="settings-card-title"><Timer size={19} /><div><strong>计划任务</strong><span>仅在服务持续运行时执行</span></div><span className={automation?.enabled ? 'setting-ok' : 'setting-warn'}>{automation?.enabled ? '已启用' : '已停用'}</span></div><div className="setting-row"><span>定时任务开关</span><label className="setting-toggle"><span>{automation?.enabled ? '启用' : '停用'}</span><input type="checkbox" checked={Boolean(automation?.enabled)} onChange={(event) => onToggleAutomation(event.target.checked)} /><span className="switch-slider" /></label></div><div className="setting-row"><span>执行时区</span><strong>{automation?.timezone || 'Asia/Shanghai'}</strong></div><div className="setting-row"><span>执行时间</span><strong>{automation?.schedule.map((item) => item.time).join(' / ')}</strong></div><div className="setting-row"><span>查询范围</span><strong>未到港或未卸船</strong></div></article>
       <article className="settings-card"><div className="settings-card-title"><MessageSquare size={19} /><div><strong>企业微信通知</strong><span>任务完成后发送汇总</span></div><span className={automation?.notificationConfigured ? 'setting-ok' : 'setting-warn'}>{automation?.notificationConfigured ? '已配置' : '待配置'}</span></div><div className="setting-help">在项目根目录的 <code>.env</code> 中填写 <code>WECHAT_WEBHOOK_URL</code>，重启服务后生效。密钥不会显示在页面或日志中。</div></article>
     </section>}
   </div>;

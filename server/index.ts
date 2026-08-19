@@ -4,7 +4,6 @@ import express from 'express';
 import multer from 'multer';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DemoCarrierAdapter } from './adapters/demo.js';
 import { ALL_CARRIER_RULES } from './automation/carriers.js';
 import { AutomationEngine } from './automation/engine.js';
 import { startScheduler } from './automation/scheduler.js';
@@ -12,8 +11,6 @@ import type { CarrierSource, Shipment } from './types.js';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
-const isDemoMode = () => process.env.SCRAPER_MODE === 'demo';
-const adapters = [new DemoCarrierAdapter()];
 const engine = new AutomationEngine();
 await engine.store.initialize();
 startScheduler(engine);
@@ -29,21 +26,14 @@ const upload = multer({
 app.use(cors());
 app.use(express.json());
 
-let demoShipments: Shipment[] = [];
 let lastSync = new Date().toISOString();
-
-async function collectDemo() {
-  const batches = await Promise.all(adapters.map((adapter) => adapter.fetchShipments()));
-  demoShipments = batches.flat();
-  lastSync = new Date().toISOString();
-}
 
 function colorFor(code: string) {
   const colors: Record<string, string> = { COSCO: '#147d73', MAERSK: '#38a9d3', MSC: '#e2a51d', ONE: '#bd2e78', ZIM: '#2765ae', EVERGREEN: '#338356' };
   return colors[code] || '#6b858f';
 }
 
-function buildSources(shipments: Shipment[], mode: 'demo' | 'live'): CarrierSource[] {
+function buildSources(shipments: Shipment[], syncAt: string): CarrierSource[] {
   const groups = new Map<string, Shipment[]>();
   shipments.forEach((item) => groups.set(item.carrierCode, [...(groups.get(item.carrierCode) || []), item]));
   return [...groups.entries()].map(([code, records]) => ({
@@ -51,15 +41,21 @@ function buildSources(shipments: Shipment[], mode: 'demo' | 'live'): CarrierSour
     name: records[0].carrier,
     code,
     color: colorFor(code),
-    mode,
-    status: mode === 'live' ? 'warning' : 'online',
-    lastSync,
+    mode: 'live',
+    status: records.every((record) => record.progress === '已完成')
+      ? 'online'
+      : records.some((record) => record.progress === '失败')
+        ? 'warning'
+        : 'offline',
+    lastSync: syncAt,
     recordCount: records.length,
   }));
 }
 
 async function dashboardPayload() {
   const workbookRecords = await engine.dashboardRecords();
+  const automation = await engine.status();
+  const generatedAt = automation.lastRun?.finishedAt || lastSync;
   if (workbookRecords.length) {
     const shipments: Shipment[] = workbookRecords.map(({ record, carrier, carrierCode }) => ({
       id: `XLSX-${record.rowNumber}`,
@@ -84,15 +80,13 @@ async function dashboardPayload() {
       vesselState: record.vesselState || '未到港未卸船',
       progress: record.progress || '待查询',
     }));
-    return { shipments, sources: buildSources(shipments, isDemoMode() ? 'demo' : 'live'), generatedAt: lastSync };
+    return { shipments, sources: buildSources(shipments, generatedAt), generatedAt };
   }
-  if (!isDemoMode()) return { shipments: [], sources: [], generatedAt: lastSync };
-  if (!demoShipments.length) await collectDemo();
-  return { shipments: demoShipments, sources: buildSources(demoShipments, 'demo'), generatedAt: lastSync };
+  return { shipments: [], sources: [], generatedAt };
 }
 
 app.get('/api/health', async (_req, res) => {
-  res.json({ ok: true, adapters: adapters.length, lastSync, automation: await engine.status() });
+  res.json({ ok: true, lastSync, automation: await engine.status() });
 });
 
 app.get('/api/dashboard', async (_req, res, next) => {
@@ -106,6 +100,24 @@ app.get('/api/dashboard', async (_req, res, next) => {
 app.get('/api/automation', async (_req, res, next) => {
   try {
     res.json(await engine.status());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/automation/settings', async (_req, res, next) => {
+  try {
+    res.json(await engine.settings());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/automation/settings', async (req, res, next) => {
+  try {
+    if (typeof req.body?.enabled !== 'boolean') throw new Error('enabled 必须是布尔值');
+    const settings = await engine.updateSettings({ enabled: req.body.enabled });
+    res.json({ settings, automation: await engine.status() });
   } catch (error) {
     next(error);
   }
@@ -140,11 +152,21 @@ app.get('/api/backups/:name', async (req, res, next) => {
   }
 });
 
-app.post('/api/demo/seed', async (_req, res, next) => {
+app.post('/api/backups/create', async (_req, res, next) => {
   try {
-    if (!isDemoMode()) throw new Error('官网模式下不能加载演示数据；如需演示，请显式设置 SCRAPER_MODE=demo');
-    const workbook = await engine.store.seedFullDemo();
-    res.json({ workbook, automation: await engine.status(), dashboard: await dashboardPayload() });
+    if (!(await engine.store.exists())) throw new Error('尚未导入 Excel，无法创建备份');
+    const backupPath = await engine.store.backup('手动创建备份');
+    res.json({ backupPath, backups: await engine.store.listBackups() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/backups/:name/restore', async (req, res, next) => {
+  try {
+    const workbook = await engine.store.restore(req.params.name);
+    lastSync = new Date().toISOString();
+    res.json({ workbook, backups: await engine.store.listBackups(), dashboard: await dashboardPayload(), automation: await engine.status() });
   } catch (error) {
     next(error);
   }
@@ -178,14 +200,9 @@ app.post('/api/automation/run', async (_req, res, next) => {
 
 app.post('/api/sync', async (_req, res, next) => {
   try {
-    if (await engine.store.exists()) {
-      const run = await engine.run('manual');
-      lastSync = run.finishedAt;
-    } else if (!isDemoMode()) {
-      throw new Error('官网模式下请先导入 Excel 或新增单号');
-    } else {
-      await collectDemo();
-    }
+    if (!(await engine.store.exists())) throw new Error('请先导入 Excel 或新增单号');
+    const run = await engine.run('manual');
+    lastSync = run.finishedAt;
     res.json(await dashboardPayload());
   } catch (error) {
     next(error);

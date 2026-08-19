@@ -196,50 +196,11 @@ export class WorkbookStore {
     return path.join(this.backupDirectory, safeName);
   }
 
-  async seedFullDemo() {
-    await this.initialize();
-    if (await this.exists()) await this.backup('加载完整演示数据');
-    const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet('船期追踪', { views: [{ state: 'frozen', ySplit: 1 }] });
-    const headers = [...REQUIRED_HEADERS];
-    sheet.addRow(headers);
-    const examples = [
-      ['', '', 'ONEY1234567890', 'ONEU1234567'],
-      ['', '', 'MAEU2234567890', 'MSKU2234567'],
-      ['地中海', '', 'MAEU3234567890', 'MSCU3234567'],
-      ['', '', 'EGLV4234567890', 'EGHU4234567'],
-      ['', '', 'OOLU5234567890', 'OOLU5234567'],
-      ['', '', 'WHLC6234567890', 'WHSU6234567'],
-      ['', '', 'ZIMU7234567890', 'ZCSU7234567'],
-      ['', '', 'MATS8234567890', 'MATU8234567'],
-      ['', '', 'YMJA9234567890', 'YMLU9234567'],
-      ['', '', 'SML12345678901', 'SMLU1034567'],
-      ['', '', 'CMDU1134567890', 'CMAU1134567'],
-      ['', '', 'COSU1234567890', 'CSNU1234567'],
-      ['', '', 'HLCU1334567890', 'HLXU1334567'],
-      ['', '', 'HDUJ1434567890', 'HDSU1434567'],
-      ['', '', 'HDMU1534567890', 'HMMU1534567'],
-    ];
-    examples.forEach(([carrier, arrival, bill, container]) => sheet.addRow([carrier, arrival, bill, container, '未卸船', '未到港未卸船', '', '完整演示数据，可替换为真实单号', '待查询']));
-    sheet.columns = [
-      { width: 18 }, { width: 21 }, { width: 20 }, { width: 18 }, { width: 21 },
-      { width: 19 }, { width: 21 }, { width: 38 }, { width: 13 },
-    ];
-    const header = sheet.getRow(1);
-    header.height = 30;
-    header.eachCell((cell) => {
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: '0B3347' } };
-      cell.font = { bold: true, color: { argb: 'FFFFFF' } };
-      cell.alignment = { horizontal: 'center', vertical: 'middle' };
-    });
-    for (let rowNumber = 2; rowNumber <= sheet.rowCount; rowNumber += 1) {
-      const row = sheet.getRow(rowNumber);
-      row.height = 29;
-      if (rowNumber % 2 === 0) row.eachCell((cell) => { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'F3F8F7' } }; });
-      row.getCell(8).alignment = { wrapText: true, vertical: 'middle' };
-    }
-    sheet.autoFilter = 'A1:I16';
-    await workbook.xlsx.writeFile(this.currentPath);
+  async restore(name: string) {
+    const backupPath = this.backupPath(name);
+    await fs.access(backupPath);
+    if (await this.exists()) await this.backup('恢复备份前自动备份');
+    await fs.copyFile(backupPath, this.currentPath);
     return this.metadata();
   }
 

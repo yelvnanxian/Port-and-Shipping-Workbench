@@ -14,7 +14,7 @@ export const CARRIER_RULES: CarrierRule[] = [
   { prefix: 'CMDU', code: 'CMA', name: '达飞 CMA CGM', removePrefix: true, queryMode: 'bill', url: 'https://www.cma-cgm.com/ebusiness/tracking', integration: 'pending' },
   { prefix: 'COSU', code: 'COSCO', name: '中远海运 COSCO', removePrefix: true, queryMode: 'bill', url: 'https://elines.coscoshipping.com/ebusiness/cargoTracking?trackingType=BILLOFLADING', integration: 'pending' },
   { prefix: 'HLCU', code: 'HAPAG', name: '赫伯罗特 Hapag-Lloyd', removePrefix: true, queryMode: 'bill', url: 'https://www.hapag-lloyd.cn/en/online-business/track/track-by-booking-solution.html', integration: 'pending' },
-  { prefix: 'HDUJ', code: 'HEDE', name: '合德', removePrefix: false, queryMode: 'bill', url: 'http://elines.hedehk.com/cargoDynamic', integration: 'pending' },
+  { prefix: 'HDUJ', code: 'HEDE', name: '合德', removePrefix: false, queryMode: 'bill', url: 'http://elines.hedehk.com/cargoDynamic', integration: 'ready' },
   { prefix: 'HDMU', code: 'HMM', name: '韩新海运 HMM', removePrefix: true, queryMode: 'bill', url: 'https://www.hmm21.com/e-service/general/trackNTrace/TrackNTrace.do', integration: 'pending' },
 ];
 

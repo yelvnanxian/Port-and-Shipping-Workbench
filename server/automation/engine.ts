@@ -4,13 +4,9 @@ import { resolveCarrierRule } from './carriers.js';
 import { notifyWeCom } from './notifier.js';
 import { OoclTrackingProvider } from './oocl.js';
 import { HedeTrackingProvider } from './hede.js';
-import { CarrierRoutingTrackingProvider, DemoTrackingProvider, trackRecord, type TrackingProvider } from './tracker.js';
-import type { RunSummary, WorkbookRecord } from './types.js';
+import { CarrierRoutingTrackingProvider, trackRecord, type TrackingProvider } from './tracker.js';
+import type { AutomationSettings, RunSummary, WorkbookRecord } from './types.js';
 import { WorkbookStore } from './workbook.js';
-
-function isDemoMode() {
-  return process.env.SCRAPER_MODE === 'demo';
-}
 
 function isQueryable(record: WorkbookRecord) {
   return !record.vesselState || record.vesselState === '未到港未卸船' || record.vesselState === '已到港未卸船';
@@ -20,10 +16,12 @@ export class AutomationEngine {
   private running = false;
   readonly store: WorkbookStore;
   readonly runLogPath: string;
+  readonly settingsPath: string;
 
   constructor(store = new WorkbookStore()) {
     this.store = store;
     this.runLogPath = path.join(store.dataDirectory, 'runs.json');
+    this.settingsPath = path.join(store.dataDirectory, 'settings.json');
   }
 
   get isRunning() {
@@ -31,12 +29,10 @@ export class AutomationEngine {
   }
 
   private provider(): TrackingProvider {
-    return isDemoMode()
-      ? new DemoTrackingProvider()
-      : new CarrierRoutingTrackingProvider(new Map<string, TrackingProvider>([
-        ['OOCL', new OoclTrackingProvider()],
-        ['HEDE', new HedeTrackingProvider()],
-      ]));
+    return new CarrierRoutingTrackingProvider(new Map<string, TrackingProvider>([
+      ['OOCL', new OoclTrackingProvider()],
+      ['HEDE', new HedeTrackingProvider()],
+    ]));
   }
 
   async listRuns(): Promise<RunSummary[]> {
@@ -45,6 +41,33 @@ export class AutomationEngine {
     } catch {
       return [];
     }
+  }
+
+  async settings(): Promise<AutomationSettings> {
+    const fallback: AutomationSettings = {
+      enabled: true,
+      schedule: [
+        { time: '09:00', cron: '0 9 * * *' },
+        { time: '11:00', cron: '0 11 * * *' },
+        { time: '17:30', cron: '30 17 * * *' },
+      ],
+      timezone: 'Asia/Shanghai',
+    };
+    try {
+      const saved = JSON.parse(await fs.readFile(this.settingsPath, 'utf8')) as Partial<AutomationSettings>;
+      return { ...fallback, ...saved, schedule: fallback.schedule };
+    } catch {
+      await this.store.initialize();
+      await fs.writeFile(this.settingsPath, JSON.stringify(fallback, null, 2));
+      return fallback;
+    }
+  }
+
+  async updateSettings(patch: Partial<Pick<AutomationSettings, 'enabled'>>) {
+    const current = await this.settings();
+    const next = { ...current, enabled: patch.enabled ?? current.enabled };
+    await fs.writeFile(this.settingsPath, JSON.stringify(next, null, 2));
+    return next;
   }
 
   private async saveRun(summary: RunSummary) {
@@ -75,30 +98,35 @@ export class AutomationEngine {
       }
       await this.store.save(workbook);
 
-      for (const record of records) {
-        try {
-          const { rule, result } = await trackRecord(record, provider);
-          record.carrierHint = record.carrierHint || rule.name;
-          record.arrivalTime = result.arrivalTime;
-          record.dischargeTime = result.dischargeTime;
-          record.vesselState = result.dischargeTime
-            ? '已到港已卸船'
-            : result.arrived
-              ? '已到港未卸船'
-              : '未到港未卸船';
-          record.lastUpdated = new Date();
-          record.progress = '已完成';
-          record.note = `${result.arrivalKind ? `到港字段=${result.arrivalKind}；` : ''}${result.rawSummary}；来源=${rule.name}官网`;
-          success += 1;
-          if (record.vesselState !== '已到港已卸船') unfinished += 1;
-        } catch (error) {
-          record.lastUpdated = new Date();
-          record.progress = '失败';
-          record.note = error instanceof Error ? error.message : '未知抓取错误';
-          failedBills.push(record.billNo);
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < records.length) {
+          const record = records[cursor++];
+          try {
+            const { rule, result } = await trackRecord(record, provider);
+            record.carrierHint = record.carrierHint || rule.name;
+            record.arrivalTime = result.arrivalTime;
+            record.dischargeTime = result.dischargeTime;
+            record.vesselState = result.dischargeTime
+              ? '已到港已卸船'
+              : result.arrived
+                ? '已到港未卸船'
+                : '未到港未卸船';
+            record.lastUpdated = new Date();
+            record.progress = '已完成';
+            record.note = `${result.arrivalKind ? `到港字段=${result.arrivalKind}；` : ''}${result.rawSummary}；来源=${rule.name}官网`;
+            success += 1;
+            if (record.vesselState !== '已到港已卸船') unfinished += 1;
+          } catch (error) {
+            record.lastUpdated = new Date();
+            record.progress = '失败';
+            record.note = error instanceof Error ? error.message : '未知抓取错误';
+            failedBills.push(record.billNo);
+          }
+          this.store.writeRecord(sheet, headerMap, record);
         }
-        this.store.writeRecord(sheet, headerMap, record);
-      }
+      };
+      await Promise.all(Array.from({ length: Math.min(5, records.length) }, () => worker()));
       await this.store.save(workbook);
 
       const finishedAt = new Date();
@@ -127,16 +155,14 @@ export class AutomationEngine {
   async status() {
     const workbook = await this.store.metadata();
     const runs = await this.listRuns();
+    const settings = await this.settings();
     return {
       running: this.running,
-      mode: isDemoMode() ? 'demo' : 'live',
+      mode: 'live' as const,
+      enabled: settings.enabled,
       workbook,
-      schedule: [
-        { time: '09:00', cron: '0 9 * * *' },
-        { time: '11:00', cron: '0 11 * * *' },
-        { time: '17:30', cron: '30 17 * * *' },
-      ],
-      timezone: 'Asia/Shanghai',
+      schedule: settings.schedule,
+      timezone: settings.timezone,
       notificationConfigured: Boolean(process.env.WECHAT_WEBHOOK_URL),
       lastRun: runs[0] || null,
       supportedCarriers: 15,

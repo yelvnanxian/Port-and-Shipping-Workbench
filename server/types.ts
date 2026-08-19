@@ -23,7 +23,7 @@ export interface CarrierSource {
   name: string;
   code: string;
   color: string;
-  mode: 'demo' | 'live';
+  mode: 'live';
   status: 'online' | 'warning' | 'offline';
   lastSync: string;
   recordCount: number;

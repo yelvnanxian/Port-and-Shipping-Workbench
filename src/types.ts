@@ -23,7 +23,7 @@ export interface CarrierSource {
   name: string;
   code: string;
   color: string;
-  mode: 'demo' | 'live';
+  mode: 'live';
   status: 'online' | 'warning' | 'offline';
   lastSync: string;
   recordCount: number;
@@ -37,7 +37,8 @@ export interface DashboardData {
 
 export interface AutomationStatus {
   running: boolean;
-  mode: 'demo' | 'live';
+  mode: 'live';
+  enabled: boolean;
   workbook: null | {
     path: string;
     fileName: string;

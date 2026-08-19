@@ -56,3 +56,9 @@ export interface RunSummary {
   backupPath: string | null;
   notification: 'sent' | 'skipped' | 'failed';
 }
+
+export interface AutomationSettings {
+  enabled: boolean;
+  schedule: Array<{ time: string; cron: string }>;
+  timezone: 'Asia/Shanghai';
+}

@@ -5,29 +5,6 @@ export interface TrackingProvider {
   query(input: TrackingQuery): Promise<TrackingResult>;
 }
 
-function hash(value: string) {
-  return [...value].reduce((total, character) => ((total * 31) + character.charCodeAt(0)) >>> 0, 7);
-}
-
-export class DemoTrackingProvider implements TrackingProvider {
-  async query(input: TrackingQuery): Promise<TrackingResult> {
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    const seed = hash(`${input.originalBillNo}:${input.queryType}:${input.containerNo}`);
-    const now = new Date();
-    const arrived = seed % 4 !== 0;
-    const arrivalTime = new Date(now.getTime() + (arrived ? -(seed % 72) : (seed % 60 + 4)) * 60 * 60 * 1000);
-    const hasDischarged = arrived && seed % 3 === 0;
-    return {
-      arrivalTime,
-      arrivalKind: arrived ? 'ATA' : 'ETA',
-      arrived,
-      dischargeTime: hasDischarged ? new Date(arrivalTime.getTime() + (4 + seed % 18) * 60 * 60 * 1000) : null,
-      rawSummary: `演示结果；查询方式=${input.queryType}; 查询值=${input.queryType === 'bill' ? input.queryBillNo : input.containerNo}`,
-      sourceUrl: input.rule.url,
-    };
-  }
-}
-
 export class PendingLiveTrackingProvider implements TrackingProvider {
   async query(input: TrackingQuery): Promise<TrackingResult> {
     throw new Error(`${input.rule.name} 官网解析器待使用真实测试单号联调`);
