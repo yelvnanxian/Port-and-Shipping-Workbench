@@ -26,6 +26,10 @@ function publicTime(value: TrackingTime) {
   return value instanceof Date ? value.toISOString() : value;
 }
 
+function sourceUrlFromNote(note: string) {
+  return note.match(/(?:^|；)来源=(https?:\/\/[^；\s]+)/i)?.[1] || '';
+}
+
 export class AutomationEngine {
   private running = false;
   readonly store: WorkbookStore;
@@ -235,10 +239,12 @@ export class AutomationEngine {
     return this.store.readRecords(sheet, headerMap).map((record) => {
       let carrier = record.carrierHint || '未知船司';
       let carrierCode = 'UNKNOWN';
+      let sourceUrl = '';
       try {
         const rule = resolveCarrierRule(record);
         carrier = record.carrierHint || rule.name;
         carrierCode = rule.code;
+        sourceUrl = rule.url;
       } catch { /* 错误展示在 Excel 备注中 */ }
       return {
         record: {
@@ -248,6 +254,7 @@ export class AutomationEngine {
         },
         carrier,
         carrierCode,
+        sourceUrl: sourceUrlFromNote(record.note) || sourceUrl,
       };
     });
   }

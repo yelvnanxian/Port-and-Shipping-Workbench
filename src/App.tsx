@@ -142,6 +142,20 @@ function CarrierMark({ code }: { code: string }) {
   </span>;
 }
 
+function OfficialVerificationLink({ shipment, compact = false }: { shipment: Shipment; compact?: boolean }) {
+  if (!shipment.sourceUrl) return <span className="empty-value">暂无来源</span>;
+  return <a
+    className={compact ? 'verification-link compact' : 'verification-link'}
+    href={shipment.sourceUrl}
+    target="_blank"
+    rel="noreferrer"
+    title="打开船司官网；同时复制提单号，便于无法直达结果页时粘贴查询"
+    onClick={() => navigator.clipboard?.writeText(shipment.billNo).catch(() => undefined)}
+  >
+    {compact ? '官网核验' : '打开本次官网来源'}<ExternalLink size={compact ? 12 : 14} />
+  </a>;
+}
+
 export default function App() {
   const [activePage, setActivePage] = useState<PageId>(() => {
     const page = window.location.hash.replace('#', '') as PageId;
@@ -515,7 +529,7 @@ export default function App() {
         </section>
       </div>}
 
-      {detail && <div className="drawer-backdrop" onClick={() => setDetail(null)}><aside className="detail-drawer" onClick={(event) => event.stopPropagation()}><button className="drawer-close" onClick={() => setDetail(null)}><X size={19} /></button><p className="eyebrow">SHIPMENT DETAIL</p><h2>单号追踪详情</h2><div className="drawer-carrier"><CarrierMark code={detail.carrierCode} /><div><strong>{detail.carrier}</strong><span>{detail.billNo}</span></div></div><div className="detail-grid"><DetailItem label="提单号" value={detail.billNo} /><DetailItem label="柜号" value={detail.containerNo || '—'} /><DetailItem label="查询进度" value={<ProgressBadge shipment={detail} />} /><DetailItem label="船只状态" value={<VesselStateBadge shipment={detail} />} /></div><div className="timeline"><TimelineItem label="到港时间 ATA / ETA" value={formatDateTime(detail.eta)} active={Boolean(detail.eta)} /><TimelineItem label="卸船时间" value={formatDateTime(detail.dischargeTime)} active={Boolean(detail.dischargeTime)} last /></div>{detail.note && <div className="detail-alert"><CircleAlert size={17} /><div><strong>查询备注</strong><span>{detail.note}</span></div></div>}<div className="drawer-meta">数据更新于 {formatDateTime(detail.lastUpdated)}</div></aside></div>}
+      {detail && <div className="drawer-backdrop" onClick={() => setDetail(null)}><aside className="detail-drawer" onClick={(event) => event.stopPropagation()}><button className="drawer-close" onClick={() => setDetail(null)}><X size={19} /></button><p className="eyebrow">SHIPMENT DETAIL</p><h2>单号追踪详情</h2><div className="drawer-carrier"><CarrierMark code={detail.carrierCode} /><div><strong>{detail.carrier}</strong><span>{detail.billNo}</span></div></div><div className="detail-grid"><DetailItem label="提单号" value={detail.billNo} /><DetailItem label="柜号" value={detail.containerNo || '—'} /><DetailItem label="查询进度" value={<ProgressBadge shipment={detail} />} /><DetailItem label="船只状态" value={<VesselStateBadge shipment={detail} />} /></div><div className="timeline"><TimelineItem label="到港时间 ATA / ETA" value={formatDateTime(detail.eta)} active={Boolean(detail.eta)} /><TimelineItem label="卸船时间" value={formatDateTime(detail.dischargeTime)} active={Boolean(detail.dischargeTime)} last /></div>{detail.note && <div className="detail-alert"><CircleAlert size={17} /><div><strong>查询备注</strong><span>{detail.note}</span></div></div>}<div className="verification-card"><div><Globe2 size={17} /><div><strong>官网真实性核验</strong><span>打开时会复制提单号；部分官网会重新查询或要求 Cookie。</span></div></div><OfficialVerificationLink shipment={detail} /></div><div className="drawer-meta">数据更新于 {formatDateTime(detail.lastUpdated)}</div></aside></div>}
       {toast && <div className="toast"><Check size={17} />{toast}</div>}
     </div>
   );
@@ -684,8 +698,8 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
 
     {page === 'tracking' && <section className="module-card">
       <div className="module-card-header"><div><strong>全部追踪记录</strong><span>Excel 当前共 {data?.shipments.length || 0} 条</span></div><div className="compact-legend"><span className="legend-dot success" />已完成卸船<span className="legend-dot info" />等待卸船<span className="legend-dot muted-dot" />等待到港</div></div>
-      <div className="module-table-wrap"><table className="module-table"><thead><tr><th>船司</th><th>提单号</th><th>柜号</th><th>到港时间</th><th>卸船时间</th><th>船只状态</th><th>进度</th><th>最后更新</th><th /></tr></thead><tbody>
-        {(data?.shipments || []).map((item) => <tr key={item.id}><td><div className="carrier-cell"><CarrierMark code={item.carrierCode} /><div><strong>{item.carrier}</strong><span>{item.carrierCode}</span></div></div></td><td className="mono">{item.billNo}</td><td className="mono">{item.containerNo || '—'}</td><td><div className="date-cell eta">{formatDateTime(item.eta, true)}</div></td><td><div className="date-cell discharge">{formatDateTime(item.dischargeTime, true)}</div></td><td><VesselStateBadge shipment={item} /></td><td><ProgressBadge shipment={item} /></td><td>{timeAgo(item.lastUpdated)}</td><td><button className="row-action" onClick={() => onOpenDetail(item)}><ChevronRight size={17} /></button></td></tr>)}
+      <div className="module-table-wrap"><table className="module-table"><thead><tr><th>船司</th><th>提单号</th><th>柜号</th><th>到港时间</th><th>卸船时间</th><th>船只状态</th><th>进度</th><th>最后更新</th><th>真实性核验</th><th /></tr></thead><tbody>
+        {(data?.shipments || []).map((item) => <tr key={item.id}><td><div className="carrier-cell"><CarrierMark code={item.carrierCode} /><div><strong>{item.carrier}</strong><span>{item.carrierCode}</span></div></div></td><td className="mono">{item.billNo}</td><td className="mono">{item.containerNo || '—'}</td><td><div className="date-cell eta">{formatDateTime(item.eta, true)}</div></td><td><div className="date-cell discharge">{formatDateTime(item.dischargeTime, true)}</div></td><td><VesselStateBadge shipment={item} /></td><td><ProgressBadge shipment={item} /></td><td>{timeAgo(item.lastUpdated)}</td><td><OfficialVerificationLink shipment={item} compact /></td><td><button className="row-action" title="查看追踪详情" onClick={() => onOpenDetail(item)}><ChevronRight size={17} /></button></td></tr>)}
       </tbody></table></div>
     </section>}
 
@@ -719,7 +733,7 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
 }
 
 function RunHistory({ runs }: { runs: RunView[] }) {
-  return <section className="module-card"><div className="module-card-header"><div><strong>任务运行记录</strong><span>最近 {runs.length} 次 · 失败记录包含船司、提单号、柜号、官网原因和浏览器证据</span></div></div><div className="run-list">{runs.length ? runs.map((run) => <article className="run-entry" key={run.id}><div className="run-summary"><span className={`run-state ${run.failed ? 'failed' : 'success'}`}>{run.failed ? <CircleAlert size={15} /> : <Check size={15} />}</span><div className="run-main"><strong>{run.reason === 'scheduled' ? '定时更新' : '手动更新'}</strong><span>{run.id} · {fullDate(run.finishedAt)}</span></div><div className="run-stats"><span>查询 <strong>{run.total}</strong></span><span>成功 <strong>{run.success}</strong></span><span>未完成 <strong>{run.unfinished}</strong></span><span className={run.failed ? 'danger-text' : ''}>失败 <strong>{run.failed}</strong></span></div><span className={`notify-state ${run.notification}`}>{run.notification === 'sent' ? '通知已发送' : run.notification === 'failed' ? '通知失败' : '未配置通知'}</span></div>{run.failedDetails?.length ? <div className="run-failures">{run.failedDetails.map((detail) => <div key={`${run.id}-${detail.billNo}-${detail.containerNo}`}><span className="failure-category">{detail.category}</span><strong>{detail.carrier} · {detail.billNo}</strong><span>柜号：{detail.containerNo || '未提供'}</span><p>{detail.reason}</p>{detail.evidencePath ? <a className="evidence-link" href={detail.evidencePath} target="_blank" rel="noreferrer">查看浏览器失败截图<ExternalLink size={12} /></a> : null}</div>)}</div> : null}</article>) : <div className="empty-module">尚无运行记录。</div>}</div></section>;
+  return <section className="module-card"><div className="module-card-header"><div><strong>任务运行记录</strong><span>最近 {runs.length} 次 · 失败记录包含船司、提单号、柜号、官网原因和浏览器证据</span></div></div><div className="run-list">{runs.length ? runs.map((run) => <article className="run-entry" key={run.id}><div className="run-summary"><span className={`run-state ${run.failed ? 'failed' : 'success'}`}>{run.failed ? <CircleAlert size={15} /> : <Check size={15} />}</span><div className="run-main"><strong>{run.reason === 'scheduled' ? '定时更新' : '手动更新'}</strong><span>{run.id} · {fullDate(run.finishedAt)}</span></div><div className="run-stats"><span>查询 <strong>{run.total}</strong></span><span>成功 <strong>{run.success}</strong></span><span>未完成 <strong>{run.unfinished}</strong></span><span className={run.failed ? 'danger-text' : ''}>失败 <strong>{run.failed}</strong></span></div><span className={`notify-state ${run.notification}`}>{run.notification === 'sent' ? '通知已发送' : run.notification === 'failed' ? '通知失败' : '未配置通知'}</span></div>{run.failedDetails?.length ? <div className="run-failures">{run.failedDetails.map((detail) => <div key={`${run.id}-${detail.billNo}-${detail.containerNo}`}><span className="failure-category">{detail.category}</span><strong>{detail.carrier} · {detail.billNo}</strong><span>柜号：{detail.containerNo || '未提供'}</span><p>{detail.reason}</p><a className="evidence-link" href={detail.sourceUrl} target="_blank" rel="noreferrer" onClick={() => navigator.clipboard?.writeText(detail.billNo).catch(() => undefined)}>打开官网重试<ExternalLink size={12} /></a>{detail.evidencePath ? <a className="evidence-link" href={detail.evidencePath} target="_blank" rel="noreferrer">查看浏览器失败截图<ExternalLink size={12} /></a> : null}</div>)}</div> : null}</article>) : <div className="empty-module">尚无运行记录。</div>}</div></section>;
 }
 
 function MetricCard({ title, value, suffix, trend, icon, tone, alert = false }: { title: string; value: number; suffix: string; trend: string; icon: React.ReactNode; tone: string; alert?: boolean }) {
