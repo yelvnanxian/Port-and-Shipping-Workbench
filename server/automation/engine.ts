@@ -144,7 +144,7 @@ export class AutomationEngine {
           const record = records[cursor++];
           try {
             const { rule, result } = await trackRecord(record, activeProvider);
-            record.carrierHint = record.carrierHint || rule.name;
+            record.carrierHint = rule.name;
             record.arrivalTime = result.arrivalTimeText || result.arrivalTime;
             record.dischargeTime = result.dischargeTimeText || result.dischargeTime;
             record.vesselState = result.dischargeTime || result.dischargeTimeText
@@ -166,7 +166,7 @@ export class AutomationEngine {
               carrier = rule.name;
               carrierCode = rule.code;
               sourceUrl = rule.url;
-              record.carrierHint = record.carrierHint || rule.name;
+              record.carrierHint = rule.name;
             } catch { /* 前缀错误由失败原因说明 */ }
             const failure = classifyTrackingError(error);
             const detail: FailedTrackingDetail = {
@@ -246,7 +246,7 @@ export class AutomationEngine {
       let sourceUrl = '';
       try {
         const rule = resolveCarrierRule(record);
-        carrier = record.carrierHint || rule.name;
+        carrier = rule.name;
         carrierCode = rule.code;
         sourceUrl = rule.url;
       } catch { /* 错误展示在 Excel 备注中 */ }

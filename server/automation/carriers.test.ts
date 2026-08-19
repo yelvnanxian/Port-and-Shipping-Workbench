@@ -22,6 +22,39 @@ test('MEDU 前缀自动走 MSC 并保留完整提单号', () => {
   assert.equal(buildQueryBillNo('MEDUPN815212', rule), 'MEDUPN815212');
 });
 
+test('马士基去前缀失败后自动改用完整提单号', async () => {
+  const calls: string[] = [];
+  const result: TrackingResult = { arrivalTime: new Date('2026-08-18T01:00:00Z'), arrivalKind: 'ETA', arrived: false, dischargeTime: null, rawSummary: '完整提单号查询成功', sourceUrl: 'https://www.maersk.com/tracking/MAEU271552824' };
+  const provider: TrackingProvider = {
+    async query(input) {
+      calls.push(input.queryType === 'container' ? input.containerNo : input.queryBillNo);
+      if (input.queryBillNo === '271552824') throw new Error('去前缀提单无结果');
+      return result;
+    },
+  };
+  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '马士基', billNo: 'MAEU271552824', containerNo: 'CICU6040856', arrivalTime: null, dischargeTime: null, vesselState: '', lastUpdated: null, note: '', progress: '' };
+  const tracked = await trackRecord(record, provider);
+  assert.deepEqual(calls, ['271552824', 'MAEU271552824']);
+  assert.match(tracked.result.rawSummary, /自动改用完整提单号 MAEU271552824/);
+});
+
+test('马士基两个提单号均失败后自动改用柜号', async () => {
+  const calls: string[] = [];
+  const containerResult: TrackingResult = { arrivalTime: new Date('2026-08-18T01:00:00Z'), arrivalKind: 'ATA', arrived: true, dischargeTime: null, rawSummary: '柜号查询成功', sourceUrl: 'https://www.maersk.com/tracking/CICU6040856' };
+  const provider: TrackingProvider = {
+    async query(input) {
+      const value = input.queryType === 'container' ? input.containerNo : input.queryBillNo;
+      calls.push(value);
+      if (input.queryType === 'bill') throw new Error(`${value} 无结果`);
+      return containerResult;
+    },
+  };
+  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '马士基', billNo: 'MAEU271552824', containerNo: 'CICU6040856', arrivalTime: null, dischargeTime: null, vesselState: '', lastUpdated: null, note: '', progress: '' };
+  const tracked = await trackRecord(record, provider);
+  assert.deepEqual(calls, ['271552824', 'MAEU271552824', 'CICU6040856']);
+  assert.match(tracked.result.rawSummary, /自动改用柜号 CICU6040856/);
+});
+
 test('森罗官网查询固定移除 SMLM 四位前缀', () => {
   const rule = resolveCarrierRule({ billNo: 'SMLMNJBD6A755700', carrierHint: '森罗' });
   assert.equal(rule.code, 'SMLINE');

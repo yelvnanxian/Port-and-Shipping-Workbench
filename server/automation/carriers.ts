@@ -2,7 +2,7 @@ import type { CarrierRule, WorkbookRecord } from './types.js';
 
 export const CARRIER_RULES: CarrierRule[] = [
   { prefix: 'ONEY', code: 'ONE', name: '海洋网联', removePrefix: true, queryMode: 'bill', url: 'https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking', integration: 'limited', integrationMessage: '已接入官网直连与浏览器模拟点击；验证页面仍会按风控失败并保存截图' },
-  { prefix: 'MAEU', code: 'MAERSK', name: '马士基', removePrefix: true, queryMode: 'bill', url: 'https://www.maersk.com/tracking/', integration: 'limited', integrationMessage: '已接入官网直连与浏览器模拟点击；仅在页面可核验单号及时间字段时写入' },
+  { prefix: 'MAEU', code: 'MAERSK', name: '马士基', removePrefix: true, queryMode: 'bill', url: 'https://www.maersk.com/tracking/', integration: 'limited', integrationMessage: '依次尝试去前缀提单号、完整提单号和柜号；仅在页面可核验号码及时间字段时写入' },
   { prefix: 'MEDU', code: 'MSC', name: '地中海', removePrefix: false, queryMode: 'bill', url: 'https://www.msccargo.cn/en/track-a-shipment?agencyPath=hkg', integration: 'limited', integrationMessage: '已接入官网直连与浏览器模拟点击；仅在页面可核验单号及时间字段时写入' },
   { prefix: 'EGLV', code: 'EVERGREEN', name: '长荣', removePrefix: true, queryMode: 'bill', url: 'https://www.evergreen-shipping.cn/servlet/TDB1_CargoTracking.do', integration: 'ready', integrationMessage: '已接入提单查询与货柜动态二次查询' },
   { prefix: 'OOLU', code: 'OOCL', name: '东方海外', removePrefix: false, queryMode: 'bill', url: 'https://www.oocl.com/schi/Pages/default.aspx', integration: 'ready', integrationMessage: '已接入 OOCL 官方公开追踪接口' },

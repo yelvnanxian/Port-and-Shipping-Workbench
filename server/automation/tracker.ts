@@ -39,6 +39,47 @@ export function mergeTrackingResults(primary: TrackingResult, secondary: Trackin
   };
 }
 
+async function queryMaerskAlternatives(
+  baseQuery: Omit<TrackingQuery, 'queryType'>,
+  initialError: unknown,
+  provider: TrackingProvider,
+) {
+  const failures = [{ label: `去前缀提单号 ${baseQuery.queryBillNo}`, failure: classifyTrackingError(initialError) }];
+  const alternatives: Array<{ label: string; query: TrackingQuery }> = [];
+  if (baseQuery.originalBillNo !== baseQuery.queryBillNo) {
+    alternatives.push({
+      label: `完整提单号 ${baseQuery.originalBillNo}`,
+      query: { ...baseQuery, queryBillNo: baseQuery.originalBillNo, queryType: 'bill' },
+    });
+  }
+  if (baseQuery.containerNo) {
+    alternatives.push({
+      label: `柜号 ${baseQuery.containerNo}`,
+      query: { ...baseQuery, queryType: 'container' },
+    });
+  }
+  for (const alternative of alternatives) {
+    try {
+      const result = await provider.query(alternative.query);
+      return {
+        ...result,
+        rawSummary: `${result.rawSummary}；马士基去前缀查询失败后已自动改用${alternative.label}`,
+      };
+    } catch (error) {
+      failures.push({ label: alternative.label, failure: classifyTrackingError(error) });
+    }
+  }
+  const lastFailure = failures.at(-1)!.failure;
+  throw trackingError(
+    lastFailure.category,
+    `马士基多号码查询均失败：${failures.map(({ label, failure }) => `${label}（${failure.category}：${failure.reason}）`).join('；')}`,
+    {
+      evidencePath: lastFailure.evidencePath || failures.find(({ failure }) => failure.evidencePath)?.failure.evidencePath,
+      sourceUrl: lastFailure.sourceUrl || failures.find(({ failure }) => failure.sourceUrl)?.failure.sourceUrl,
+    },
+  );
+}
+
 export async function trackRecord(record: WorkbookRecord, provider: TrackingProvider) {
   const rule = resolveCarrierRule(record);
   const baseQuery = {
@@ -51,11 +92,14 @@ export async function trackRecord(record: WorkbookRecord, provider: TrackingProv
   try {
     billResult = await provider.query({ ...baseQuery, queryType: 'bill' });
   } catch (billError) {
+    const billFailure = classifyTrackingError(billError);
+    if (rule.code === 'MAERSK' && (billFailure.category === '订单号验证失败' || billFailure.category === '解析失败')) {
+      return { rule, result: await queryMaerskAlternatives(baseQuery, billError, provider) };
+    }
     if (rule.queryMode !== 'bill-then-container') throw billError;
     if (!record.containerNo) throw trackingError('订单号验证失败', `${rule.name}提单查询失败，且没有柜号可供备用查询`);
     try {
       const containerResult = await provider.query({ ...baseQuery, queryType: 'container' });
-      const billFailure = classifyTrackingError(billError);
       return {
         rule,
         result: {
@@ -64,7 +108,6 @@ export async function trackRecord(record: WorkbookRecord, provider: TrackingProv
         },
       };
     } catch (containerError) {
-      const billFailure = classifyTrackingError(billError);
       const containerFailure = classifyTrackingError(containerError);
       throw trackingError(
         containerFailure.category,
