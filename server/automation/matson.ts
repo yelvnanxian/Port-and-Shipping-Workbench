@@ -31,6 +31,10 @@ function parseDate(value: string) {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+function normalizedContainer(value: string) {
+  return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
 function apiMessage(payload: unknown) {
   if (!payload || typeof payload !== 'object') return '';
   const object = payload as Record<string, unknown>;
@@ -42,8 +46,8 @@ export function parseMatsonTrackingResponse(payload: unknown, expectedContainerN
   const error = apiMessage(payload);
   if (error) throw trackingError('官网接口异常', `美森官方接口返回错误：${error}`);
   const containers = [...new Set(objects.map((object) => firstText(object, ['containerNumber', 'containerNo'])).filter(Boolean))];
-  const expected = expectedContainerNo.trim().toUpperCase();
-  if (expected && containers.length && !containers.some((container) => container.toUpperCase() === expected)) {
+  const expected = normalizedContainer(expectedContainerNo);
+  if (expected && containers.length && !containers.some((container) => normalizedContainer(container) === expected)) {
     throw trackingError('订单号验证失败', `美森官网返回的柜号与输入不一致（输入 ${expected}，官网返回 ${containers.join('、')}）`);
   }
   if (!objects.length || (!containers.length && objects.length <= 1)) throw trackingError('订单号验证失败', '美森官网未返回该提单的货物记录');
@@ -55,7 +59,7 @@ export function parseMatsonTrackingResponse(payload: unknown, expectedContainerN
     arrivalKind: arrival ? 'ETA' : null,
     arrived: Boolean(discharge),
     dischargeTime: discharge,
-    rawSummary: `美森官方公开接口解析成功；柜号=${expected || containers[0] || '未提供'}${discharge ? '；已发现卸船事件' : '；未发现卸船完成事件'}`,
+    rawSummary: `美森官方公开接口解析成功；柜号=${expectedContainerNo.trim().toUpperCase() || containers[0] || '未提供'}${discharge ? '；已发现卸船事件' : '；未发现卸船完成事件'}`,
     sourceUrl: MATSON_SOURCE,
   };
 }
@@ -73,7 +77,8 @@ export class MatsonTrackingProvider implements TrackingProvider {
     if (!/^MATS[A-Z0-9]{6,}$/.test(billNo)) throw trackingError('订单号验证失败', `美森提单号格式不正确：${billNo || '空'}`);
     const url = new URL(MATSON_ENDPOINT);
     url.searchParams.set('cargoNumber', billNo);
-    url.searchParams.set('type', 'bl');
+    // 官网 CargoPortal 的“关单号”查询使用 bk；bl 会返回 CS.0004。
+    url.searchParams.set('type', 'bk');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
