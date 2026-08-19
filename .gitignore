@@ -1,0 +1,13 @@
+node_modules/
+dist/
+dist-server/
+.env
+data/current.xlsx
+data/backups/
+data/uploads/
+data/runs.json
+scripts/node_modules
+*.log
+*.tsbuildinfo
+outputs/**/*.png
+outputs/**/*.inspect.ndjson

@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "skipLibCheck": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "outDir": "dist-server",
+    "types": ["node"]
+  },
+  "include": ["vite.config.ts", "server/**/*.ts"]
+}

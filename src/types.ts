@@ -1,0 +1,62 @@
+export type ShipmentStatus = '待靠泊' | '作业中' | '已卸船' | '计划变更';
+
+export interface Shipment {
+  id: string;
+  carrier: string;
+  carrierCode: string;
+  billNo: string;
+  containerNo: string;
+  vesselVoyage: string;
+  terminal: string;
+  eta: string | null;
+  berthingTime: string | null;
+  dischargeTime: string | null;
+  status: ShipmentStatus;
+  lastUpdated: string;
+  note?: string;
+  vesselState?: '未到港未卸船' | '已到港未卸船' | '已到港已卸船';
+  progress?: '待查询' | '查询中' | '已完成' | '失败';
+}
+
+export interface CarrierSource {
+  id: string;
+  name: string;
+  code: string;
+  color: string;
+  mode: 'demo' | 'live';
+  status: 'online' | 'warning' | 'offline';
+  lastSync: string;
+  recordCount: number;
+}
+
+export interface DashboardData {
+  shipments: Shipment[];
+  sources: CarrierSource[];
+  generatedAt: string;
+}
+
+export interface AutomationStatus {
+  running: boolean;
+  mode: 'demo' | 'live';
+  workbook: null | {
+    path: string;
+    fileName: string;
+    size: number;
+    modifiedAt: string;
+    records: number;
+    queryable: number;
+  };
+  schedule: Array<{ time: string; cron: string }>;
+  timezone: string;
+  notificationConfigured: boolean;
+  supportedCarriers: number;
+  lastRun: null | {
+    id: string;
+    finishedAt: string;
+    total: number;
+    success: number;
+    unfinished: number;
+    failed: number;
+    notification: 'sent' | 'skipped' | 'failed';
+  };
+}
