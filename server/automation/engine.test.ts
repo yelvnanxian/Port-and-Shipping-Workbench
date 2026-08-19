@@ -97,3 +97,30 @@ test('automation run completes when every workbook record is skipped', async () 
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test('自定义任务按船司范围运行并支持删除', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-task-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([
+      { billNo: 'HDUJGLA26BZ04040', containerNo: 'SEKU6633329' },
+      { billNo: 'EGLV1234567890', containerNo: 'EGHU1234567' },
+    ]);
+    const engine = new AutomationEngine(store);
+    Object.defineProperty(engine, 'provider', { value: () => ({
+      async query(input: { rule: { url: string } }) {
+        return { arrivalTime: new Date('2026-08-19T00:00:00.000Z'), arrivalKind: 'ATA' as const, arrived: true, dischargeTime: null, rawSummary: '测试官网结果', sourceUrl: input.rule.url };
+      },
+    }) });
+    const task = await engine.createTask({ name: '只更新合德', scope: 'carrier', carrierCodes: ['HEDE'] });
+    const run = await engine.runTask(task.id);
+    assert.equal(run.total, 1);
+    assert.equal(run.success, 1);
+    const savedTask = (await engine.listTasks())[0];
+    assert.equal(savedTask.lastRunId, run.id);
+    await engine.deleteTasks([task.id]);
+    assert.deepEqual(await engine.listTasks(), []);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

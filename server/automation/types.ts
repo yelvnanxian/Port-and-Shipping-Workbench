@@ -81,6 +81,21 @@ export interface RunSummary {
   notification: 'sent' | 'skipped' | 'failed';
 }
 
+export type AutomationTaskScope = 'all' | 'carrier' | 'shipment';
+
+export interface AutomationTask {
+  id: string;
+  name: string;
+  scope: AutomationTaskScope;
+  carrierCodes: string[];
+  shipmentIds: string[];
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastRunAt: string | null;
+  lastRunId: string | null;
+}
+
 export interface RunProgress {
   id: string;
   reason: RunSummary['reason'];

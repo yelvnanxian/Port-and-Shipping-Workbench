@@ -179,6 +179,98 @@ app.get('/api/automation/runs', async (_req, res, next) => {
   }
 });
 
+app.delete('/api/automation/runs', async (req, res, next) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter((id: unknown): id is string => typeof id === 'string') : [];
+    if (!ids.length) throw new Error('请选择要删除的任务记录');
+    res.json({ runs: await engine.deleteRuns(ids) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/automation/runs/:id', async (req, res, next) => {
+  try {
+    res.json({ runs: await engine.deleteRuns([req.params.id]) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/automation/tasks', async (_req, res, next) => {
+  try {
+    res.json({ tasks: await engine.listTasks() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/automation/tasks', async (req, res, next) => {
+  try {
+    const task = await engine.createTask({
+      name: typeof req.body?.name === 'string' ? req.body.name : '',
+      scope: req.body?.scope,
+      carrierCodes: Array.isArray(req.body?.carrierCodes) ? req.body.carrierCodes.filter((value: unknown): value is string => typeof value === 'string') : [],
+      shipmentIds: Array.isArray(req.body?.shipmentIds) ? req.body.shipmentIds.filter((value: unknown): value is string => typeof value === 'string') : [],
+    });
+    res.json({ task, tasks: await engine.listTasks() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/automation/tasks/:id', async (req, res, next) => {
+  try {
+    if (typeof req.body?.enabled !== 'boolean') throw new Error('enabled 必须是布尔值');
+    res.json({ task: await engine.updateTask(req.params.id, { enabled: req.body.enabled }), tasks: await engine.listTasks() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/automation/tasks', async (req, res, next) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter((id: unknown): id is string => typeof id === 'string') : [];
+    if (!ids.length) throw new Error('请选择要删除的自动化任务');
+    res.json({ tasks: await engine.deleteTasks(ids) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/automation/tasks/:id', async (req, res, next) => {
+  try {
+    res.json({ tasks: await engine.deleteTasks([req.params.id]) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/automation/tasks/:id/run', async (req, res, next) => {
+  try {
+    const run = await engine.runTask(req.params.id);
+    lastSync = run.finishedAt;
+    res.json({ run, dashboard: await dashboardPayload(), automation: await engine.status(), tasks: await engine.listTasks() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/automation/tasks/run-batch', async (req, res, next) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter((id: unknown): id is string => typeof id === 'string') : [];
+    if (!ids.length) throw new Error('请选择要执行的自动化任务');
+    const runs = [];
+    for (const id of ids) {
+      runs.push(await engine.runTask(id));
+      lastSync = runs[runs.length - 1].finishedAt;
+    }
+    res.json({ runs, dashboard: await dashboardPayload(), automation: await engine.status(), tasks: await engine.listTasks() });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/carriers', (_req, res) => {
   res.json({ carriers: ALL_CARRIER_RULES });
 });
@@ -250,9 +342,11 @@ app.post('/api/intake', async (req, res, next) => {
   }
 });
 
-app.post('/api/automation/run', async (_req, res, next) => {
+app.post('/api/automation/run', async (req, res, next) => {
   try {
-    const run = await engine.run('manual');
+    const carrierCodes = Array.isArray(req.body?.carrierCodes) ? req.body.carrierCodes.filter((value: unknown): value is string => typeof value === 'string') : undefined;
+    const shipmentIds = Array.isArray(req.body?.shipmentIds) ? req.body.shipmentIds.filter((value: unknown): value is string => typeof value === 'string') : undefined;
+    const run = await engine.run('manual', carrierCodes?.length || shipmentIds?.length ? { carrierCodes, shipmentIds } : undefined);
     lastSync = run.finishedAt;
     res.json({ run, dashboard: await dashboardPayload(), automation: await engine.status() });
   } catch (error) {

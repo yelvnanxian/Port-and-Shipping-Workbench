@@ -2,9 +2,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Frame, type Locator, type Page } from 'playwright-core';
 import { classifyTrackingError, trackingError } from './errors.js';
+import { parseHapagTrackingText } from './hapag.js';
 import { parseMaerskTrackingText } from './maersk.js';
 import { parseOoclDate } from './oocl.js';
 import { probeUrl } from './official-probe.js';
+import { parseZimTrackingText } from './zim.js';
 import type { TrackingProvider } from './tracker.js';
 import type { ArrivalKind, TrackingQuery, TrackingResult } from './types.js';
 
@@ -82,8 +84,9 @@ const STEALTH_INIT_SCRIPT = `
   delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
 `;
 
-function getRandomUserAgent(): string {
-  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+function getUserAgent(carrierCode: string): string {
+  const hash = [...carrierCode].reduce((sum, character) => sum + character.charCodeAt(0), 0);
+  return USER_AGENTS[hash % USER_AGENTS.length];
 }
 
 /**
@@ -261,13 +264,125 @@ async function firstVisibleInput(page: Page) {
         if (await candidate.isVisible().catch(() => false) && await candidate.isEditable().catch(() => false)) return candidate;
       }
     }
+    const fallbackInputs = frame.locator('input:not([type="hidden"]):not([type="button"]):not([type="submit"])');
+    for (let index = 0; index < await fallbackInputs.count(); index += 1) {
+      const candidate = fallbackInputs.nth(index);
+      if (await candidate.isVisible().catch(() => false) && await candidate.isEditable().catch(() => false)) return candidate;
+    }
   }
   return null;
 }
 
 async function renderedPageText(page: Page) {
-  const texts = await Promise.all(page.frames().map((frame) => frame.locator('body').innerText().catch(() => '')));
+  const texts = await Promise.all(page.frames().map(async (frame) => {
+    const body = await frame.locator('body').innerText().catch(() => '');
+    const inputValues = await frame.locator('input:not([type="hidden"])').evaluateAll((elements) => elements
+      .map((element) => element as HTMLInputElement)
+      .filter((element) => element.value)
+      .map((element) => element.value)
+      .join('\n')).catch(() => '');
+    return [body, inputValues].filter(Boolean).join('\n');
+  }));
   return texts.filter(Boolean).join('\n');
+}
+
+function verificationText(text: string) {
+  return /cloudflare|verify you are human|security check|attention required|access denied|captcha|challenge|验证码|安全验证|被阻止|请验证您是真人|滑动以保护|确认本人/i.test(text);
+}
+
+function humanVerificationEnabled() {
+  return process.env.BROWSER_HEADLESS === 'false' && process.env.BROWSER_HUMAN_VERIFY !== 'false';
+}
+
+function humanVerificationTimeout() {
+  const configured = Number(process.env.BROWSER_HUMAN_VERIFY_TIMEOUT_MS || 180_000);
+  return Number.isFinite(configured) && configured >= 10_000 ? configured : 180_000;
+}
+
+async function waitForManualVerification(page: Page, input: TrackingQuery) {
+  let text = await renderedPageText(page);
+  if (!verificationText(text)) return false;
+  if (!humanVerificationEnabled()) {
+    throw trackingError('验证码或风控', `${input.rule.name}需要人工通过安全验证；请将 BROWSER_HEADLESS=false 后重试，打开的 Chrome 窗口完成验证后系统会复用本地会话`);
+  }
+  const timeout = humanVerificationTimeout();
+  console.log(`[BrowserTrackingProvider] ${input.rule.name}需要人工验证，请在打开的 Chrome 窗口完成验证；等待 ${Math.round(timeout / 1000)} 秒`);
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(1_000);
+    text = await renderedPageText(page);
+    if (!verificationText(text)) {
+      console.log(`[BrowserTrackingProvider] ${input.rule.name}人工验证已通过，继续解析官网结果`);
+      return true;
+    }
+  }
+  throw trackingError('验证码或风控', `${input.rule.name}人工验证等待超时；请完成验证后重新执行该船司查询`);
+}
+
+async function waitForCarrierReady(page: Page, input: TrackingQuery) {
+  const timeout = input.rule.code === 'WANHAI' ? 30_000 : 5_000;
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    await waitForManualVerification(page, input).catch((error) => { throw error; });
+    const text = await renderedPageText(page);
+    if (text.trim() || await firstVisibleInput(page)) return;
+    await page.waitForTimeout(500);
+  }
+}
+
+async function preventZimMapScroll(page: Page) {
+  await page.evaluate(() => {
+    document.documentElement.style.scrollBehavior = 'auto';
+    document.body.style.scrollBehavior = 'auto';
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    if (!(window as Window & { __portOpsZimScrollPatched?: boolean }).__portOpsZimScrollPatched) {
+      Element.prototype.scrollIntoView = function scrollIntoView() {
+        void originalScrollIntoView;
+      };
+      (window as Window & { __portOpsZimScrollPatched?: boolean }).__portOpsZimScrollPatched = true;
+    }
+  }).catch(() => undefined);
+}
+
+async function clickWanhaiTrackingEntry(page: Page) {
+  for (const frame of page.frames()) {
+    const links = frame.locator('a, button, [role="button"]').filter({ hasText: /cargo tracking|货物追踪|货柜追踪|cargotracking/i });
+    for (let index = 0; index < await links.count(); index += 1) {
+      const link = links.nth(index);
+      if (!await link.isVisible().catch(() => false)) continue;
+      await link.click({ timeout: 5_000 }).catch(() => undefined);
+      return true;
+    }
+  }
+  return false;
+}
+
+async function openHapagContainerDetails(page: Page, input: TrackingQuery) {
+  if (input.rule.code !== 'HAPAG' || !input.containerNo) return false;
+  const expected = normalizedReference(input.containerNo);
+  for (const frame of page.frames()) {
+    const rows = frame.locator('tr');
+    for (let index = 0; index < await rows.count(); index += 1) {
+      const row = rows.nth(index);
+      const rowText = normalizedReference(await row.innerText().catch(() => ''));
+      if (!rowText.includes(expected)) continue;
+      const radio = row.locator('input[type="radio"], input[type="checkbox"]');
+      if (await radio.count()) await radio.first().check({ force: true }).catch(() => radio.first().click({ force: true }).catch(() => undefined));
+      const details = row.locator('button, a, [role="button"]').filter({ hasText: /^details$/i });
+      if (await details.count() && await details.first().isVisible().catch(() => false)) {
+        await details.first().click({ force: true, timeout: 5_000 }).catch(() => undefined);
+        await page.waitForTimeout(750);
+        return true;
+      }
+    }
+    const details = frame.locator('button, a, [role="button"]').filter({ hasText: /^details$/i });
+    if (await details.count() && await details.first().isVisible().catch(() => false)) {
+      await details.first().click({ force: true, timeout: 5_000 }).catch(() => undefined);
+      await page.waitForTimeout(750);
+      return true;
+    }
+  }
+  return false;
 }
 
 async function clickCookieButton(frame: Frame) {
@@ -330,7 +445,7 @@ async function waitForRenderedOutcome(page: Page, queryValue: string, timeout = 
     const text = await renderedPageText(page);
     if (/cloudflare|verify you are human|security check|attention required|access denied|captcha|验证码|安全验证|被阻止|no result|not found|no shipment|invalid (?:booking|bill|cargo|tracking)|未找到|查无|无记录|不存在|bad gateway|service unavailable|internal server error|gateway timeout/i.test(text)) return;
     if (normalizedReference(text).includes(normalizedReference(queryValue))
-      && /\bATA\b|\bETA\b|actual(?: time of)? arrival|estimated(?: time of)? arrival|expected arrival|实际到港|预计到港|实际抵达|预计抵达|discharg|卸船|卸载完成/i.test(text)) return;
+      && /\bATA\b|\bETA\b|current ETA|arrival in|actual(?: time of)? arrival|estimated(?: time of)? arrival|expected arrival|实际到港|预计到港|实际抵达|预计抵达|discharg|卸船|卸载完成|details/i.test(text)) return;
     await page.waitForTimeout(250);
   } while (Date.now() < deadline);
 }
@@ -394,7 +509,7 @@ export class BrowserTrackingProvider implements TrackingProvider {
     } catch { /* 首次访问还没有 Cookie 状态 */ }
 
     // 每个船司使用不同的 User-Agent，进一步降低指纹相似度
-    const userAgent = getRandomUserAgent();
+    const userAgent = getUserAgent(input.rule.code);
 
     const context = await browser.newContext({
       locale: 'zh-CN',
@@ -442,6 +557,7 @@ export class BrowserTrackingProvider implements TrackingProvider {
         else throw error;
       }
       sourceUrl = page.url();
+      await waitForCarrierReady(page, input);
       const cookies = await context.cookies(sourceUrl);
       let acceptedCookies = await dismissCookieDialog(page);
       await waitForRenderedOutcome(page, queryValue, input.rule.code === 'COSCO' ? 8_000 : 1_500);
@@ -452,6 +568,7 @@ export class BrowserTrackingProvider implements TrackingProvider {
       if (acceptedCookies) await this.saveState(context, input);
       const initialText = await renderedPageText(page);
       if (!normalizedReference(initialText).includes(normalizedReference(queryValue))) {
+        if (input.rule.code === 'WANHAI') await clickWanhaiTrackingEntry(page);
         const inputElement = await firstVisibleInput(page);
         if (inputElement) {
           // 真人行为模拟：环境变量控制是否启用
@@ -464,14 +581,21 @@ export class BrowserTrackingProvider implements TrackingProvider {
             await inputElement.fill(queryValue);
           }
           await submitTrackingQuery(inputElement);
+          if (input.rule.code === 'ZIM') await preventZimMapScroll(page);
         }
       }
+      await waitForManualVerification(page, input);
+      if (input.rule.code === 'HAPAG') await openHapagContainerDetails(page, input);
       await waitForRenderedOutcome(page, queryValue, Math.min(this.timeoutMs, RESULT_TIMEOUT_MS));
       sourceUrl = page.url();
       const renderedText = await renderedPageText(page);
       const result = input.rule.code === 'MAERSK'
         ? parseMaerskTrackingText(renderedText, input)
-        : parseRenderedTrackingText(renderedText, input);
+        : input.rule.code === 'ZIM'
+          ? parseZimTrackingText(renderedText, input)
+          : input.rule.code === 'HAPAG'
+            ? parseHapagTrackingText(renderedText, input)
+            : parseRenderedTrackingText(renderedText, input);
       const evidencePath = await this.saveEvidence(page, input, 'success');
       return { ...result, sourceUrl, evidencePath };
     } catch (error) {

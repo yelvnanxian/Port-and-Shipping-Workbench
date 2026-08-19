@@ -8,6 +8,7 @@ data/backups/
 data/uploads/
 data/runs.json
 data/settings.json
+data/tasks.json
 data/browser-evidence/
 data/browser-state/
 scripts/node_modules

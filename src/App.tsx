@@ -34,7 +34,7 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import type { AutomationStatus, CarrierSource, DashboardData, Shipment, ShipmentStatus } from './types';
+import type { AutomationStatus, AutomationTask, CarrierSource, DashboardData, Shipment, ShipmentStatus } from './types';
 
 type PageId = 'overview' | 'tracking' | 'sources' | 'automation' | 'exports' | 'settings';
 
@@ -46,6 +46,8 @@ interface SettingsView {
   notificationConfigured: boolean;
   webhookPreview: string;
 }
+
+type RunSelection = { carrierCodes?: string[]; shipmentIds?: string[] };
 
 const navItems: Array<{ id: PageId; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'overview', label: '运营总览', icon: LayoutDashboard },
@@ -305,13 +307,17 @@ export default function App() {
     };
   }, [data]);
 
-  async function handleSync() {
+  async function handleSync(selection?: RunSelection) {
     setSyncing(true);
     setPollingRun(true);
     runRequestPending.current = true;
     try {
       if (!automation?.workbook) throw new Error('请先导入 Excel 或新增单号');
-      const payload = await apiRequest<{ run: { total: number; success: number; failed: number; skipped: number }; dashboard: DashboardData; automation: AutomationStatus }>('/api/automation/run', { method: 'POST' });
+      const payload = await apiRequest<{ run: { total: number; success: number; failed: number; skipped: number }; dashboard: DashboardData; automation: AutomationStatus }>('/api/automation/run', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(selection || {}),
+      });
       setData(payload.dashboard);
       setAutomation(payload.automation);
       setToast(`本次查询 ${payload.run.total} 条：成功 ${payload.run.success} 条，失败 ${payload.run.failed} 条，跳过 ${payload.run.skipped} 条`);
@@ -322,6 +328,14 @@ export default function App() {
       setPollingRun(false);
       setSyncing(false);
     }
+  }
+
+  async function handleSelectedSync() {
+    if (!selected.size) {
+      setToast('请先勾选要更新的船期');
+      return;
+    }
+    await handleSync({ shipmentIds: [...selected] });
   }
 
   async function handleUpload(file?: File) {
@@ -482,7 +496,7 @@ export default function App() {
           <div className={activePage === 'overview' ? '' : 'hidden-page'}>
           <section className="page-heading">
             <div><p className="eyebrow">OPERATIONS OVERVIEW</p><h1>运营总览</h1><p>集中追踪船期、靠泊与卸船动态，及时掌握异常变化。</p></div>
-            <div className="heading-actions"><button className="secondary-button add-record-button" onClick={() => setIntakeOpen(true)}><Ship size={17} />新增单号</button><button className="secondary-button" onClick={handleExport}><Download size={17} />导出 Excel</button><button className="primary-button" onClick={handleSync} disabled={syncing}><RefreshCw size={17} className={syncing ? 'spin' : ''} />{syncing ? '同步中…' : '同步最新数据'}</button></div>
+            <div className="heading-actions"><button className="secondary-button add-record-button" onClick={() => setIntakeOpen(true)}><Ship size={17} />新增单号</button>{selected.size > 0 && <button className="secondary-button" onClick={handleSelectedSync} disabled={syncing}><RefreshCw size={17} className={syncing ? 'spin' : ''} />更新已选 ({selected.size})</button>}<button className="secondary-button" onClick={handleExport}><Download size={17} />导出 Excel</button><button className="primary-button" onClick={() => handleSync()} disabled={syncing}><RefreshCw size={17} className={syncing ? 'spin' : ''} />{syncing ? '同步中…' : '同步最新数据'}</button></div>
           </section>
 
           <section className="automation-panel">
@@ -521,8 +535,8 @@ export default function App() {
 
           <section className={`table-card ${denseTable ? 'compact-table' : ''}`}>
             <div className="table-header">
-              <div><h2>船期追踪</h2><span>共 {filtered.length} 条记录</span></div>
-              <button className="view-settings" onClick={() => setDisplaySettingsOpen(true)}><SlidersHorizontal size={16} />显示设置</button>
+              <div><h2>船期追踪</h2><span>共 {filtered.length} 条记录 · 勾选后可只更新指定船期</span></div>
+              <div className="table-header-actions">{selected.size > 0 && <button className="view-settings" onClick={handleSelectedSync} disabled={syncing}><RefreshCw size={15} />更新已选</button>}<button className="view-settings" onClick={() => setDisplaySettingsOpen(true)}><SlidersHorizontal size={16} />显示设置</button></div>
             </div>
             <div className="filters-row">
               <label className="search-box"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索提单号、柜号或船司" />{query && <button onClick={() => setQuery('')}><X size={14} /></button>}</label>
@@ -647,7 +661,7 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
   data: DashboardData | null;
   automation: AutomationStatus | null;
   syncing: boolean;
-  onSync: () => Promise<void>;
+  onSync: (selection?: RunSelection) => Promise<void>;
   onToggleAutomation: (enabled: boolean) => Promise<void>;
   onCreateBackup: () => Promise<void>;
   onRestoreBackup: (name: string) => Promise<void>;
@@ -658,6 +672,7 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
 }) {
   const [carrierRules, setCarrierRules] = useState<CarrierRuleView[]>([]);
   const [runs, setRuns] = useState<RunView[]>([]);
+  const [tasks, setTasks] = useState<AutomationTask[]>([]);
   const [backups, setBackups] = useState<BackupView[]>([]);
   const [settingsView, setSettingsView] = useState<SettingsView | null>(null);
   const [webhookInput, setWebhookInput] = useState('');
@@ -665,6 +680,16 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
   const [webhookTesting, setWebhookTesting] = useState(false);
   const [browserSaving, setBrowserSaving] = useState(false);
   const [deletingBackup, setDeletingBackup] = useState('');
+  const [selectedTasks, setSelectedTasks] = useState<Set<string>>(new Set());
+  const [selectedRuns, setSelectedRuns] = useState<Set<string>>(new Set());
+  const [taskModalOpen, setTaskModalOpen] = useState(false);
+  const [taskName, setTaskName] = useState('');
+  const [taskScope, setTaskScope] = useState<AutomationTask['scope']>('all');
+  const [taskCarrierCodes, setTaskCarrierCodes] = useState<string[]>([]);
+  const [taskShipmentIds, setTaskShipmentIds] = useState<string[]>([]);
+  const [taskSaving, setTaskSaving] = useState(false);
+  const [taskRunning, setTaskRunning] = useState(false);
+  const [deletingTask, setDeletingTask] = useState('');
   const [moduleLoading, setModuleLoading] = useState(false);
 
   async function refreshModuleData() {
@@ -673,6 +698,7 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
       const requests: Promise<void>[] = [];
       if (page === 'sources') requests.push(apiRequest<{ carriers: CarrierRuleView[] }>('/api/carriers').then((payload) => setCarrierRules(payload.carriers || [])));
       if (page === 'automation' || page === 'exports') requests.push(apiRequest<{ runs: RunView[] }>('/api/automation/runs').then((payload) => setRuns(payload.runs || [])));
+      if (page === 'automation') requests.push(apiRequest<{ tasks: AutomationTask[] }>('/api/automation/tasks').then((payload) => setTasks(payload.tasks || [])));
       if (page === 'exports') requests.push(apiRequest<{ backups: BackupView[] }>('/api/backups').then((payload) => setBackups(payload.backups || [])));
       if (page === 'settings') requests.push(apiRequest<SettingsView>('/api/automation/settings').then((payload) => { setSettingsView(payload); setWebhookInput(''); }));
       await Promise.all(requests);
@@ -754,6 +780,129 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
     }
   }
 
+  function toggleTask(id: string) {
+    setSelectedTasks((previous) => {
+      const next = new Set(previous);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  function toggleRun(id: string) {
+    setSelectedRuns((previous) => {
+      const next = new Set(previous);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  async function createTask() {
+    if (!taskName.trim()) {
+      onToast('请填写任务名称');
+      return;
+    }
+    setTaskSaving(true);
+    try {
+      const payload = await apiRequest<{ tasks: AutomationTask[] }>('/api/automation/tasks', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: taskName, scope: taskScope, carrierCodes: taskCarrierCodes, shipmentIds: taskShipmentIds }),
+      });
+      setTasks(payload.tasks || []);
+      setTaskName('');
+      setTaskScope('all');
+      setTaskCarrierCodes([]);
+      setTaskShipmentIds([]);
+      setTaskModalOpen(false);
+      onToast('自定义任务已创建，可按顺序执行');
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '创建任务失败');
+    } finally {
+      setTaskSaving(false);
+    }
+  }
+
+  async function deleteSelectedTasks() {
+    if (!selectedTasks.size) return;
+    if (!window.confirm(`确认删除选中的 ${selectedTasks.size} 条自动化任务？`)) return;
+    try {
+      const payload = await apiRequest<{ tasks: AutomationTask[] }>('/api/automation/tasks', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [...selectedTasks] }) });
+      setTasks(payload.tasks || []);
+      setSelectedTasks(new Set());
+      onToast('选中的自动化任务已删除');
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '删除任务失败');
+    }
+  }
+
+  async function runSelectedTasks() {
+    if (!selectedTasks.size) {
+      onToast('请先选择要执行的任务');
+      return;
+    }
+    setTaskRunning(true);
+    try {
+      const orderedTaskIds = tasks.filter((task) => selectedTasks.has(task.id)).map((task) => task.id);
+      const payload = await apiRequest<{ runs: RunView[]; tasks: AutomationTask[]; dashboard: DashboardData; automation: AutomationStatus }>('/api/automation/tasks/run-batch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: orderedTaskIds }) });
+      setTasks(payload.tasks || []);
+      onToast(`已按选择顺序完成 ${payload.runs.length} 条任务`);
+      await refreshModuleData();
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '执行任务失败');
+    } finally {
+      setTaskRunning(false);
+    }
+  }
+
+  async function runTask(task: AutomationTask) {
+    setTaskRunning(true);
+    try {
+      const payload = await apiRequest<{ tasks: AutomationTask[]; dashboard: DashboardData; automation: AutomationStatus }>(`/api/automation/tasks/${encodeURIComponent(task.id)}/run`, { method: 'POST' });
+      setTasks(payload.tasks || []);
+      onToast(`任务“${task.name}”已完成`);
+      await refreshModuleData();
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '执行任务失败');
+    } finally {
+      setTaskRunning(false);
+    }
+  }
+
+  async function deleteRun(id: string) {
+    if (!window.confirm('确认删除这条运行记录？删除后无法恢复。')) return;
+    try {
+      const payload = await apiRequest<{ runs: RunView[] }>(`/api/automation/runs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      setRuns(payload.runs || []);
+      setSelectedRuns((previous) => { const next = new Set(previous); next.delete(id); return next; });
+      onToast('运行记录已删除');
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '删除运行记录失败');
+    }
+  }
+
+  async function deleteSelectedRuns() {
+    if (!selectedRuns.size) return;
+    if (!window.confirm(`确认删除选中的 ${selectedRuns.size} 条运行记录？`)) return;
+    try {
+      const payload = await apiRequest<{ runs: RunView[] }>('/api/automation/runs', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [...selectedRuns] }) });
+      setRuns(payload.runs || []);
+      setSelectedRuns(new Set());
+      onToast('选中的运行记录已删除');
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '删除运行记录失败');
+    }
+  }
+
+  async function syncCarrier(code: string) {
+    await onSync({ carrierCodes: [code] });
+    await refreshModuleData();
+  }
+
+  async function syncShipment(id: string) {
+    await onSync({ shipmentIds: [id] });
+    await refreshModuleData();
+  }
+
   const pageInfo = {
     tracking: ['SHIPMENT TRACKING', '船期追踪', '按 Excel 字段查看全部单号的到港、卸船和查询进度。'],
     sources: ['DATA SOURCES', '数据源管理', '查看船司识别规则、查询方式和官网解析器接入状态。'],
@@ -771,17 +920,17 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
 
     {moduleLoading && <div className="module-loading"><LoaderCircle className="spin" />正在加载模块数据…</div>}
 
-    {page === 'tracking' && <section className="module-card">
-      <div className="module-card-header"><div><strong>全部追踪记录</strong><span>Excel 当前共 {data?.shipments.length || 0} 条</span></div><div className="compact-legend"><span className="legend-dot success" />已完成卸船<span className="legend-dot info" />等待卸船<span className="legend-dot muted-dot" />等待到港</div></div>
-      <div className="module-table-wrap"><table className="module-table"><thead><tr><th>船司</th><th>提单号</th><th>柜号</th><th>到港时间</th><th>卸船时间</th><th>船只状态</th><th>进度</th><th>最后更新</th><th>真实性核验</th><th /></tr></thead><tbody>
-        {(data?.shipments || []).map((item) => <tr key={item.id}><td><div className="carrier-cell"><CarrierMark code={item.carrierCode} /><div><strong>{item.carrier}</strong><span>{item.carrierCode}</span></div></div></td><td className="mono">{item.billNo}</td><td className="mono">{item.containerNo || '—'}</td><td><div className="date-cell eta">{formatDateTime(item.eta, true)}</div></td><td><div className="date-cell discharge">{formatDateTime(item.dischargeTime, true)}</div></td><td><VesselStateBadge shipment={item} /></td><td><ProgressBadge shipment={item} /></td><td>{timeAgo(item.lastUpdated)}</td><td><VerificationActions shipment={item} compact /></td><td><button className="row-action" title="查看追踪详情" onClick={() => onOpenDetail(item)}><ChevronRight size={17} /></button></td></tr>)}
+      {page === 'tracking' && <section className="module-card">
+      <div className="module-card-header"><div><strong>全部追踪记录</strong><span>Excel 当前共 {data?.shipments.length || 0} 条 · 可单独更新某一条船期</span></div><div className="compact-legend"><span className="legend-dot success" />已完成卸船<span className="legend-dot info" />等待卸船<span className="legend-dot muted-dot" />等待到港</div></div>
+      <div className="module-table-wrap"><table className="module-table"><thead><tr><th>船司</th><th>提单号</th><th>柜号</th><th>到港时间</th><th>卸船时间</th><th>船只状态</th><th>进度</th><th>最后更新</th><th>真实性核验</th><th>操作</th></tr></thead><tbody>
+        {(data?.shipments || []).map((item) => <tr key={item.id}><td><div className="carrier-cell"><CarrierMark code={item.carrierCode} /><div><strong>{carrierLabel(item.carrierCode, item.carrier)}</strong><span>{item.carrierCode}</span></div></div></td><td className="mono">{item.billNo}</td><td className="mono">{item.containerNo || '—'}</td><td><div className="date-cell eta">{formatDateTime(item.eta, true)}</div></td><td><div className="date-cell discharge">{formatDateTime(item.dischargeTime, true)}</div></td><td><VesselStateBadge shipment={item} /></td><td><ProgressBadge shipment={item} /></td><td>{timeAgo(item.lastUpdated)}</td><td><VerificationActions shipment={item} compact /></td><td><div className="row-actions"><button className="row-action" title="只更新这一条船期" onClick={() => syncShipment(item.id)} disabled={syncing}><RefreshCw size={14} /></button><button className="row-action" title="查看追踪详情" onClick={() => onOpenDetail(item)}><ChevronRight size={17} /></button></div></td></tr>)}
       </tbody></table></div>
     </section>}
 
     {page === 'sources' && <section className="carrier-grid">
       {carrierRules.map((rule) => {
         const integrationLabel = { ready: '已接入', blocked: '浏览器仍受风控', limited: '浏览器备用已接入', error: '官网接口异常' }[rule.integration];
-        return <article className="carrier-rule-card" key={`${rule.code}-${rule.name}`}><div className="carrier-rule-head"><CarrierMark code={rule.code} /><div><strong>{carrierLabel(rule.code, rule.name)}</strong><span>{rule.prefix} · {rule.code}</span></div><span className={`integration-tag ${rule.integration}`}>{integrationLabel}</span></div><dl><div><dt>查询号码</dt><dd>{rule.removePrefix ? `去除 ${rule.code === 'SMLINE' ? 'SMLM' : rule.prefix} 前缀` : '保留完整提单号'}</dd></div><div><dt>查询方式</dt><dd>{rule.queryMode === 'bill-and-container' ? '提单号 + 柜号均需成功' : rule.queryMode === 'bill-or-container' ? '提单号 / 柜号任一成功' : rule.queryMode === 'bill-then-container' ? '提单失败后改查柜号' : '仅提单号'}</dd></div></dl><p className="integration-message">{rule.integrationMessage}</p><a href={rule.url} target="_blank" rel="noreferrer">打开船司查询页面<ExternalLink size={13} /></a></article>;
+        return <article className="carrier-rule-card" key={`${rule.code}-${rule.name}`}><div className="carrier-rule-head"><CarrierMark code={rule.code} /><div><strong>{carrierLabel(rule.code, rule.name)}</strong><span>{rule.prefix} · {rule.code}</span></div><span className={`integration-tag ${rule.integration}`}>{integrationLabel}</span></div><dl><div><dt>查询号码</dt><dd>{rule.removePrefix ? `去除 ${rule.code === 'SMLINE' ? 'SMLM' : rule.prefix} 前缀` : '保留完整提单号'}</dd></div><div><dt>查询方式</dt><dd>{rule.queryMode === 'bill-and-container' ? '提单号 + 柜号均需成功' : rule.queryMode === 'bill-or-container' ? '提单号 / 柜号任一成功' : rule.queryMode === 'bill-then-container' ? '提单失败后改查柜号' : '仅提单号'}</dd></div></dl><p className="integration-message">{rule.integrationMessage}</p><div className="carrier-rule-actions"><a href={rule.url} target="_blank" rel="noreferrer">打开船司查询页面<ExternalLink size={13} /></a><button className="text-action-button" onClick={() => syncCarrier(rule.code)} disabled={syncing}><RefreshCw size={13} />只更新此船司</button></div></article>;
       })}
     </section>}
 
@@ -790,7 +939,9 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
         {(automation?.schedule || []).map((schedule, index) => <article className="schedule-card" key={schedule.time}><div className="schedule-index">0{index + 1}</div><div><span>每日定时任务</span><strong>{schedule.time}</strong><small>Asia/Shanghai · {schedule.cron}</small></div><span className={`enabled-pill ${automation?.enabled ? '' : 'disabled'}`}>{automation?.enabled ? '已启用' : '已停用'}</span></article>)}
       </section>
       <section className="module-card automation-controls"><div><div className="control-icon"><FileSpreadsheet size={18} /></div><div><strong>官方接口 + 网页模拟点击</strong><span>接口失败后使用系统 Chrome 串行查询；页面数据无法核验时保存截图并记录原因</span></div></div><label className="setting-toggle"><span>{automation?.enabled ? '定时任务已启用' : '定时任务已停用'}</span><input type="checkbox" checked={Boolean(automation?.enabled)} onChange={(event) => onToggleAutomation(event.target.checked)} /><span className="switch-slider" /></label></section>
-      <RunHistory runs={runs} />
+      <section className="module-card task-manager"><div className="module-card-header"><div><strong>自定义自动化任务</strong><span>可按船司或单条船期创建任务；批量执行时按列表顺序逐条完成</span></div><div className="task-toolbar"><button className="secondary-button" onClick={() => setTaskModalOpen(true)}><Save size={14} />新建任务</button>{selectedTasks.size > 0 && <><button className="secondary-button" onClick={runSelectedTasks} disabled={taskRunning}><RefreshCw size={14} />按顺序执行 ({selectedTasks.size})</button><button className="danger-button" onClick={deleteSelectedTasks}><Trash2 size={13} />批量删除</button></>}</div></div><div className="task-list">{tasks.length ? tasks.map((task) => <div className={`task-row ${selectedTasks.has(task.id) ? 'selected-row' : ''}`} key={task.id}><input type="checkbox" checked={selectedTasks.has(task.id)} onChange={() => toggleTask(task.id)} /><div className="task-main"><strong>{task.name}</strong><span>{task.scope === 'all' ? '全部未完成记录' : task.scope === 'carrier' ? `船司：${task.carrierCodes.map((code) => carrierLabel(code)).join('、')}` : `单条船期：${task.shipmentIds.length} 条`} · 创建于 {fullDate(task.createdAt)}</span></div><span className={`enabled-pill ${task.enabled ? '' : 'disabled'}`}>{task.enabled ? '已启用' : '已停用'}</span><button className="text-action-button" onClick={() => runTask(task)} disabled={!task.enabled || taskRunning}><RefreshCw size={13} />立即执行</button><button className="row-action" title={task.enabled ? '停用任务' : '启用任务'} onClick={async () => { try { const payload = await apiRequest<{ tasks: AutomationTask[] }>(`/api/automation/tasks/${encodeURIComponent(task.id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: !task.enabled }) }); setTasks(payload.tasks || []); } catch (error) { onToast(error instanceof Error ? error.message : '任务设置保存失败'); } }}><Clock3 size={14} /></button><button className="row-action danger-action" title="删除任务" onClick={async () => { if (!window.confirm(`确认删除任务“${task.name}”？`)) return; setDeletingTask(task.id); try { const payload = await apiRequest<{ tasks: AutomationTask[] }>(`/api/automation/tasks/${encodeURIComponent(task.id)}`, { method: 'DELETE' }); setTasks(payload.tasks || []); setSelectedTasks((previous) => { const next = new Set(previous); next.delete(task.id); return next; }); onToast('任务已删除'); } catch (error) { onToast(error instanceof Error ? error.message : '删除任务失败'); } finally { setDeletingTask(''); } }} disabled={deletingTask === task.id}><Trash2 size={14} /></button></div>) : <div className="empty-module">尚未创建自定义任务。点击“新建任务”选择全部数据、船司或单条船期。</div>}</div></section>
+      <RunHistory runs={runs} selected={selectedRuns} onToggle={toggleRun} onDelete={deleteRun} onDeleteSelected={deleteSelectedRuns} />
+      {taskModalOpen && <div className="modal-backdrop" role="presentation" onMouseDown={() => !taskSaving && setTaskModalOpen(false)}><section className="task-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">CUSTOM AUTOMATION</p><h2>新建自动化任务</h2><p>选择数据范围后，任务只会查询未到港或未卸船记录。</p></div><button className="drawer-close" onClick={() => setTaskModalOpen(false)} disabled={taskSaving}><X size={19} /></button></div><label className="setting-field"><span>任务名称</span><input value={taskName} onChange={(event) => setTaskName(event.target.value)} placeholder="例如：上午重点船司更新" /></label><label className="setting-field"><span>更新范围</span><select value={taskScope} onChange={(event) => { setTaskScope(event.target.value as AutomationTask['scope']); setTaskCarrierCodes([]); setTaskShipmentIds([]); }}><option value="all">全部未完成记录</option><option value="carrier">指定船司</option><option value="shipment">指定船期</option></select></label>{taskScope === 'carrier' && <div className="task-choice-grid">{Array.from(new Set((data?.shipments || []).map((item) => item.carrierCode))).map((code) => <label key={code}><input type="checkbox" checked={taskCarrierCodes.includes(code)} onChange={(event) => setTaskCarrierCodes((previous) => event.target.checked ? [...previous, code] : previous.filter((item) => item !== code))} />{carrierLabel(code)}</label>)}</div>}{taskScope === 'shipment' && <div className="task-choice-grid shipment-choice-grid">{(data?.shipments || []).map((item) => <label key={item.id}><input type="checkbox" checked={taskShipmentIds.includes(item.id)} onChange={(event) => setTaskShipmentIds((previous) => event.target.checked ? [...previous, item.id] : previous.filter((id) => id !== item.id))} /><span>{carrierLabel(item.carrierCode, item.carrier)} · {item.billNo}</span></label>)}</div>}<div className="modal-actions"><button className="secondary-button" onClick={() => setTaskModalOpen(false)} disabled={taskSaving}>取消</button><button className="primary-button" onClick={createTask} disabled={taskSaving}>{taskSaving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}{taskSaving ? '保存中…' : '创建任务'}</button></div></section></div>}
     </>}
 
     {page === 'exports' && <>
@@ -807,8 +958,8 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
   </div>;
 }
 
-function RunHistory({ runs }: { runs: RunView[] }) {
-  return <section className="module-card"><div className="module-card-header"><div><strong>任务运行记录</strong><span>最近 {runs.length} 次 · 失败记录包含船司、提单号、柜号、官网原因和浏览器证据</span></div></div><div className="run-list">{runs.length ? runs.map((run) => <article className="run-entry" key={run.id}><div className="run-summary"><span className={`run-state ${run.failed ? 'failed' : 'success'}`}>{run.failed ? <CircleAlert size={15} /> : <Check size={15} />}</span><div className="run-main"><strong>{run.reason === 'scheduled' ? '定时更新' : '手动更新'}</strong><span>{run.id} · {fullDate(run.finishedAt)}</span></div><div className="run-stats"><span>查询 <strong>{run.total}</strong></span><span>成功 <strong>{run.success}</strong></span><span>未完成 <strong>{run.unfinished}</strong></span><span className={run.failed ? 'danger-text' : ''}>失败 <strong>{run.failed}</strong></span></div><span className={`notify-state ${run.notification}`}>{run.notification === 'sent' ? '通知已发送' : run.notification === 'failed' ? '通知失败' : '未配置通知'}</span></div>{run.failedDetails?.length ? <div className="run-failures">{run.failedDetails.map((detail) => <div key={`${run.id}-${detail.billNo}-${detail.containerNo}`}><span className="failure-category">{detail.category}</span><strong>{detail.carrier} · {detail.billNo}</strong><span>柜号：{detail.containerNo || '未提供'}</span><p>{detail.reason}</p><a className="evidence-link" href={detail.sourceUrl} target="_blank" rel="noreferrer" onClick={() => navigator.clipboard?.writeText(detail.billNo).catch(() => undefined)}>打开官网重试<ExternalLink size={12} /></a>{detail.evidencePath ? <a className="evidence-link" href={detail.evidencePath} target="_blank" rel="noreferrer">查看浏览器失败截图<ExternalLink size={12} /></a> : null}</div>)}</div> : null}</article>) : <div className="empty-module">尚无运行记录。</div>}</div></section>;
+function RunHistory({ runs, selected, onToggle, onDelete, onDeleteSelected }: { runs: RunView[]; selected: Set<string>; onToggle: (id: string) => void; onDelete: (id: string) => void; onDeleteSelected: () => Promise<void> }) {
+  return <section className="module-card"><div className="module-card-header"><div><strong>任务运行记录</strong><span>最近 {runs.length} 次 · 失败记录包含船司、提单号、柜号、官网原因和浏览器证据</span></div>{selected.size > 0 && <button className="danger-button" onClick={onDeleteSelected}><Trash2 size={13} />批量删除 ({selected.size})</button>}</div><div className="run-list">{runs.length ? runs.map((run) => <article className="run-entry" key={run.id}><div className="run-summary"><input type="checkbox" checked={selected.has(run.id)} onChange={() => onToggle(run.id)} /><span className={`run-state ${run.failed ? 'failed' : 'success'}`}>{run.failed ? <CircleAlert size={15} /> : <Check size={15} />}</span><div className="run-main"><strong>{run.reason === 'scheduled' ? '定时更新' : '手动更新'}</strong><span>{run.id} · {fullDate(run.finishedAt)}</span></div><div className="run-stats"><span>查询 <strong>{run.total}</strong></span><span>成功 <strong>{run.success}</strong></span><span>未完成 <strong>{run.unfinished}</strong></span><span className={run.failed ? 'danger-text' : ''}>失败 <strong>{run.failed}</strong></span></div><span className={`notify-state ${run.notification}`}>{run.notification === 'sent' ? '通知已发送' : run.notification === 'failed' ? '通知失败' : '未配置通知'}</span><button className="row-action danger-action" title="删除运行记录" onClick={() => onDelete(run.id)}><Trash2 size={14} /></button></div>{run.failedDetails?.length ? <div className="run-failures">{run.failedDetails.map((detail) => <div key={`${run.id}-${detail.billNo}-${detail.containerNo}`}><span className="failure-category">{detail.category}</span><strong>{detail.carrier} · {detail.billNo}</strong><span>柜号：{detail.containerNo || '未提供'}</span><p>{detail.reason}</p><a className="evidence-link" href={detail.sourceUrl} target="_blank" rel="noreferrer" onClick={() => navigator.clipboard?.writeText(detail.billNo).catch(() => undefined)}>打开官网重试<ExternalLink size={12} /></a>{detail.evidencePath ? <a className="evidence-link" href={detail.evidencePath} target="_blank" rel="noreferrer">查看浏览器失败截图<ExternalLink size={12} /></a> : null}</div>)}</div> : null}</article>) : <div className="empty-module">尚无运行记录。</div>}</div></section>;
 }
 
 function MetricCard({ title, value, suffix, trend, icon, tone, alert = false }: { title: string; value: number; suffix: string; trend: string; icon: React.ReactNode; tone: string; alert?: boolean }) {

@@ -17,6 +17,7 @@ export function probeUrl(input: TrackingQuery) {
     case 'COSCO': url.searchParams.set('number', queryValue); break;
     case 'HAPAG': url.searchParams.set('blno', queryValue); break;
     case 'HMM': url.searchParams.set('type', 'B'); url.searchParams.set('num', queryValue); break;
+    case 'WANHAI': return new URL(input.rule.url);
     default: url.searchParams.set('query', queryValue);
   }
   return url;

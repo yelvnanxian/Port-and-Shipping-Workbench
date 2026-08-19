@@ -15,7 +15,7 @@ import { OfficialSiteProbeProvider } from './official-probe.js';
 import { SmLineTrackingProvider } from './smline.js';
 import { RateLimiter } from './rate-limiter.js';
 import { CarrierRoutingTrackingProvider, trackRecord, type TrackingProvider } from './tracker.js';
-import type { AutomationSettings, FailedTrackingDetail, RunProgress, RunSummary, TrackingTime, WorkbookRecord } from './types.js';
+import type { AutomationSettings, AutomationTask, AutomationTaskScope, FailedTrackingDetail, RunProgress, RunSummary, TrackingTime, WorkbookRecord } from './types.js';
 import { WorkbookStore } from './workbook.js';
 
 function isQueryable(record: WorkbookRecord) {
@@ -44,11 +44,13 @@ export class AutomationEngine {
   readonly store: WorkbookStore;
   readonly runLogPath: string;
   readonly settingsPath: string;
+  readonly tasksPath: string;
 
   constructor(store = new WorkbookStore()) {
     this.store = store;
     this.runLogPath = path.join(store.dataDirectory, 'runs.json');
     this.settingsPath = path.join(store.dataDirectory, 'settings.json');
+    this.tasksPath = path.join(store.dataDirectory, 'tasks.json');
   }
 
   get isRunning() {
@@ -82,6 +84,73 @@ export class AutomationEngine {
     } catch {
       return [];
     }
+  }
+
+  async deleteRuns(ids: string[]) {
+    const requested = new Set(ids.filter(Boolean));
+    const runs = await this.listRuns();
+    const kept = runs.filter((run) => !requested.has(run.id));
+    await this.store.initialize();
+    await fs.writeFile(this.runLogPath, JSON.stringify(kept, null, 2));
+    return kept;
+  }
+
+  async listTasks(): Promise<AutomationTask[]> {
+    try {
+      const tasks = JSON.parse(await fs.readFile(this.tasksPath, 'utf8')) as AutomationTask[];
+      return Array.isArray(tasks) ? tasks : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private async saveTasks(tasks: AutomationTask[]) {
+    await this.store.initialize();
+    await fs.writeFile(this.tasksPath, JSON.stringify(tasks, null, 2));
+  }
+
+  async createTask(input: { name: string; scope: AutomationTaskScope; carrierCodes?: string[]; shipmentIds?: string[] }) {
+    const name = input.name.trim();
+    if (!name) throw new Error('任务名称不能为空');
+    if (!['all', 'carrier', 'shipment'].includes(input.scope)) throw new Error('任务范围不合法');
+    const carrierCodes = [...new Set((input.carrierCodes || []).map((code) => code.trim().toUpperCase()).filter(Boolean))];
+    const shipmentIds = [...new Set((input.shipmentIds || []).map((id) => id.trim()).filter(Boolean))];
+    if (input.scope === 'carrier' && !carrierCodes.length) throw new Error('请选择至少一个船司');
+    if (input.scope === 'shipment' && !shipmentIds.length) throw new Error('请选择至少一条船期');
+    const now = new Date().toISOString();
+    const task: AutomationTask = {
+      id: `TASK-${now.replace(/\D/g, '').slice(0, 14)}-${Math.random().toString(36).slice(2, 7)}`,
+      name,
+      scope: input.scope,
+      carrierCodes: input.scope === 'carrier' ? carrierCodes : [],
+      shipmentIds: input.scope === 'shipment' ? shipmentIds : [],
+      enabled: true,
+      createdAt: now,
+      updatedAt: now,
+      lastRunAt: null,
+      lastRunId: null,
+    };
+    const tasks = await this.listTasks();
+    tasks.push(task);
+    await this.saveTasks(tasks);
+    return task;
+  }
+
+  async deleteTasks(ids: string[]) {
+    const requested = new Set(ids.filter(Boolean));
+    const tasks = await this.listTasks();
+    const kept = tasks.filter((task) => !requested.has(task.id));
+    await this.saveTasks(kept);
+    return kept;
+  }
+
+  async updateTask(id: string, patch: { enabled?: boolean }) {
+    const tasks = await this.listTasks();
+    const index = tasks.findIndex((task) => task.id === id);
+    if (index < 0) throw new Error('自动化任务不存在');
+    tasks[index] = { ...tasks[index], enabled: patch.enabled ?? tasks[index].enabled, updatedAt: new Date().toISOString() };
+    await this.saveTasks(tasks);
+    return tasks[index];
   }
 
   async settings(): Promise<AutomationSettings> {
@@ -124,7 +193,7 @@ export class AutomationEngine {
     await fs.writeFile(this.runLogPath, JSON.stringify([summary, ...runs].slice(0, 30), null, 2));
   }
 
-  async run(reason: RunSummary['reason']): Promise<RunSummary> {
+  async run(reason: RunSummary['reason'], selection?: { carrierCodes?: string[]; shipmentIds?: string[] }): Promise<RunSummary> {
     if (this.running) throw new Error('已有更新任务正在执行');
     this.running = true;
     const startedAt = new Date();
@@ -147,7 +216,23 @@ export class AutomationEngine {
       const settings = await this.settings();
       const { workbook, sheet, headerMap } = await this.store.open();
       const allRecords = this.store.readRecords(sheet, headerMap);
-      const records = allRecords.filter(isQueryable);
+      const selectedCarrierCodes = selection?.carrierCodes?.length ? new Set(selection.carrierCodes.map((code) => code.toUpperCase())) : null;
+      const selectedShipmentIds = selection?.shipmentIds?.length ? new Set(selection.shipmentIds) : null;
+      const records = allRecords.filter((record) => {
+        if (!isQueryable(record)) return false;
+        if (selectedShipmentIds) {
+          const rowId = `XLSX-${record.rowNumber}`;
+          if (!selectedShipmentIds.has(rowId) && !selectedShipmentIds.has(record.billNo)) return false;
+        }
+        if (selectedCarrierCodes) {
+          try {
+            if (!selectedCarrierCodes.has(resolveCarrierRule(record).code)) return false;
+          } catch {
+            return false;
+          }
+        }
+        return true;
+      });
       this.currentRun.total = records.length;
       this.currentRun.skipped = allRecords.length - records.length;
       backupPath = await this.store.backup(`${reason === 'manual' ? '手动' : '定时'}更新前备份`);
@@ -292,6 +377,25 @@ export class AutomationEngine {
       this.running = false;
       this.currentRun = null;
     }
+  }
+
+  async runTask(id: string) {
+    const task = (await this.listTasks()).find((item) => item.id === id);
+    if (!task) throw new Error('自动化任务不存在');
+    if (!task.enabled) throw new Error('自动化任务已停用');
+    const selection = task.scope === 'carrier'
+      ? { carrierCodes: task.carrierCodes }
+      : task.scope === 'shipment'
+        ? { shipmentIds: task.shipmentIds }
+        : undefined;
+    const run = await this.run('manual', selection);
+    const tasks = await this.listTasks();
+    const index = tasks.findIndex((item) => item.id === id);
+    if (index >= 0) {
+      tasks[index] = { ...tasks[index], lastRunAt: run.finishedAt, lastRunId: run.id, updatedAt: run.finishedAt };
+      await this.saveTasks(tasks);
+    }
+    return run;
   }
 
   async status() {

@@ -103,6 +103,8 @@ PORT=8787
 WECHAT_WEBHOOK_URL=
 BROWSER_EXECUTABLE_PATH=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
 BROWSER_HEADLESS=true
+BROWSER_HUMAN_VERIFY=true
+BROWSER_HUMAN_VERIFY_TIMEOUT_MS=180000
 HMM_BROWSER_HEADLESS=false
 BROWSER_HUMAN_BEHAVIOR=true
 RATE_LIMIT_REQUESTS_PER_MINUTE=10
@@ -135,6 +137,9 @@ RATE_LIMIT_REQUESTS_PER_MINUTE=10
 - `WECHAT_WEBHOOK_URL` 可以暂时留空，启动后在"系统设置"中保存和测试企业微信机器人地址。
 - 如果 Chrome 安装在其他位置，请将 `BROWSER_EXECUTABLE_PATH` 改成实际可执行文件路径。
 - `BROWSER_HEADLESS=false` 可切换为有头模式，反检测效果更好但需要图形界面；服务器环境保持 `true`。
+- `BROWSER_HUMAN_VERIFY=true` 允许万海、以星、赫伯罗特、达飞、东方海外遇到官网人机验证时暂停等待人工操作；必须同时设置 `BROWSER_HEADLESS=false`，系统会打开 Chrome 窗口并在验证通过后继续解析。
+- 如果验证页出现，直接在打开的 Chrome 窗口按官网提示完成验证，不要关闭窗口；控制台会显示“人工验证已通过”后继续写入 Excel。等待时间由 `BROWSER_HUMAN_VERIFY_TIMEOUT_MS` 控制，默认 180 秒。无界面模式遇到验证会明确失败并提示切换有头模式，不会写入猜测数据。
+- 验证通过后的 Cookie/localStorage 会保存到 `data/browser-state/`，后续运行会复用同一船司会话和稳定浏览器标识；会话失效时系统再次提示人工验证。
 - `HMM_BROWSER_HEADLESS=false` 是韩新海运专用设置。其官网会拦截无头 Chrome，必须在已登录图形桌面的电脑上运行；定时查询时会短暂打开 Chrome 窗口。
 - `BROWSER_HUMAN_BEHAVIOR=true` 启用真人行为模拟（随机延迟、逐字符打字），可降低风控触发率。
 - `RATE_LIMIT_REQUESTS_PER_MINUTE=10` 控制默认每分钟请求数，风控严重的船司（万海 3 次/分钟、以星达飞 5 次/分钟）在代码中单独限流。
@@ -258,6 +263,7 @@ pm2 restart port-ops-workbench
 - `data/current.xlsx`：当前工作簿
 - `data/backups/`：历史备份
 - `data/settings.json`：企业微信和自动化设置，包含敏感信息
+- `data/tasks.json`：工作台中创建的自定义任务及执行顺序
 - `data/browser-state/`：各船司 Cookie 同意状态，可选
 
 不要复制旧的 `data/browser-evidence/` 也能正常运行；该目录只是失败截图证据。迁移后重新执行 `npm start`，并在“系统设置”中发送一次企业微信测试。
@@ -269,6 +275,9 @@ pm2 restart port-ops-workbench
 3. 也可以下载 Excel 模板并批量填写后，通过“导入 Excel”接管已有记录。船司映射按提单前缀固定执行：`MAEU` 是马士基，`MEDU` 是地中海。
 4. 点击“同步最新数据”可手动执行；服务保持运行时还会在每天 09:00、11:00、17:30 自动执行。
 5. 点击“下载当前 Excel”取得更新后的文件。每次更新前的副本存放在 `data/backups/`。
+6. 在“自动化任务”中点击“新建任务”，可选择全部未完成记录、指定船司或指定单条船期；任务支持启用/停用、单条删除和批量删除。
+7. 任务列表按创建顺序保存。勾选多条任务后点击“按顺序执行”，系统会等待上一条真实查询完成并保存 Excel 后再执行下一条。
+8. 在“数据源管理”中可点击“只更新此船司”，在“船期追踪”中可点击行内刷新按钮只更新一条船期；这两种操作都会生成更新前备份。
 
 ## 真实采集与数据核验说明
 
