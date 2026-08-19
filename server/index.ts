@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ALL_CARRIER_RULES } from './automation/carriers.js';
 import { AutomationEngine } from './automation/engine.js';
+import { notifyWeComTest } from './automation/notifier.js';
 import { startScheduler } from './automation/scheduler.js';
 import type { CarrierSource, Shipment } from './types.js';
 
@@ -27,6 +28,17 @@ app.use(cors());
 app.use(express.json());
 
 let lastSync = new Date().toISOString();
+
+function publicSettings(settings: Awaited<ReturnType<AutomationEngine['settings']>>) {
+  const webhook = settings.wechatWebhookUrl;
+  return {
+    enabled: settings.enabled,
+    schedule: settings.schedule,
+    timezone: settings.timezone,
+    notificationConfigured: Boolean(webhook),
+    webhookPreview: webhook ? `${webhook.slice(0, 38)}${webhook.length > 38 ? '…' : ''}` : '',
+  };
+}
 
 function colorFor(code: string) {
   const colors: Record<string, string> = { COSCO: '#147d73', MAERSK: '#38a9d3', MSC: '#e2a51d', ONE: '#bd2e78', ZIM: '#2765ae', EVERGREEN: '#338356' };
@@ -65,9 +77,9 @@ async function dashboardPayload() {
       containerNo: record.containerNo,
       vesselVoyage: 'Excel 自动追踪',
       terminal: '以船司官网为准',
-      eta: record.arrivalTime?.toISOString() || null,
+      eta: record.arrivalTime || null,
       berthingTime: null,
-      dischargeTime: record.dischargeTime?.toISOString() || null,
+      dischargeTime: record.dischargeTime || null,
       status: record.progress === '失败'
         ? '计划变更'
         : record.vesselState === '已到港已卸船'
@@ -107,7 +119,7 @@ app.get('/api/automation', async (_req, res, next) => {
 
 app.get('/api/automation/settings', async (_req, res, next) => {
   try {
-    res.json(await engine.settings());
+    res.json(publicSettings(await engine.settings()));
   } catch (error) {
     next(error);
   }
@@ -115,9 +127,37 @@ app.get('/api/automation/settings', async (_req, res, next) => {
 
 app.patch('/api/automation/settings', async (req, res, next) => {
   try {
-    if (typeof req.body?.enabled !== 'boolean') throw new Error('enabled 必须是布尔值');
-    const settings = await engine.updateSettings({ enabled: req.body.enabled });
-    res.json({ settings, automation: await engine.status() });
+    const patch: { enabled?: boolean; wechatWebhookUrl?: string } = {};
+    if (req.body?.enabled !== undefined) {
+      if (typeof req.body.enabled !== 'boolean') throw new Error('enabled 必须是布尔值');
+      patch.enabled = req.body.enabled;
+    }
+    if (req.body?.wechatWebhookUrl !== undefined) {
+      if (typeof req.body.wechatWebhookUrl !== 'string') throw new Error('企业微信 Webhook 必须是文本');
+      const webhook = req.body.wechatWebhookUrl.trim();
+      if (webhook) {
+        const parsed = new URL(webhook);
+        if (parsed.protocol !== 'https:' || parsed.hostname !== 'qyapi.weixin.qq.com' || !parsed.searchParams.get('key')) {
+          throw new Error('请输入完整的企业微信机器人 Webhook 地址');
+        }
+      }
+      patch.wechatWebhookUrl = webhook;
+    }
+    if (!Object.keys(patch).length) throw new Error('没有需要保存的设置');
+    const settings = await engine.updateSettings(patch);
+    res.json({ settings: publicSettings(settings), automation: await engine.status() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/automation/test-notification', async (req, res, next) => {
+  try {
+    const configured = typeof req.body?.wechatWebhookUrl === 'string' ? req.body.wechatWebhookUrl.trim() : (await engine.settings()).wechatWebhookUrl;
+    if (!configured) throw new Error('请先填写企业微信 Webhook 地址');
+    const result = await notifyWeComTest(configured);
+    if (result === 'failed') throw new Error('企业微信测试消息发送失败，请检查 Webhook 或网络连接');
+    res.json({ ok: true });
   } catch (error) {
     next(error);
   }
@@ -233,6 +273,7 @@ const templatePath = path.resolve(serverDirectory, '../outputs/01a014e4-2b3b-7f4
 app.get('/api/workbooks/template', (_req, res) => res.download(templatePath, '船期自动抓取模板.xlsx'));
 
 const webDirectory = path.resolve(serverDirectory, '../dist');
+app.use('/api', (_req, res) => res.status(404).json({ message: '接口不存在' }));
 app.use(express.static(webDirectory));
 app.get('/{*splat}', (_req, res) => {
   res.sendFile(path.join(webDirectory, 'index.html'));

@@ -1,15 +1,28 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { resolveCarrierRule } from './carriers.js';
+import { classifyTrackingError } from './errors.js';
+import { EvergreenTrackingProvider } from './evergreen.js';
+import { MatsonTrackingProvider } from './matson.js';
 import { notifyWeCom } from './notifier.js';
 import { OoclTrackingProvider } from './oocl.js';
 import { HedeTrackingProvider } from './hede.js';
+import { OfficialSiteProbeProvider } from './official-probe.js';
+import { SmLineTrackingProvider } from './smline.js';
 import { CarrierRoutingTrackingProvider, trackRecord, type TrackingProvider } from './tracker.js';
-import type { AutomationSettings, RunSummary, WorkbookRecord } from './types.js';
+import type { AutomationSettings, FailedTrackingDetail, RunSummary, TrackingTime, WorkbookRecord } from './types.js';
 import { WorkbookStore } from './workbook.js';
 
 function isQueryable(record: WorkbookRecord) {
   return !record.vesselState || record.vesselState === '未到港未卸船' || record.vesselState === '已到港未卸船';
+}
+
+function failedNote(detail: FailedTrackingDetail) {
+  return `失败分类=${detail.category}；船司=${detail.carrier}；提单号=${detail.billNo}；柜号=${detail.containerNo || '未提供'}；原因=${detail.reason}；来源=${detail.sourceUrl}`;
+}
+
+function publicTime(value: TrackingTime) {
+  return value instanceof Date ? value.toISOString() : value;
 }
 
 export class AutomationEngine {
@@ -32,12 +45,16 @@ export class AutomationEngine {
     return new CarrierRoutingTrackingProvider(new Map<string, TrackingProvider>([
       ['OOCL', new OoclTrackingProvider()],
       ['HEDE', new HedeTrackingProvider()],
-    ]));
+      ['SMLINE', new SmLineTrackingProvider()],
+      ['EVERGREEN', new EvergreenTrackingProvider()],
+      ['MATSON', new MatsonTrackingProvider()],
+    ]), new OfficialSiteProbeProvider());
   }
 
   async listRuns(): Promise<RunSummary[]> {
     try {
-      return JSON.parse(await fs.readFile(this.runLogPath, 'utf8')) as RunSummary[];
+      const runs = JSON.parse(await fs.readFile(this.runLogPath, 'utf8')) as RunSummary[];
+      return runs.map((run) => ({ ...run, failedBills: run.failedBills || [], failedDetails: run.failedDetails || [] }));
     } catch {
       return [];
     }
@@ -52,10 +69,11 @@ export class AutomationEngine {
         { time: '17:30', cron: '30 17 * * *' },
       ],
       timezone: 'Asia/Shanghai',
+      wechatWebhookUrl: process.env.WECHAT_WEBHOOK_URL?.trim() || '',
     };
     try {
       const saved = JSON.parse(await fs.readFile(this.settingsPath, 'utf8')) as Partial<AutomationSettings>;
-      return { ...fallback, ...saved, schedule: fallback.schedule };
+      return { ...fallback, ...saved, schedule: fallback.schedule, wechatWebhookUrl: saved.wechatWebhookUrl ?? fallback.wechatWebhookUrl };
     } catch {
       await this.store.initialize();
       await fs.writeFile(this.settingsPath, JSON.stringify(fallback, null, 2));
@@ -63,9 +81,13 @@ export class AutomationEngine {
     }
   }
 
-  async updateSettings(patch: Partial<Pick<AutomationSettings, 'enabled'>>) {
+  async updateSettings(patch: Partial<Pick<AutomationSettings, 'enabled' | 'wechatWebhookUrl'>>) {
     const current = await this.settings();
-    const next = { ...current, enabled: patch.enabled ?? current.enabled };
+    const next = {
+      ...current,
+      enabled: patch.enabled ?? current.enabled,
+      wechatWebhookUrl: patch.wechatWebhookUrl ?? current.wechatWebhookUrl,
+    };
     await fs.writeFile(this.settingsPath, JSON.stringify(next, null, 2));
     return next;
   }
@@ -88,7 +110,7 @@ export class AutomationEngine {
       const records = allRecords.filter(isQueryable);
       backupPath = await this.store.backup(`${reason === 'manual' ? '手动' : '定时'}更新前备份`);
       const provider = this.provider();
-      const failedBills: string[] = [];
+      const failedDetails: FailedTrackingDetail[] = [];
       let success = 0;
       let unfinished = 0;
 
@@ -105,23 +127,43 @@ export class AutomationEngine {
           try {
             const { rule, result } = await trackRecord(record, provider);
             record.carrierHint = record.carrierHint || rule.name;
-            record.arrivalTime = result.arrivalTime;
-            record.dischargeTime = result.dischargeTime;
-            record.vesselState = result.dischargeTime
+            record.arrivalTime = result.arrivalTimeText || result.arrivalTime;
+            record.dischargeTime = result.dischargeTimeText || result.dischargeTime;
+            record.vesselState = result.dischargeTime || result.dischargeTimeText
               ? '已到港已卸船'
               : result.arrived
                 ? '已到港未卸船'
                 : '未到港未卸船';
             record.lastUpdated = new Date();
             record.progress = '已完成';
-            record.note = `${result.arrivalKind ? `到港字段=${result.arrivalKind}；` : ''}${result.rawSummary}；来源=${rule.name}官网`;
+            record.note = `${result.arrivalKind ? `到港字段=${result.arrivalKind}；` : ''}${result.rawSummary}；来源=${result.sourceUrl}`;
             success += 1;
             if (record.vesselState !== '已到港已卸船') unfinished += 1;
           } catch (error) {
+            let carrier = record.carrierHint || '未知船司';
+            let carrierCode = 'UNKNOWN';
+            let sourceUrl = '';
+            try {
+              const rule = resolveCarrierRule(record);
+              carrier = rule.name;
+              carrierCode = rule.code;
+              sourceUrl = rule.url;
+              record.carrierHint = record.carrierHint || rule.name;
+            } catch { /* 前缀错误由失败原因说明 */ }
+            const failure = classifyTrackingError(error);
+            const detail: FailedTrackingDetail = {
+              carrier,
+              carrierCode,
+              billNo: record.billNo,
+              containerNo: record.containerNo,
+              category: failure.category,
+              reason: failure.reason,
+              sourceUrl,
+            };
             record.lastUpdated = new Date();
             record.progress = '失败';
-            record.note = error instanceof Error ? error.message : '未知抓取错误';
-            failedBills.push(record.billNo);
+            record.note = failedNote(detail);
+            failedDetails.push(detail);
           }
           this.store.writeRecord(sheet, headerMap, record);
         }
@@ -138,13 +180,15 @@ export class AutomationEngine {
         total: records.length,
         success,
         unfinished,
-        failed: failedBills.length,
+        failed: failedDetails.length,
         skipped: allRecords.length - records.length,
-        failedBills,
+        failedBills: failedDetails.map((detail) => detail.billNo),
+        failedDetails,
         backupPath,
         notification: 'skipped',
       };
-      summary.notification = await notifyWeCom(summary);
+      const settings = await this.settings();
+      summary.notification = await notifyWeCom(summary, settings.wechatWebhookUrl);
       await this.saveRun(summary);
       return summary;
     } finally {
@@ -163,7 +207,7 @@ export class AutomationEngine {
       workbook,
       schedule: settings.schedule,
       timezone: settings.timezone,
-      notificationConfigured: Boolean(process.env.WECHAT_WEBHOOK_URL),
+      notificationConfigured: Boolean(settings.wechatWebhookUrl),
       lastRun: runs[0] || null,
       supportedCarriers: 15,
     };
@@ -180,7 +224,15 @@ export class AutomationEngine {
         carrier = record.carrierHint || rule.name;
         carrierCode = rule.code;
       } catch { /* 错误展示在 Excel 备注中 */ }
-      return { record, carrier, carrierCode };
+      return {
+        record: {
+          ...record,
+          arrivalTime: publicTime(record.arrivalTime),
+          dischargeTime: publicTime(record.dischargeTime),
+        },
+        carrier,
+        carrierCode,
+      };
     });
   }
 }

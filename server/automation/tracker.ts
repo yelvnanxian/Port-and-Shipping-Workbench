@@ -1,24 +1,21 @@
 import { buildQueryBillNo, resolveCarrierRule } from './carriers.js';
+import { trackingError } from './errors.js';
 import type { TrackingQuery, TrackingResult, WorkbookRecord } from './types.js';
 
 export interface TrackingProvider {
   query(input: TrackingQuery): Promise<TrackingResult>;
 }
 
-export class PendingLiveTrackingProvider implements TrackingProvider {
-  async query(input: TrackingQuery): Promise<TrackingResult> {
-    throw new Error(`${input.rule.name} 官网解析器待使用真实测试单号联调`);
-  }
-}
-
 export class CarrierRoutingTrackingProvider implements TrackingProvider {
   constructor(
     private readonly providers: Map<string, TrackingProvider>,
-    private readonly fallback: TrackingProvider = new PendingLiveTrackingProvider(),
+    private readonly fallback?: TrackingProvider,
   ) {}
 
   query(input: TrackingQuery): Promise<TrackingResult> {
-    return (this.providers.get(input.rule.code) || this.fallback).query(input);
+    const provider = this.providers.get(input.rule.code) || this.fallback;
+    if (!provider) throw trackingError('解析失败', `${input.rule.name} 没有可用的真实官网查询通道`);
+    return provider.query(input);
   }
 }
 

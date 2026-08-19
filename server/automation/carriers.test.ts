@@ -10,16 +10,22 @@ test('MAEU 默认走马士基并移除前缀', () => {
   assert.equal(buildQueryBillNo('MAEU123456789', rule), '123456789');
 });
 
-test('MAEU 船司标注地中海时走 MSC 并保留前缀', () => {
+test('MAEU 即使备注写地中海也只走马士基并移除前缀', () => {
   const rule = resolveCarrierRule({ billNo: 'MAEU123456789', carrierHint: '地中海' });
-  assert.equal(rule.code, 'MSC');
-  assert.equal(buildQueryBillNo('MAEU123456789', rule), 'MAEU123456789');
+  assert.equal(rule.code, 'MAERSK');
+  assert.equal(buildQueryBillNo('MAEU123456789', rule), '123456789');
 });
 
 test('MEDU 前缀自动走 MSC 并保留完整提单号', () => {
   const rule = resolveCarrierRule({ billNo: 'MEDUPN815212', carrierHint: '地中海' });
   assert.equal(rule.code, 'MSC');
   assert.equal(buildQueryBillNo('MEDUPN815212', rule), 'MEDUPN815212');
+});
+
+test('森罗官网查询固定移除 SMLM 四位前缀', () => {
+  const rule = resolveCarrierRule({ billNo: 'SMLMNJBD6A755700', carrierHint: '森罗' });
+  assert.equal(rule.code, 'SMLINE');
+  assert.equal(buildQueryBillNo('SMLMNJBD6A755700', rule), 'NJBD6A755700');
 });
 
 test('示例 Excel 的 15 条提单全部能识别到对应船司规则', () => {

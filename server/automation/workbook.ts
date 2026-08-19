@@ -2,11 +2,23 @@ import ExcelJS from 'exceljs';
 import fs from 'node:fs/promises';
 import JSZip from 'jszip';
 import path from 'node:path';
-import type { QueryProgress, VesselState, WorkbookRecord } from './types.js';
+import type { QueryProgress, TrackingTime, VesselState, WorkbookRecord } from './types.js';
 
 export const REQUIRED_HEADERS = ['船司', '到港时间', '提单号', '柜号', '卸船时间', '船只状态', '最后更新时间', '备注', '进度'] as const;
 
 type HeaderName = (typeof REQUIRED_HEADERS)[number];
+
+const COLUMN_WIDTHS: Record<HeaderName, number> = {
+  船司: 14,
+  到港时间: 21,
+  提单号: 22,
+  柜号: 18,
+  卸船时间: 25,
+  船只状态: 18,
+  最后更新时间: 21,
+  备注: 72,
+  进度: 12,
+};
 
 function timestampForFile(date = new Date()) {
   return date.toISOString().replace(/[:.]/g, '-');
@@ -19,6 +31,13 @@ function asDate(value: unknown): Date | null {
     if (!Number.isNaN(parsed.getTime())) return parsed;
   }
   return null;
+}
+
+function asTrackingTime(value: unknown, displayedText: string): TrackingTime {
+  const parsed = asDate(value);
+  if (parsed) return parsed;
+  const text = displayedText.trim();
+  return text && text !== '未卸船' ? text : null;
 }
 
 async function normalizeNamespacePrefixes(filePath: string) {
@@ -124,8 +143,8 @@ export class WorkbookStore {
         carrierHint: text(row, '船司'),
         billNo,
         containerNo,
-        arrivalTime: asDate(row.getCell(headerMap.get('到港时间')!).value),
-        dischargeTime: asDate(row.getCell(headerMap.get('卸船时间')!).value),
+        arrivalTime: asTrackingTime(row.getCell(headerMap.get('到港时间')!).value, text(row, '到港时间')),
+        dischargeTime: asTrackingTime(row.getCell(headerMap.get('卸船时间')!).value, text(row, '卸船时间')),
         vesselState: text(row, '船只状态') as VesselState | '',
         lastUpdated: asDate(row.getCell(headerMap.get('最后更新时间')!).value),
         note: text(row, '备注'),
@@ -141,17 +160,23 @@ export class WorkbookStore {
       row.getCell(headerMap.get(header)!).value = value;
     };
     set('船司', record.carrierHint);
-    set('到港时间', record.arrivalTime || '');
-    set('卸船时间', record.dischargeTime || '未卸船');
-    set('船只状态', record.vesselState);
-    set('最后更新时间', record.lastUpdated || '');
-    set('备注', record.note);
-    set('进度', record.progress);
+    set('到港时间', record.arrivalTime ?? null);
+    set('卸船时间', record.dischargeTime ?? '未卸船');
+    set('船只状态', record.vesselState || null);
+    set('最后更新时间', record.lastUpdated ?? null);
+    set('备注', record.note || null);
+    set('进度', record.progress || null);
+    for (const header of REQUIRED_HEADERS) {
+      const column = sheet.getColumn(headerMap.get(header)!);
+      column.width = Math.max(column.width || 0, COLUMN_WIDTHS[header]);
+    }
     const noteCell = row.getCell(headerMap.get('备注')!);
     noteCell.alignment = { ...noteCell.alignment, wrapText: true, vertical: 'middle' };
-    if (record.note.length > 35) row.height = Math.max(row.height || 0, 48);
+    const noteLines = Math.max(1, Math.ceil(record.note.length / 52));
+    row.height = Math.max(row.height || 0, Math.min(120, noteLines * 18));
     for (const header of ['到港时间', '卸船时间', '最后更新时间'] as HeaderName[]) {
-      row.getCell(headerMap.get(header)!).numFmt = 'yyyy-mm-dd hh:mm';
+      const cell = row.getCell(headerMap.get(header)!);
+      cell.numFmt = cell.value instanceof Date ? 'yyyy-mm-dd hh:mm' : 'General';
     }
   }
 

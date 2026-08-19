@@ -6,6 +6,7 @@ data/current.xlsx
 data/backups/
 data/uploads/
 data/runs.json
+data/settings.json
 scripts/node_modules
 *.log
 *.tsbuildinfo
