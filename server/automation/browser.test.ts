@@ -69,3 +69,21 @@ test('中远多港口轨迹取最后一个目的港到港时间', () => {
   ].join('\n'), coscoQuery);
   assert.equal(result.arrivalTime?.toISOString(), '2026-08-06T03:07:44.000Z');
 });
+
+test('地中海时间线支持日期位于实际卸船事件之前', () => {
+  const mscQuery: TrackingQuery = {
+    ...query,
+    rule: { ...query.rule, prefix: 'MEDU', code: 'MSC', name: '地中海', removePrefix: false },
+    originalBillNo: 'MEDUPN815212',
+    queryBillNo: 'MEDUPN815212',
+  };
+  const result = parseRenderedTrackingText([
+    'BILL OF LADING: MEDUPN815212',
+    '29/07/2026',
+    'New York, US',
+    'Import Discharged from Vessel',
+    'MSC CHIARA X 624W',
+  ].join('\n'), mscQuery);
+  assert.ok(result.dischargeTime);
+  assert.equal(result.arrived, true);
+});

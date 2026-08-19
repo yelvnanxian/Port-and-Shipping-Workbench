@@ -51,6 +51,7 @@ export interface TrackingResult {
   dischargeTimeText?: string | null;
   rawSummary: string;
   sourceUrl: string;
+  evidencePath?: string;
 }
 
 export interface FailedTrackingDetail {

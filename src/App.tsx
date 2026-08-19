@@ -142,18 +142,29 @@ function CarrierMark({ code }: { code: string }) {
   </span>;
 }
 
-function OfficialVerificationLink({ shipment, compact = false }: { shipment: Shipment; compact?: boolean }) {
-  if (!shipment.sourceUrl) return <span className="empty-value">暂无来源</span>;
-  return <a
-    className={compact ? 'verification-link compact' : 'verification-link'}
-    href={shipment.sourceUrl}
-    target="_blank"
-    rel="noreferrer"
-    title="打开船司官网；同时复制提单号，便于无法直达结果页时粘贴查询"
-    onClick={() => navigator.clipboard?.writeText(shipment.billNo).catch(() => undefined)}
-  >
-    {compact ? '官网核验' : '打开本次官网来源'}<ExternalLink size={compact ? 12 : 14} />
-  </a>;
+function VerificationActions({ shipment, compact = false }: { shipment: Shipment; compact?: boolean }) {
+  if (!shipment.sourceUrl && !shipment.evidencePath) return <span className="empty-value">暂无来源</span>;
+  return <div className={compact ? 'verification-actions compact' : 'verification-actions'}>
+    {shipment.evidencePath ? <a
+      className={compact ? 'verification-link compact evidence' : 'verification-link evidence'}
+      href={shipment.evidencePath}
+      target="_blank"
+      rel="noreferrer"
+      title="查看本次自动查询成功后保存的页面截图"
+    >
+      {compact ? '采集证据' : '查看本次采集证据'}<ExternalLink size={compact ? 12 : 14} />
+    </a> : null}
+    {shipment.sourceUrl ? <a
+      className={compact ? 'verification-link compact' : 'verification-link'}
+      href={shipment.sourceUrl}
+      target="_blank"
+      rel="noreferrer"
+      title="打开船司官网；同时复制提单号，便于无法直达结果页时粘贴查询"
+      onClick={() => navigator.clipboard?.writeText(shipment.billNo).catch(() => undefined)}
+    >
+      {compact ? '官网复核' : '打开船司官网复核'}<ExternalLink size={compact ? 12 : 14} />
+    </a> : null}
+  </div>;
 }
 
 export default function App() {
@@ -529,7 +540,7 @@ export default function App() {
         </section>
       </div>}
 
-      {detail && <div className="drawer-backdrop" onClick={() => setDetail(null)}><aside className="detail-drawer" onClick={(event) => event.stopPropagation()}><button className="drawer-close" onClick={() => setDetail(null)}><X size={19} /></button><p className="eyebrow">SHIPMENT DETAIL</p><h2>单号追踪详情</h2><div className="drawer-carrier"><CarrierMark code={detail.carrierCode} /><div><strong>{detail.carrier}</strong><span>{detail.billNo}</span></div></div><div className="detail-grid"><DetailItem label="提单号" value={detail.billNo} /><DetailItem label="柜号" value={detail.containerNo || '—'} /><DetailItem label="查询进度" value={<ProgressBadge shipment={detail} />} /><DetailItem label="船只状态" value={<VesselStateBadge shipment={detail} />} /></div><div className="timeline"><TimelineItem label="到港时间 ATA / ETA" value={formatDateTime(detail.eta)} active={Boolean(detail.eta)} /><TimelineItem label="卸船时间" value={formatDateTime(detail.dischargeTime)} active={Boolean(detail.dischargeTime)} last /></div>{detail.note && <div className="detail-alert"><CircleAlert size={17} /><div><strong>查询备注</strong><span>{detail.note}</span></div></div>}<div className="verification-card"><div><Globe2 size={17} /><div><strong>官网真实性核验</strong><span>打开时会复制提单号；部分官网会重新查询或要求 Cookie。</span></div></div><OfficialVerificationLink shipment={detail} /></div><div className="drawer-meta">数据更新于 {formatDateTime(detail.lastUpdated)}</div></aside></div>}
+      {detail && <div className="drawer-backdrop" onClick={() => setDetail(null)}><aside className="detail-drawer" onClick={(event) => event.stopPropagation()}><button className="drawer-close" onClick={() => setDetail(null)}><X size={19} /></button><p className="eyebrow">SHIPMENT DETAIL</p><h2>单号追踪详情</h2><div className="drawer-carrier"><CarrierMark code={detail.carrierCode} /><div><strong>{detail.carrier}</strong><span>{detail.billNo}</span></div></div><div className="detail-grid"><DetailItem label="提单号" value={detail.billNo} /><DetailItem label="柜号" value={detail.containerNo || '—'} /><DetailItem label="查询进度" value={<ProgressBadge shipment={detail} />} /><DetailItem label="船只状态" value={<VesselStateBadge shipment={detail} />} /></div><div className="timeline"><TimelineItem label="到港时间 ATA / ETA" value={formatDateTime(detail.eta)} active={Boolean(detail.eta)} /><TimelineItem label="卸船时间" value={formatDateTime(detail.dischargeTime)} active={Boolean(detail.dischargeTime)} last /></div>{detail.note && <div className="detail-alert"><CircleAlert size={17} /><div><strong>查询备注</strong><span>{detail.note}</span></div></div>}<div className="verification-card"><div><Globe2 size={17} /><div><strong>官网真实性核验</strong><span>采集证据是本次成功查询后的页面截图；官网复核会复制提单号，部分官网会要求重新查询或接受 Cookie。</span></div></div><VerificationActions shipment={detail} /></div><div className="drawer-meta">数据更新于 {formatDateTime(detail.lastUpdated)}</div></aside></div>}
       {toast && <div className="toast"><Check size={17} />{toast}</div>}
     </div>
   );
@@ -699,7 +710,7 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
     {page === 'tracking' && <section className="module-card">
       <div className="module-card-header"><div><strong>全部追踪记录</strong><span>Excel 当前共 {data?.shipments.length || 0} 条</span></div><div className="compact-legend"><span className="legend-dot success" />已完成卸船<span className="legend-dot info" />等待卸船<span className="legend-dot muted-dot" />等待到港</div></div>
       <div className="module-table-wrap"><table className="module-table"><thead><tr><th>船司</th><th>提单号</th><th>柜号</th><th>到港时间</th><th>卸船时间</th><th>船只状态</th><th>进度</th><th>最后更新</th><th>真实性核验</th><th /></tr></thead><tbody>
-        {(data?.shipments || []).map((item) => <tr key={item.id}><td><div className="carrier-cell"><CarrierMark code={item.carrierCode} /><div><strong>{item.carrier}</strong><span>{item.carrierCode}</span></div></div></td><td className="mono">{item.billNo}</td><td className="mono">{item.containerNo || '—'}</td><td><div className="date-cell eta">{formatDateTime(item.eta, true)}</div></td><td><div className="date-cell discharge">{formatDateTime(item.dischargeTime, true)}</div></td><td><VesselStateBadge shipment={item} /></td><td><ProgressBadge shipment={item} /></td><td>{timeAgo(item.lastUpdated)}</td><td><OfficialVerificationLink shipment={item} compact /></td><td><button className="row-action" title="查看追踪详情" onClick={() => onOpenDetail(item)}><ChevronRight size={17} /></button></td></tr>)}
+        {(data?.shipments || []).map((item) => <tr key={item.id}><td><div className="carrier-cell"><CarrierMark code={item.carrierCode} /><div><strong>{item.carrier}</strong><span>{item.carrierCode}</span></div></div></td><td className="mono">{item.billNo}</td><td className="mono">{item.containerNo || '—'}</td><td><div className="date-cell eta">{formatDateTime(item.eta, true)}</div></td><td><div className="date-cell discharge">{formatDateTime(item.dischargeTime, true)}</div></td><td><VesselStateBadge shipment={item} /></td><td><ProgressBadge shipment={item} /></td><td>{timeAgo(item.lastUpdated)}</td><td><VerificationActions shipment={item} compact /></td><td><button className="row-action" title="查看追踪详情" onClick={() => onOpenDetail(item)}><ChevronRight size={17} /></button></td></tr>)}
       </tbody></table></div>
     </section>}
 

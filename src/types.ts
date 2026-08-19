@@ -17,6 +17,7 @@ export interface Shipment {
   vesselState?: '未到港未卸船' | '已到港未卸船' | '已到港已卸船';
   progress?: '待查询' | '查询中' | '已完成' | '失败';
   sourceUrl?: string;
+  evidencePath?: string;
 }
 
 export interface CarrierSource {

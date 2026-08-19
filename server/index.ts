@@ -70,7 +70,7 @@ async function dashboardPayload() {
   const automation = await engine.status();
   const generatedAt = automation.lastRun?.finishedAt || lastSync;
   if (workbookRecords.length) {
-    const shipments: Shipment[] = workbookRecords.map(({ record, carrier, carrierCode, sourceUrl }) => ({
+    const shipments: Shipment[] = workbookRecords.map(({ record, carrier, carrierCode, sourceUrl, evidencePath }) => ({
       id: `XLSX-${record.rowNumber}`,
       carrier,
       carrierCode,
@@ -93,6 +93,7 @@ async function dashboardPayload() {
       vesselState: record.vesselState || '未到港未卸船',
       progress: record.progress || '待查询',
       sourceUrl,
+      evidencePath,
     }));
     return { shipments, sources: buildSources(shipments, generatedAt), generatedAt };
   }

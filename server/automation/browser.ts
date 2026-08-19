@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
+import { chromium, type Browser, type BrowserContext, type Frame, type Locator, type Page } from 'playwright-core';
 import { classifyTrackingError, trackingError } from './errors.js';
 import { parseOoclDate } from './oocl.js';
 import { probeUrl } from './official-probe.js';
@@ -60,10 +60,15 @@ function findLabeledDate(lines: string[], label: RegExp, excluded?: RegExp, pref
   if (preferLast) indexes.reverse();
   for (const index of indexes) {
     if (!label.test(lines[index])) continue;
-    const context = lines.slice(index, index + 3).join(' ');
-    if (excluded?.test(context)) continue;
-    const parsed = extractDate(context);
-    if (parsed) return parsed;
+    const contexts = [
+      lines.slice(index, index + 3).join(' '),
+      lines.slice(Math.max(0, index - 3), index + 1).join(' '),
+    ];
+    for (const context of contexts) {
+      if (excluded?.test(context)) continue;
+      const parsed = extractDate(context);
+      if (parsed) return parsed;
+    }
   }
   return null;
 }
@@ -139,15 +144,58 @@ async function renderedPageText(page: Page) {
   return texts.filter(Boolean).join('\n');
 }
 
+async function clickCookieButton(frame: Frame) {
+  const label = /accept all(?: cookies?)?|allow all|同意全部|全部接受|接受所有(?:\s*Cookie)?|允许全部/i;
+  const candidates = [
+    frame.locator('#onetrust-accept-btn-handler'),
+    frame.locator('button, a, [role="button"]').filter({ hasText: label }),
+  ];
+  for (const group of candidates) {
+    for (let index = 0; index < await group.count(); index += 1) {
+      const button = group.nth(index);
+      if (!await button.isVisible().catch(() => false)) continue;
+      const clicked = await button.click({ force: true, timeout: 3_000 }).then(() => true).catch(async () => {
+        return button.evaluate((element) => {
+          if (!(element instanceof HTMLElement)) return false;
+          element.click();
+          return true;
+        }).catch(() => false);
+      });
+      if (clicked) return true;
+    }
+  }
+  return false;
+}
+
 async function dismissCookieDialog(page: Page, waitMs = 0) {
-  const label = /accept all|allow all|同意全部|全部接受|接受所有|允许全部/i;
-  const button = page.locator('button, a, [role="button"]').filter({ hasText: label }).first();
-  if (waitMs > 0) await button.waitFor({ state: 'visible', timeout: waitMs }).catch(() => undefined);
-  if (await button.isVisible().catch(() => false)) {
-    await button.click({ timeout: 3_000 }).catch(() => undefined);
+  if (waitMs > 0) {
+    await Promise.race(page.frames().map((frame) => frame.locator('#onetrust-accept-btn-handler').waitFor({ state: 'visible', timeout: waitMs }))).catch(() => undefined);
+  }
+  for (const frame of page.frames()) {
+    if (!await clickCookieButton(frame)) continue;
+    await page.locator('#onetrust-consent-sdk').waitFor({ state: 'hidden', timeout: 3_000 }).catch(() => undefined);
     return true;
   }
   return false;
+}
+
+async function submitTrackingQuery(inputElement: Locator) {
+  const form = inputElement.locator('xpath=ancestor::form[1]');
+  if (await form.count()) {
+    const submit = form.locator('button[type="submit"], input[type="submit"], button').filter({ hasText: /track|search|submit|查询|追踪/i }).first();
+    if (await submit.isVisible().catch(() => false)) {
+      await submit.click({ timeout: 5_000 });
+      return;
+    }
+  }
+  const nearbyButtons = inputElement.locator('xpath=..').locator('button, [role="button"], input[type="submit"]');
+  for (let index = await nearbyButtons.count() - 1; index >= 0; index -= 1) {
+    const button = nearbyButtons.nth(index);
+    if (!await button.isVisible().catch(() => false)) continue;
+    await button.click({ timeout: 5_000 });
+    return;
+  }
+  await inputElement.press('Enter');
 }
 
 async function waitForRenderedOutcome(page: Page, queryValue: string, timeout = RESULT_TIMEOUT_MS) {
@@ -188,12 +236,16 @@ export class BrowserTrackingProvider implements TrackingProvider {
     return this.browser;
   }
 
-  private async saveEvidence(page: Page, input: TrackingQuery) {
+  private async saveEvidence(page: Page, input: TrackingQuery, outcome: 'success' | 'failure') {
     await fs.mkdir(this.evidenceDirectory, { recursive: true });
     const reference = normalizedReference(input.queryType === 'container' ? input.containerNo : input.originalBillNo).slice(0, 32) || 'UNKNOWN';
-    const fileName = `${new Date().toISOString().replace(/[:.]/g, '-')}_${input.rule.code}_${reference}.png`;
-    await page.screenshot({ path: path.join(this.evidenceDirectory, fileName), fullPage: true }).catch(() => undefined);
-    return `/api/browser-evidence/${encodeURIComponent(fileName)}`;
+    const fileName = `${new Date().toISOString().replace(/[:.]/g, '-')}_${input.rule.code}_${reference}_${outcome}.png`;
+    try {
+      await page.screenshot({ path: path.join(this.evidenceDirectory, fileName), fullPage: true });
+      return `/api/browser-evidence/${encodeURIComponent(fileName)}`;
+    } catch {
+      return undefined;
+    }
   }
 
   private statePath(input: TrackingQuery) {
@@ -245,6 +297,7 @@ export class BrowserTrackingProvider implements TrackingProvider {
       const cookies = await context.cookies(sourceUrl);
       let acceptedCookies = await dismissCookieDialog(page);
       await waitForRenderedOutcome(page, queryValue, 1_500);
+      if (!acceptedCookies) acceptedCookies = await dismissCookieDialog(page);
       if (!acceptedCookies && input.rule.code === 'COSCO' && !cookies.some((cookie) => cookie.name === 'cookieClause')) {
         acceptedCookies = await dismissCookieDialog(page, 2_000);
       }
@@ -254,20 +307,19 @@ export class BrowserTrackingProvider implements TrackingProvider {
         const inputElement = await firstVisibleInput(page);
         if (inputElement) {
           await inputElement.fill(queryValue);
-          const submit = page.getByRole('button', { name: /track|search|submit|查询|追踪/i }).first();
-          if (await submit.isVisible().catch(() => false)) await submit.click();
-          else await inputElement.press('Enter');
+          await submitTrackingQuery(inputElement);
         }
       }
       await waitForRenderedOutcome(page, queryValue, Math.min(this.timeoutMs, RESULT_TIMEOUT_MS));
       sourceUrl = page.url();
       const renderedText = await renderedPageText(page);
       const result = parseRenderedTrackingText(renderedText, input);
-      return { ...result, sourceUrl };
+      const evidencePath = await this.saveEvidence(page, input, 'success');
+      return { ...result, sourceUrl, evidencePath };
     } catch (error) {
       const failure = classifyTrackingError(error);
       sourceUrl = page.url() || sourceUrl;
-      const evidencePath = await this.saveEvidence(page, input);
+      const evidencePath = await this.saveEvidence(page, input, 'failure');
       throw trackingError(failure.category, `${failure.reason}${navigationWarning ? `；${navigationWarning}` : ''}`, { evidencePath, sourceUrl });
     } finally {
       await this.saveState(context, input).catch(() => undefined);

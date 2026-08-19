@@ -30,6 +30,10 @@ function sourceUrlFromNote(note: string) {
   return note.match(/(?:^|；)来源=(https?:\/\/[^；\s]+)/i)?.[1] || '';
 }
 
+export function evidencePathFromNote(note: string) {
+  return note.match(/(?:^|；)成功证据=(\/api\/browser-evidence\/[^；\s]+)/i)?.[1] || '';
+}
+
 export class AutomationEngine {
   private running = false;
   readonly store: WorkbookStore;
@@ -150,7 +154,7 @@ export class AutomationEngine {
                 : '未到港未卸船';
             record.lastUpdated = new Date();
             record.progress = '已完成';
-            record.note = `${result.arrivalKind ? `到港字段=${result.arrivalKind}；` : ''}${result.rawSummary}；来源=${result.sourceUrl}`;
+            record.note = `${result.arrivalKind ? `到港字段=${result.arrivalKind}；` : ''}${result.rawSummary}；来源=${result.sourceUrl}${result.evidencePath ? `；成功证据=${result.evidencePath}` : ''}`;
             success += 1;
             if (record.vesselState !== '已到港已卸船') unfinished += 1;
           } catch (error) {
@@ -255,6 +259,7 @@ export class AutomationEngine {
         carrier,
         carrierCode,
         sourceUrl: sourceUrlFromNote(record.note) || sourceUrl,
+        evidencePath: evidencePathFromNote(record.note),
       };
     });
   }
