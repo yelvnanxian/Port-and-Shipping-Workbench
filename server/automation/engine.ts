@@ -8,6 +8,7 @@ import { MatsonTrackingProvider } from './matson.js';
 import { YangmingTrackingProvider } from './yangming.js';
 import { notifyWeCom } from './notifier.js';
 import { OoclTrackingProvider } from './oocl.js';
+import { OneTrackingProvider } from './one.js';
 import { HedeTrackingProvider } from './hede.js';
 import { OfficialSiteProbeProvider } from './official-probe.js';
 import { SmLineTrackingProvider } from './smline.js';
@@ -60,6 +61,7 @@ export class AutomationEngine {
     const withBrowserFallback = (primary: TrackingProvider) => browser ? new FallbackTrackingProvider(primary, browser) : primary;
     return new CarrierRoutingTrackingProvider(new Map<string, TrackingProvider>([
       ['OOCL', withBrowserFallback(new OoclTrackingProvider())],
+      ['ONE', withBrowserFallback(new OneTrackingProvider())],
       ['HEDE', withBrowserFallback(new HedeTrackingProvider())],
       ['SMLINE', withBrowserFallback(new SmLineTrackingProvider())],
       ['EVERGREEN', withBrowserFallback(new EvergreenTrackingProvider())],
