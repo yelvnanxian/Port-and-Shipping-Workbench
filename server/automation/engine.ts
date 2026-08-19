@@ -5,6 +5,7 @@ import { BrowserTrackingProvider, FallbackTrackingProvider } from './browser.js'
 import { classifyTrackingError } from './errors.js';
 import { EvergreenTrackingProvider } from './evergreen.js';
 import { MatsonTrackingProvider } from './matson.js';
+import { YangmingTrackingProvider } from './yangming.js';
 import { notifyWeCom } from './notifier.js';
 import { OoclTrackingProvider } from './oocl.js';
 import { HedeTrackingProvider } from './hede.js';
@@ -63,6 +64,7 @@ export class AutomationEngine {
       ['SMLINE', withBrowserFallback(new SmLineTrackingProvider())],
       ['EVERGREEN', withBrowserFallback(new EvergreenTrackingProvider())],
       ['MATSON', withBrowserFallback(new MatsonTrackingProvider())],
+      ['YANGMING', withBrowserFallback(new YangmingTrackingProvider())],
     ]), withBrowserFallback(new OfficialSiteProbeProvider()));
   }
 
