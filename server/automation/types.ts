@@ -52,6 +52,7 @@ export interface TrackingResult {
   rawSummary: string;
   sourceUrl: string;
   evidencePath?: string;
+  routeText?: string | null;
 }
 
 export interface FailedTrackingDetail {
@@ -94,6 +95,7 @@ export interface AutomationTask {
   updatedAt: string;
   lastRunAt: string | null;
   lastRunId: string | null;
+  scheduleTime: string | null;
 }
 
 export interface RunProgress {

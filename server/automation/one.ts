@@ -3,6 +3,7 @@ import type { TrackingProvider } from './tracker.js';
 import type { ArrivalKind, TrackingQuery, TrackingResult } from './types.js';
 
 const ONE_ENDPOINT = 'https://ecomm.one-line.com/api/v2/edh/containers/track-and-trace/search';
+const ONE_EVENTS_ENDPOINT = 'https://ecomm.one-line.com/api/v2/edh/containers/track-and-trace/cop-events';
 const ONE_SOURCE = 'https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking';
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -46,11 +47,37 @@ function eventName(event: JsonObject) {
 function eventDate(event: JsonObject) {
   // The API's date field is an explicit UTC instant. localPortDate is a
   // display value and is not used to avoid applying a second timezone shift.
-  return date(event.date) || date(event.eventDate) || date(event.eventLocalPortDate);
+  return date(event.eventDate) || date(event.date) || date(event.eventLocalPortDate) || date(event.localPortDate);
 }
 
 function isActual(event: JsonObject) {
-  return /actual/i.test(text(event.trigger) || text(event.triggerType));
+  return /^(?:actual|a|y)$/i.test(text(event.triggerType) || text(event.trigger) || text(event.actualYn));
+}
+
+function localEventTime(event: JsonObject) {
+  const source = text(event.eventLocalPortDate) || text(event.localPortDate);
+  const matched = source.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
+  return matched ? `${matched[1]} ${matched[2]}（官网当地时间）` : null;
+}
+
+function eventLocation(event: JsonObject) {
+  const location = object(event.location);
+  return text(location.locationName) || text(event.locationName);
+}
+
+function routeFromEvents(events: JsonObject[]) {
+  const sorted = [...events].sort((left, right) => {
+    const leftSequence = Number(left.copSequence);
+    const rightSequence = Number(right.copSequence);
+    if (Number.isFinite(leftSequence) && Number.isFinite(rightSequence)) return leftSequence - rightSequence;
+    return (eventDate(left)?.getTime() || 0) - (eventDate(right)?.getTime() || 0);
+  });
+  const locations: string[] = [];
+  for (const event of sorted) {
+    const location = eventLocation(event);
+    if (location && locations.at(-1) !== location) locations.push(location);
+  }
+  return locations.length > 1 ? locations.join(' → ') : null;
 }
 
 function isDestinationArrival(name: string) {
@@ -63,7 +90,7 @@ function isDischarge(name: string) {
     || /卸船|卸载/i.test(name);
 }
 
-export function parseOneTrackingResponse(payload: unknown, expectedBillNo: string, expectedContainerNo = ''): TrackingResult {
+export function parseOneTrackingResponse(payload: unknown, expectedBillNo: string, expectedContainerNo = '', eventPayload?: unknown): TrackingResult {
   const root = object(payload);
   const rows = Array.isArray(root.data) ? root.data.map(object) : [];
   if (root.code !== undefined && Number(root.code) !== 1) {
@@ -89,7 +116,15 @@ export function parseOneTrackingResponse(payload: unknown, expectedBillNo: strin
     throw trackingError('订单号验证失败', `海洋网联返回柜号 ${returnedContainer} 与输入 ${expectedContainerNo} 不一致`);
   }
 
-  const events = Array.isArray(row.cargoEvents) ? row.cargoEvents.map(object) : [];
+  const eventRoot = object(eventPayload);
+  if (eventPayload !== undefined && eventRoot.code !== undefined && Number(eventRoot.code) !== 1) {
+    throw trackingError('官网接口异常', `海洋网联完整事件接口返回错误：${text(eventRoot.message) || `code=${text(eventRoot.code)}`}`);
+  }
+  const fullEvents = Array.isArray(eventRoot.data) ? eventRoot.data.map(object) : [];
+  if (eventPayload !== undefined && !fullEvents.length) {
+    throw trackingError('解析失败', `海洋网联已找到订单 ${returnedBill || expectedBillNo}，但完整事件接口没有返回可核验的运行节点`);
+  }
+  const events = fullEvents.length ? fullEvents : Array.isArray(row.cargoEvents) ? row.cargoEvents.map(object) : [];
   const destinationEvents = events.filter((event) => isDestinationArrival(eventName(event)) && eventDate(event));
   const actualArrivalEvent = destinationEvents.filter(isActual).sort((a, b) => eventDate(b)!.getTime() - eventDate(a)!.getTime())[0];
   const estimatedArrivalEvent = destinationEvents.sort((a, b) => eventDate(b)!.getTime() - eventDate(a)!.getTime())[0];
@@ -103,13 +138,17 @@ export function parseOneTrackingResponse(payload: unknown, expectedBillNo: strin
   }
   const arrivalTime = actualArrival || estimatedArrival;
   const arrivalKind: ArrivalKind = actualArrival ? 'ATA' : estimatedArrival ? 'ETA' : null;
+  const routeText = routeFromEvents(events);
   return {
     arrivalTime,
+    arrivalTimeText: actualArrivalEvent ? localEventTime(actualArrivalEvent) : estimatedArrivalEvent ? localEventTime(estimatedArrivalEvent) : null,
     arrivalKind,
     arrived: Boolean(actualArrival || discharge),
     dischargeTime: discharge,
-    rawSummary: `海洋网联官方公开接口解析成功；提单=${returnedBill || expectedBillNo}；柜号=${returnedContainer || expectedContainerNo || '未提供'}${discharge ? '；已发现实际卸船事件' : '；未发现实际卸船事件'}`,
+    dischargeTimeText: dischargeEvent ? localEventTime(dischargeEvent) : null,
+    rawSummary: `海洋网联官方公开接口解析成功；提单=${returnedBill || expectedBillNo}；柜号=${returnedContainer || expectedContainerNo || '未提供'}${fullEvents.length ? `；已核验官网完整事件 ${fullEvents.length} 条` : ''}${discharge ? '；已发现实际卸船事件' : '；未发现实际卸船事件'}`,
     sourceUrl: ONE_SOURCE,
+    routeText,
   };
 }
 
@@ -155,7 +194,42 @@ export class OneTrackingProvider implements TrackingProvider {
         const category = response.status === 403 || response.status === 412 ? '验证码或风控' : '官网接口异常';
         throw trackingError(category, `海洋网联官方接口 ${detail}`);
       }
-      return parseOneTrackingResponse(payload, input.queryType === 'bill' ? input.queryBillNo : '', input.containerNo || (input.queryType === 'container' ? queryValue : ''));
+      const root = object(payload);
+      const rows = Array.isArray(root.data) ? root.data.map(object) : [];
+      const row = rows.find((item) => {
+        const bill = text(item.bookingNo) || text(item.bookingNoShow);
+        const container = text(item.containerNo);
+        return (input.queryType === 'bill' && bill && sameReference(bill, input.queryBillNo))
+          || (input.containerNo && container && sameReference(container, input.containerNo));
+      }) || rows[0];
+      const returnedBill = text(row?.bookingNo) || text(row?.bookingNoShow);
+      const returnedContainer = text(row?.containerNo);
+      if (!returnedBill || !returnedContainer) {
+        return parseOneTrackingResponse(payload, input.queryType === 'bill' ? input.queryBillNo : '', input.containerNo || (input.queryType === 'container' ? queryValue : ''));
+      }
+      const eventsUrl = new URL(ONE_EVENTS_ENDPOINT);
+      eventsUrl.searchParams.set('booking_no', returnedBill);
+      eventsUrl.searchParams.set('container_no', returnedContainer);
+      const eventsResponse = await this.fetcher(eventsUrl, {
+        headers: {
+          accept: 'application/json, text/plain, */*',
+          'accept-language': 'zh-CN,zh;q=0.9,en;q=0.7',
+          origin: 'https://ecomm.one-line.com',
+          referer: ONE_SOURCE,
+          'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131 Safari/537.36',
+        },
+        signal: controller.signal,
+      });
+      const eventsRaw = await eventsResponse.text();
+      let eventPayload: unknown;
+      try { eventPayload = JSON.parse(eventsRaw); } catch { throw trackingError('解析失败', '海洋网联完整事件接口返回了非 JSON 内容'); }
+      if (!eventsResponse.ok) {
+        const eventRoot = object(eventPayload);
+        const detail = text(eventRoot.message) || `HTTP ${eventsResponse.status}`;
+        const category = eventsResponse.status === 403 || eventsResponse.status === 412 ? '验证码或风控' : '官网接口异常';
+        throw trackingError(category, `海洋网联完整事件接口 ${detail}`);
+      }
+      return parseOneTrackingResponse(payload, input.queryType === 'bill' ? input.queryBillNo : returnedBill, input.containerNo || returnedContainer, eventPayload);
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') throw trackingError('查询超时', '海洋网联官方接口查询超时，请稍后重试');
       throw error;

@@ -51,15 +51,28 @@ export function parseMatsonTrackingResponse(payload: unknown, expectedContainerN
     throw trackingError('订单号验证失败', `美森官网返回的柜号与输入不一致（输入 ${expected}，官网返回 ${containers.join('、')}）`);
   }
   if (!objects.length || (!containers.length && objects.length <= 1)) throw trackingError('订单号验证失败', '美森官网未返回该提单的货物记录');
-  const arrival = objects.map((object) => parseDate(firstText(object, ['actualArrivalDate', 'arrivalDate', 'eta']))).find(Boolean) || null;
+  const actualArrival = objects.map((object) => parseDate(firstText(object, ['actualArrivalDate', 'ata']))).find(Boolean) || null;
+  const estimatedArrival = objects.map((object) => parseDate(firstText(object, ['arrivalDate', 'eta']))).find(Boolean) || null;
+  const arrival = actualArrival || estimatedArrival;
   const dischargeObject = objects.find((object) => /discharg|unload/i.test(firstText(object, ['eventName', 'status', 'latestStatus', 'description'])));
   const discharge = dischargeObject ? parseDate(firstText(dischargeObject, ['eventDateTime', 'eventDate', 'statusDateTime', 'date'])) : null;
+  const matchingContainers = objects.filter((object) => {
+    const container = firstText(object, ['containerNumber', 'containerNo']);
+    return container && (!expected || normalizedContainer(container) === expected);
+  });
+  const destinationActivity = matchingContainers.find((object) => {
+    const status = firstText(object, ['latestStatus', 'status', 'eventName', 'description']);
+    const statusTime = parseDate(firstText(object, ['statusDateTime', 'eventDateTime', 'eventDate', 'date']));
+    return /\b(?:available|outgate|delivered|picked\s*up)\b/i.test(status)
+      && Boolean(statusTime && (!arrival || statusTime.getTime() >= arrival.getTime()));
+  });
+  const activityStatus = destinationActivity ? firstText(destinationActivity, ['latestStatus', 'status', 'eventName', 'description']) : '';
   return {
     arrivalTime: arrival,
-    arrivalKind: arrival ? 'ETA' : null,
-    arrived: Boolean(discharge),
+    arrivalKind: actualArrival ? 'ATA' : estimatedArrival ? 'ETA' : null,
+    arrived: Boolean(actualArrival || discharge || destinationActivity),
     dischargeTime: discharge,
-    rawSummary: `美森官方公开接口解析成功；柜号=${expectedContainerNo.trim().toUpperCase() || containers[0] || '未提供'}${discharge ? '；已发现卸船事件' : '；未发现卸船完成事件'}`,
+    rawSummary: `美森官方公开接口解析成功；柜号=${expectedContainerNo.trim().toUpperCase() || containers[0] || '未提供'}${discharge ? '；已发现卸船事件' : destinationActivity ? `；已发现到港后场站活动（${activityStatus}），据此判定已到港；未发现卸船完成事件` : '；未发现卸船完成事件'}`,
     sourceUrl: MATSON_SOURCE,
   };
 }

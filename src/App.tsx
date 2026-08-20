@@ -102,6 +102,20 @@ function carrierLabel(code: string, fallback = '') {
   return carrierLabels[code] || fallback || code;
 }
 
+function summarizeNote(note?: string) {
+  if (!note?.trim()) return '—';
+  const concise = (value: string) => value.length > 58 ? `${value.slice(0, 58)}…` : value;
+  const category = note.match(/(?:^|；)失败分类=([^；]+)/)?.[1];
+  const reason = note.match(/(?:^|；)原因=([^；]+)/)?.[1];
+  if (category || reason) return concise(`${category || '查询失败'}：${reason || '官网未返回可核验数据'}`);
+  if (/人工补录|人工修改/.test(note)) return concise(note.split('；')[0]);
+  const arrivalKind = note.match(/(?:^|；)到港字段=(ATA|ETA)/)?.[1];
+  if (/已发现实际卸船事件|已发现卸船事件/.test(note)) return `已获取${arrivalKind ? ` ${arrivalKind}` : '到港时间'}和实际卸船时间`;
+  if (arrivalKind) return `已获取 ${arrivalKind}，尚未发现实际卸船时间`;
+  const firstSummary = note.split('；').find((part) => !/^(?:来源|成功证据|运行线路)=/.test(part.trim())) || note;
+  return concise(firstSummary);
+}
+
 function formatDateTime(value: string | null, twoLines = false) {
   if (!value) return <span className="empty-value">待更新</span>;
   const date = new Date(value);
@@ -617,7 +631,7 @@ export default function App() {
                       <td><div className="date-cell discharge">{formatDateTime(item.dischargeTime, true)}</div></td>
                       <td><VesselStateBadge shipment={item} /></td>
                       {showUpdatedColumn && <td><div className="update-cell"><span>{timeAgo(item.lastUpdated)}</span><small>{formatDateTime(item.lastUpdated)}</small></div></td>}
-                      {showNoteColumn && <td><span className="note-cell" title={item.note}>{item.note || '—'}</span></td>}
+                      {showNoteColumn && <td><span className="note-cell" title={item.note}>{summarizeNote(item.note)}</span></td>}
                       <td><ProgressBadge shipment={item} /></td>
                       <td><div className="row-actions"><button className="row-action" title="人工修改" onClick={() => openManualEdit(item)}><Pencil size={14} /></button><button className="row-action" onClick={() => setDetail(item)}><ChevronRight size={17} /></button></div></td>
                     </tr>
@@ -657,7 +671,7 @@ export default function App() {
         </section>
       </div>}
 
-      {detail && <div className="drawer-backdrop" onClick={() => setDetail(null)}><aside className="detail-drawer" onClick={(event) => event.stopPropagation()}><button className="drawer-close" onClick={() => setDetail(null)}><X size={19} /></button><p className="eyebrow">SHIPMENT DETAIL</p><h2>单号追踪详情</h2><div className="drawer-carrier"><CarrierMark code={detail.carrierCode} /><div><strong>{detail.carrier}</strong><span>{detail.billNo}</span></div></div><div className="detail-grid"><DetailItem label="提单号" value={detail.billNo} /><DetailItem label="官网查询号" value={detail.verificationNo || detail.billNo} /><DetailItem label="柜号" value={detail.containerNo || '—'} /><DetailItem label="查询进度" value={<ProgressBadge shipment={detail} />} /><DetailItem label="船只状态" value={<VesselStateBadge shipment={detail} />} /></div><div className="timeline"><TimelineItem label="到港时间 ATA / ETA" value={formatDateTime(detail.eta)} active={Boolean(detail.eta)} /><TimelineItem label="卸船时间" value={formatDateTime(detail.dischargeTime)} active={Boolean(detail.dischargeTime)} last /></div>{detail.note && <div className="detail-alert"><CircleAlert size={17} /><div><strong>查询备注</strong><span>{detail.note}</span></div></div>}<div className="verification-card"><div><Globe2 size={17} /><div><strong>官网真实性核验</strong><span>官网复核会复制船司实际接受的查询号；森罗会自动去除 SMLM 前缀。部分官网会要求重新查询或接受 Cookie。</span></div></div><VerificationActions shipment={detail} /></div><div className="drawer-actions"><button className="secondary-button" onClick={() => openManualEdit(detail)}><Pencil size={15} />人工修改状态</button></div><div className="drawer-meta">数据更新于 {formatDateTime(detail.lastUpdated)}</div></aside></div>}
+      {detail && <div className="drawer-backdrop" onClick={() => setDetail(null)}><aside className="detail-drawer" onClick={(event) => event.stopPropagation()}><button className="drawer-close" onClick={() => setDetail(null)}><X size={19} /></button><p className="eyebrow">SHIPMENT DETAIL</p><h2>单号追踪详情</h2><div className="drawer-carrier"><CarrierMark code={detail.carrierCode} /><div><strong>{detail.carrier}</strong><span>{detail.billNo}</span></div></div><div className="detail-grid"><DetailItem label="提单号" value={detail.billNo} /><DetailItem label="官网查询号" value={detail.verificationNo || detail.billNo} /><DetailItem label="柜号" value={detail.containerNo || '—'} /><DetailItem label="查询进度" value={<ProgressBadge shipment={detail} />} /><DetailItem label="船只状态" value={<VesselStateBadge shipment={detail} />} /></div><div className="timeline"><TimelineItem label="到港时间 ATA / ETA" value={formatDateTime(detail.eta)} active={Boolean(detail.eta)} /><TimelineItem label="卸船时间" value={formatDateTime(detail.dischargeTime)} active={Boolean(detail.dischargeTime)} last /></div>{detail.route && <div className="route-card"><Ship size={17} /><div><strong>官网运行线路</strong><span>{detail.route}</span></div></div>}{detail.note && <div className="detail-alert"><CircleAlert size={17} /><div><strong>查询备注</strong><span>{detail.note}</span></div></div>}<div className="verification-card"><div><Globe2 size={17} /><div><strong>官网真实性核验</strong><span>官网复核会复制船司实际接受的查询号；森罗会自动去除 SMLM 前缀。部分官网会要求重新查询或接受 Cookie。</span></div></div><VerificationActions shipment={detail} /></div><div className="drawer-actions"><button className="secondary-button" onClick={() => openManualEdit(detail)}><Pencil size={15} />人工修改状态</button></div><div className="drawer-meta">数据更新于 {formatDateTime(detail.lastUpdated)}</div></aside></div>}
       {manualForm && <ManualFormModal form={manualForm} saving={manualSaving} onChange={setManualForm} onClose={() => !manualSaving && setManualForm(null)} onSave={saveManualForm} />}
       {toast && <div className="toast"><Check size={17} />{toast}</div>}
     </div>
@@ -737,10 +751,12 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
   const [webhookTesting, setWebhookTesting] = useState(false);
   const [browserSaving, setBrowserSaving] = useState(false);
   const [deletingBackup, setDeletingBackup] = useState('');
+  const [selectedBackups, setSelectedBackups] = useState<Set<string>>(new Set());
   const [selectedTasks, setSelectedTasks] = useState<Set<string>>(new Set());
   const [selectedRuns, setSelectedRuns] = useState<Set<string>>(new Set());
   const [taskModalOpen, setTaskModalOpen] = useState(false);
   const [taskName, setTaskName] = useState('');
+  const [taskScheduleTime, setTaskScheduleTime] = useState('');
   const [taskScope, setTaskScope] = useState<AutomationTask['scope']>('all');
   const [taskCarrierCodes, setTaskCarrierCodes] = useState<string[]>([]);
   const [taskShipmentIds, setTaskShipmentIds] = useState<string[]>([]);
@@ -827,11 +843,36 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
     if (!window.confirm(`确认永久删除备份 ${name}？删除后无法恢复。`)) return;
     setDeletingBackup(name);
     try {
-      const payload = await apiRequest<{ backups: BackupView[] }>(`/api/backups/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      const payload = await apiRequest<{ backups: BackupView[] }>('/api/backups/delete-batch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ names: [name] }) });
       setBackups(payload.backups || []);
+      setSelectedBackups((previous) => { const next = new Set(previous); next.delete(name); return next; });
       onToast('备份文件已删除');
     } catch (error) {
       onToast(error instanceof Error ? error.message : '删除备份失败');
+    } finally {
+      setDeletingBackup('');
+    }
+  }
+
+  function toggleBackup(name: string) {
+    setSelectedBackups((previous) => {
+      const next = new Set(previous);
+      next.has(name) ? next.delete(name) : next.add(name);
+      return next;
+    });
+  }
+
+  async function deleteSelectedBackups() {
+    if (!selectedBackups.size) return;
+    if (!window.confirm(`确认永久删除选中的 ${selectedBackups.size} 个备份？删除后无法恢复。`)) return;
+    setDeletingBackup('batch');
+    try {
+      const payload = await apiRequest<{ backups: BackupView[] }>('/api/backups/delete-batch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ names: [...selectedBackups] }) });
+      setBackups(payload.backups || []);
+      setSelectedBackups(new Set());
+      onToast('选中的备份文件已删除');
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '批量删除备份失败');
     } finally {
       setDeletingBackup('');
     }
@@ -863,10 +904,11 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
       const payload = await apiRequest<{ tasks: AutomationTask[] }>('/api/automation/tasks', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name: taskName, scope: taskScope, carrierCodes: taskCarrierCodes, shipmentIds: taskShipmentIds }),
+        body: JSON.stringify({ name: taskName, scope: taskScope, carrierCodes: taskCarrierCodes, shipmentIds: taskShipmentIds, scheduleTime: taskScheduleTime || null }),
       });
       setTasks(payload.tasks || []);
       setTaskName('');
+      setTaskScheduleTime('');
       setTaskScope('all');
       setTaskCarrierCodes([]);
       setTaskShipmentIds([]);
@@ -883,7 +925,7 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
     if (!selectedTasks.size) return;
     if (!window.confirm(`确认删除选中的 ${selectedTasks.size} 条自动化任务？`)) return;
     try {
-      const payload = await apiRequest<{ tasks: AutomationTask[] }>('/api/automation/tasks', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [...selectedTasks] }) });
+      const payload = await apiRequest<{ tasks: AutomationTask[] }>('/api/automation/tasks/delete-batch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [...selectedTasks] }) });
       setTasks(payload.tasks || []);
       setSelectedTasks(new Set());
       onToast('选中的自动化任务已删除');
@@ -928,7 +970,7 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
   async function deleteRun(id: string) {
     if (!window.confirm('确认删除这条运行记录？删除后无法恢复。')) return;
     try {
-      const payload = await apiRequest<{ runs: RunView[] }>(`/api/automation/runs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const payload = await apiRequest<{ runs: RunView[] }>('/api/automation/runs/delete-batch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [id] }) });
       setRuns(payload.runs || []);
       setSelectedRuns((previous) => { const next = new Set(previous); next.delete(id); return next; });
       onToast('运行记录已删除');
@@ -941,7 +983,7 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
     if (!selectedRuns.size) return;
     if (!window.confirm(`确认删除选中的 ${selectedRuns.size} 条运行记录？`)) return;
     try {
-      const payload = await apiRequest<{ runs: RunView[] }>('/api/automation/runs', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [...selectedRuns] }) });
+      const payload = await apiRequest<{ runs: RunView[] }>('/api/automation/runs/delete-batch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [...selectedRuns] }) });
       setRuns(payload.runs || []);
       setSelectedRuns(new Set());
       onToast('选中的运行记录已删除');
@@ -996,14 +1038,14 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
         {(automation?.schedule || []).map((schedule, index) => <article className="schedule-card" key={schedule.time}><div className="schedule-index">0{index + 1}</div><div><span>每日定时任务</span><strong>{schedule.time}</strong><small>Asia/Shanghai · {schedule.cron}</small></div><span className={`enabled-pill ${automation?.enabled ? '' : 'disabled'}`}>{automation?.enabled ? '已启用' : '已停用'}</span></article>)}
       </section>
       <section className="module-card automation-controls"><div><div className="control-icon"><FileSpreadsheet size={18} /></div><div><strong>官方接口 + 网页模拟点击</strong><span>接口失败后使用系统 Chrome 串行查询；页面数据无法核验时保存截图并记录原因</span></div></div><label className="setting-toggle"><span>{automation?.enabled ? '定时任务已启用' : '定时任务已停用'}</span><input type="checkbox" checked={Boolean(automation?.enabled)} onChange={(event) => onToggleAutomation(event.target.checked)} /><span className="switch-slider" /></label></section>
-      <section className="module-card task-manager"><div className="module-card-header"><div><strong>自定义自动化任务</strong><span>可按船司或单条船期创建任务；批量执行时按列表顺序逐条完成</span></div><div className="task-toolbar"><button className="secondary-button" onClick={() => setTaskModalOpen(true)}><Save size={14} />新建任务</button>{selectedTasks.size > 0 && <><button className="secondary-button" onClick={runSelectedTasks} disabled={taskRunning}><RefreshCw size={14} />按顺序执行 ({selectedTasks.size})</button><button className="danger-button" onClick={deleteSelectedTasks}><Trash2 size={13} />批量删除</button></>}</div></div><div className="task-list">{tasks.length ? tasks.map((task) => <div className={`task-row ${selectedTasks.has(task.id) ? 'selected-row' : ''}`} key={task.id}><input type="checkbox" checked={selectedTasks.has(task.id)} onChange={() => toggleTask(task.id)} /><div className="task-main"><strong>{task.name}</strong><span>{task.scope === 'all' ? '全部未完成记录' : task.scope === 'carrier' ? `船司：${task.carrierCodes.map((code) => carrierLabel(code)).join('、')}` : `单条船期：${task.shipmentIds.length} 条`} · 创建于 {fullDate(task.createdAt)}</span></div><span className={`enabled-pill ${task.enabled ? '' : 'disabled'}`}>{task.enabled ? '已启用' : '已停用'}</span><button className="text-action-button" onClick={() => runTask(task)} disabled={!task.enabled || taskRunning}><RefreshCw size={13} />立即执行</button><button className="row-action" title={task.enabled ? '停用任务' : '启用任务'} onClick={async () => { try { const payload = await apiRequest<{ tasks: AutomationTask[] }>(`/api/automation/tasks/${encodeURIComponent(task.id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: !task.enabled }) }); setTasks(payload.tasks || []); } catch (error) { onToast(error instanceof Error ? error.message : '任务设置保存失败'); } }}><Clock3 size={14} /></button><button className="row-action danger-action" title="删除任务" onClick={async () => { if (!window.confirm(`确认删除任务“${task.name}”？`)) return; setDeletingTask(task.id); try { const payload = await apiRequest<{ tasks: AutomationTask[] }>(`/api/automation/tasks/${encodeURIComponent(task.id)}`, { method: 'DELETE' }); setTasks(payload.tasks || []); setSelectedTasks((previous) => { const next = new Set(previous); next.delete(task.id); return next; }); onToast('任务已删除'); } catch (error) { onToast(error instanceof Error ? error.message : '删除任务失败'); } finally { setDeletingTask(''); } }} disabled={deletingTask === task.id}><Trash2 size={14} /></button></div>) : <div className="empty-module">尚未创建自定义任务。点击“新建任务”选择全部数据、船司或单条船期。</div>}</div></section>
+      <section className="module-card task-manager"><div className="module-card-header"><div><strong>自定义自动化任务</strong><span>可按船司或单条船期创建任务；批量执行时按列表顺序逐条完成</span></div><div className="task-toolbar"><button className="secondary-button" onClick={() => setTaskModalOpen(true)}><Save size={14} />新建任务</button>{selectedTasks.size > 0 && <><button className="secondary-button" onClick={runSelectedTasks} disabled={taskRunning}><RefreshCw size={14} />按顺序执行 ({selectedTasks.size})</button><button className="danger-button" onClick={deleteSelectedTasks}><Trash2 size={13} />批量删除</button></>}</div></div><div className="task-list">{tasks.length ? tasks.map((task) => <div className={`task-row ${selectedTasks.has(task.id) ? 'selected-row' : ''}`} key={task.id}><input type="checkbox" checked={selectedTasks.has(task.id)} onChange={() => toggleTask(task.id)} /><div className="task-main"><strong>{task.name}</strong><span>{task.scope === 'all' ? '全部未完成记录' : task.scope === 'carrier' ? `船司：${task.carrierCodes.map((code) => carrierLabel(code)).join('、')}` : `单条船期：${task.shipmentIds.length} 条`} · {task.scheduleTime ? `每天 ${task.scheduleTime}` : '仅手动执行'} · 创建于 {fullDate(task.createdAt)}</span></div><span className={`enabled-pill ${task.enabled ? '' : 'disabled'}`}>{task.enabled ? '已启用' : '已停用'}</span><button className="text-action-button" onClick={() => runTask(task)} disabled={!task.enabled || taskRunning}><RefreshCw size={13} />立即执行</button><button className="row-action" title={task.enabled ? '停用任务' : '启用任务'} onClick={async () => { try { const payload = await apiRequest<{ tasks: AutomationTask[] }>(`/api/automation/tasks/${encodeURIComponent(task.id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: !task.enabled }) }); setTasks(payload.tasks || []); } catch (error) { onToast(error instanceof Error ? error.message : '任务设置保存失败'); } }}><Clock3 size={14} /></button><button className="row-action danger-action" title="删除任务" onClick={async () => { if (!window.confirm(`确认删除任务“${task.name}”？`)) return; setDeletingTask(task.id); try { const payload = await apiRequest<{ tasks: AutomationTask[] }>('/api/automation/tasks/delete-batch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [task.id] }) }); setTasks(payload.tasks || []); setSelectedTasks((previous) => { const next = new Set(previous); next.delete(task.id); return next; }); onToast('任务已删除'); } catch (error) { onToast(error instanceof Error ? error.message : '删除任务失败'); } finally { setDeletingTask(''); } }} disabled={deletingTask === task.id}><Trash2 size={14} /></button></div>) : <div className="empty-module">尚未创建自定义任务。点击“新建任务”选择全部数据、船司或单条船期。</div>}</div></section>
       <RunHistory runs={runs} selected={selectedRuns} onToggle={toggleRun} onDelete={deleteRun} onDeleteSelected={deleteSelectedRuns} />
-      {taskModalOpen && <div className="modal-backdrop" role="presentation" onMouseDown={() => !taskSaving && setTaskModalOpen(false)}><section className="task-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">CUSTOM AUTOMATION</p><h2>新建自动化任务</h2><p>选择数据范围后，任务只会查询未到港或未卸船记录。</p></div><button className="drawer-close" onClick={() => setTaskModalOpen(false)} disabled={taskSaving}><X size={19} /></button></div><label className="setting-field"><span>任务名称</span><input value={taskName} onChange={(event) => setTaskName(event.target.value)} placeholder="例如：上午重点船司更新" /></label><label className="setting-field"><span>更新范围</span><select value={taskScope} onChange={(event) => { setTaskScope(event.target.value as AutomationTask['scope']); setTaskCarrierCodes([]); setTaskShipmentIds([]); }}><option value="all">全部未完成记录</option><option value="carrier">指定船司</option><option value="shipment">指定船期</option></select></label>{taskScope === 'carrier' && <div className="task-choice-grid">{Array.from(new Set((data?.shipments || []).map((item) => item.carrierCode))).map((code) => <label key={code}><input type="checkbox" checked={taskCarrierCodes.includes(code)} onChange={(event) => setTaskCarrierCodes((previous) => event.target.checked ? [...previous, code] : previous.filter((item) => item !== code))} />{carrierLabel(code)}</label>)}</div>}{taskScope === 'shipment' && <div className="task-choice-grid shipment-choice-grid">{(data?.shipments || []).map((item) => <label key={item.id}><input type="checkbox" checked={taskShipmentIds.includes(item.id)} onChange={(event) => setTaskShipmentIds((previous) => event.target.checked ? [...previous, item.id] : previous.filter((id) => id !== item.id))} /><span>{carrierLabel(item.carrierCode, item.carrier)} · {item.billNo}</span></label>)}</div>}<div className="modal-actions"><button className="secondary-button" onClick={() => setTaskModalOpen(false)} disabled={taskSaving}>取消</button><button className="primary-button" onClick={createTask} disabled={taskSaving}>{taskSaving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}{taskSaving ? '保存中…' : '创建任务'}</button></div></section></div>}
+      {taskModalOpen && <div className="modal-backdrop" role="presentation" onMouseDown={() => !taskSaving && setTaskModalOpen(false)}><section className="task-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">CUSTOM AUTOMATION</p><h2>新建自动化任务</h2><p>选择数据范围和每日执行时间；时间留空时仅支持手动执行。</p></div><button className="drawer-close" onClick={() => setTaskModalOpen(false)} disabled={taskSaving}><X size={19} /></button></div><label className="setting-field"><span>任务名称</span><input value={taskName} onChange={(event) => setTaskName(event.target.value)} placeholder="例如：上午重点船司更新" /></label><label className="setting-field"><span>每日执行时间（可选）</span><input type="time" value={taskScheduleTime} onChange={(event) => setTaskScheduleTime(event.target.value)} /></label><label className="setting-field"><span>更新范围</span><select value={taskScope} onChange={(event) => { setTaskScope(event.target.value as AutomationTask['scope']); setTaskCarrierCodes([]); setTaskShipmentIds([]); }}><option value="all">全部未完成记录</option><option value="carrier">指定船司</option><option value="shipment">指定船期</option></select></label>{taskScope === 'carrier' && <div className="task-choice-grid">{Array.from(new Set((data?.shipments || []).map((item) => item.carrierCode))).map((code) => <label key={code}><input type="checkbox" checked={taskCarrierCodes.includes(code)} onChange={(event) => setTaskCarrierCodes((previous) => event.target.checked ? [...previous, code] : previous.filter((item) => item !== code))} />{carrierLabel(code)}</label>)}</div>}{taskScope === 'shipment' && <div className="task-choice-grid shipment-choice-grid">{(data?.shipments || []).map((item) => <label key={item.id}><input type="checkbox" checked={taskShipmentIds.includes(item.id)} onChange={(event) => setTaskShipmentIds((previous) => event.target.checked ? [...previous, item.id] : previous.filter((id) => id !== item.id))} /><span>{carrierLabel(item.carrierCode, item.carrier)} · {item.billNo}</span></label>)}</div>}<div className="modal-actions"><button className="secondary-button" onClick={() => setTaskModalOpen(false)} disabled={taskSaving}>取消</button><button className="primary-button" onClick={createTask} disabled={taskSaving}>{taskSaving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}{taskSaving ? '保存中…' : '创建任务'}</button></div></section></div>}
     </>}
 
     {page === 'exports' && <>
       <section className="export-summary-grid"><article><FileCheck2 size={20} /><div><span>当前工作簿</span><strong>{automation?.workbook?.records || 0} 条记录</strong><small>{automation?.workbook ? fullDate(automation.workbook.modifiedAt) : '尚未导入'}</small></div><a href={automation?.workbook ? '/api/workbooks/current' : '#'} onClick={(event) => { if (!automation?.workbook) { event.preventDefault(); onToast('请先导入 Excel 或新增单号'); } }}>下载<Download size={14} /></a></article><article><Archive size={20} /><div><span>备份文件</span><strong>{backups.length} 个文件</strong><small>更新前自动生成，也可手动创建</small></div><button className="secondary-button backup-create" onClick={async () => { await onCreateBackup(); await refreshModuleData(); }} disabled={!automation?.workbook}>创建备份</button></article><article><FileSpreadsheet size={20} /><div><span>运行记录</span><strong>{runs.length} 次</strong><small>最多保留最近 30 次</small></div></article></section>
-      <section className="module-card"><div className="module-card-header"><div><strong>备份文件</strong><span>按时间倒序排列；恢复会先备份当前文件，删除后不可恢复</span></div></div><div className="backup-list">{backups.length ? backups.map((backup) => <div key={backup.name}><div className="backup-icon"><Archive size={17} /></div><div><strong>{backup.name}</strong><span>{backup.reason} · {(backup.size / 1024).toFixed(1)} KB · {fullDate(backup.createdAt)}</span></div><div className="backup-actions"><a href={`/api/backups/${encodeURIComponent(backup.name)}`}><Download size={15} />下载</a><button className="restore-button" onClick={async () => { await onRestoreBackup(backup.name); await refreshModuleData(); }} disabled={!automation?.workbook || Boolean(deletingBackup)}>恢复</button><button className="danger-button" onClick={() => deleteBackup(backup.name)} disabled={Boolean(deletingBackup)}><Trash2 size={13} />{deletingBackup === backup.name ? '删除中…' : '删除'}</button></div></div>) : <div className="empty-module">尚无备份文件，执行一次更新或手动创建备份后会显示。</div>}</div></section>
+      <section className="module-card"><div className="module-card-header"><div><strong>备份文件</strong><span>按时间倒序排列；恢复会先备份当前文件，删除后不可恢复</span></div>{backups.length > 0 && <div className="backup-toolbar"><label><input type="checkbox" checked={selectedBackups.size === backups.length} onChange={(event) => setSelectedBackups(event.target.checked ? new Set(backups.map((item) => item.name)) : new Set())} />全选</label>{selectedBackups.size > 0 && <button className="danger-button" onClick={deleteSelectedBackups} disabled={Boolean(deletingBackup)}><Trash2 size={13} />批量删除 ({selectedBackups.size})</button>}</div>}</div><div className="backup-list">{backups.length ? backups.map((backup) => <div className={selectedBackups.has(backup.name) ? 'selected-row' : ''} key={backup.name}><input type="checkbox" checked={selectedBackups.has(backup.name)} onChange={() => toggleBackup(backup.name)} /><div className="backup-icon"><Archive size={17} /></div><div className="backup-main"><strong>{backup.name}</strong><span>{backup.reason} · {(backup.size / 1024).toFixed(1)} KB · {fullDate(backup.createdAt)}</span></div><div className="backup-actions"><a href={`/api/backups/${encodeURIComponent(backup.name)}`}><Download size={15} />下载</a><button className="restore-button" onClick={async () => { await onRestoreBackup(backup.name); await refreshModuleData(); }} disabled={!automation?.workbook || Boolean(deletingBackup)}>恢复</button><button className="danger-button" onClick={() => deleteBackup(backup.name)} disabled={Boolean(deletingBackup)}><Trash2 size={13} />{deletingBackup === backup.name ? '删除中…' : '删除'}</button></div></div>) : <div className="empty-module">尚无备份文件，执行一次更新或手动创建备份后会显示。</div>}</div></section>
     </>}
 
     {page === 'settings' && <section className="settings-grid">

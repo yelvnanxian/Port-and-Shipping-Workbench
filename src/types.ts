@@ -19,6 +19,7 @@ export interface Shipment {
   sourceUrl?: string;
   evidencePath?: string;
   verificationNo?: string;
+  route?: string | null;
 }
 
 export interface CarrierSource {
@@ -92,4 +93,5 @@ export interface AutomationTask {
   updatedAt: string;
   lastRunAt: string | null;
   lastRunId: string | null;
+  scheduleTime: string | null;
 }

@@ -21,6 +21,13 @@ test('美森解析官网 bk 响应并兼容柜号连字符', () => {
   assert.equal(result.arrivalKind, 'ETA');
   assert.equal(result.arrivalTime?.getFullYear(), 2026);
   assert.equal(result.arrivalTime?.getMonth(), 7);
+  assert.equal(result.arrived, true);
+  assert.equal(result.dischargeTime, null);
+  assert.match(result.rawSummary, /到港后场站活动/);
+});
+
+test('美森不会用其他柜号的旧状态判断当前柜号已到港', () => {
+  const result = parseMatsonTrackingResponse(payload, 'MATU2329916');
   assert.equal(result.arrived, false);
   assert.equal(result.dischargeTime, null);
 });

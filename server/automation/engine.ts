@@ -34,6 +34,10 @@ function sourceUrlFromNote(note: string) {
   return note.match(/(?:^|；)来源=(https?:\/\/[^；\s]+)/i)?.[1] || '';
 }
 
+function routeTextFromNote(note: string) {
+  return note.match(/(?:^|；)运行线路=([^；]+)/)?.[1]?.trim() || null;
+}
+
 function manualTime(value: unknown): TrackingTime {
   if (value === null || value === undefined || value === '') return null;
   if (typeof value !== 'string') throw new Error('时间必须是文本或空值');
@@ -118,7 +122,7 @@ export class AutomationEngine {
   async listTasks(): Promise<AutomationTask[]> {
     try {
       const tasks = JSON.parse(await fs.readFile(this.tasksPath, 'utf8')) as AutomationTask[];
-      return Array.isArray(tasks) ? tasks : [];
+      return Array.isArray(tasks) ? tasks.map((task) => ({ ...task, scheduleTime: task.scheduleTime || null })) : [];
     } catch {
       return [];
     }
@@ -129,12 +133,14 @@ export class AutomationEngine {
     await fs.writeFile(this.tasksPath, JSON.stringify(tasks, null, 2));
   }
 
-  async createTask(input: { name: string; scope: AutomationTaskScope; carrierCodes?: string[]; shipmentIds?: string[] }) {
+  async createTask(input: { name: string; scope: AutomationTaskScope; carrierCodes?: string[]; shipmentIds?: string[]; scheduleTime?: string | null }) {
     const name = input.name.trim();
     if (!name) throw new Error('任务名称不能为空');
     if (!['all', 'carrier', 'shipment'].includes(input.scope)) throw new Error('任务范围不合法');
     const carrierCodes = [...new Set((input.carrierCodes || []).map((code) => code.trim().toUpperCase()).filter(Boolean))];
     const shipmentIds = [...new Set((input.shipmentIds || []).map((id) => id.trim()).filter(Boolean))];
+    const scheduleTime = input.scheduleTime?.trim() || null;
+    if (scheduleTime && !/^([01]\d|2[0-3]):[0-5]\d$/.test(scheduleTime)) throw new Error('任务时间必须是 HH:mm 格式');
     if (input.scope === 'carrier' && !carrierCodes.length) throw new Error('请选择至少一个船司');
     if (input.scope === 'shipment' && !shipmentIds.length) throw new Error('请选择至少一条船期');
     const now = new Date().toISOString();
@@ -149,6 +155,7 @@ export class AutomationEngine {
       updatedAt: now,
       lastRunAt: null,
       lastRunId: null,
+      scheduleTime,
     };
     const tasks = await this.listTasks();
     tasks.push(task);
@@ -389,7 +396,7 @@ export class AutomationEngine {
                 : '未到港未卸船';
             record.lastUpdated = new Date();
             record.progress = '已完成';
-            record.note = `${result.arrivalKind ? `到港字段=${result.arrivalKind}；` : ''}${result.rawSummary}；来源=${result.sourceUrl}${result.evidencePath ? `；成功证据=${result.evidencePath}` : ''}`;
+            record.note = `${result.arrivalKind ? `到港字段=${result.arrivalKind}；` : ''}${result.rawSummary}${result.routeText ? `；运行线路=${result.routeText}` : ''}；来源=${result.sourceUrl}${result.evidencePath ? `；成功证据=${result.evidencePath}` : ''}`;
             success += 1;
             if (record.vesselState !== '已到港已卸船') unfinished += 1;
           } catch (error) {
@@ -529,6 +536,7 @@ export class AutomationEngine {
         sourceUrl: sourceUrlFromNote(record.note) || sourceUrl,
         evidencePath: evidencePathFromNote(record.note),
         verificationNo,
+        route: routeTextFromNote(record.note),
       };
     });
   }

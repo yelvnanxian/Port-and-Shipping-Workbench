@@ -70,7 +70,7 @@ async function dashboardPayload() {
   const automation = await engine.status();
   const generatedAt = automation.lastRun?.finishedAt || lastSync;
   if (workbookRecords.length) {
-    const shipments: Shipment[] = workbookRecords.map(({ record, carrier, carrierCode, sourceUrl, evidencePath, verificationNo }) => ({
+    const shipments: Shipment[] = workbookRecords.map(({ record, carrier, carrierCode, sourceUrl, evidencePath, verificationNo, route }) => ({
       id: `XLSX-${record.rowNumber}`,
       carrier,
       carrierCode,
@@ -95,6 +95,7 @@ async function dashboardPayload() {
       sourceUrl,
       evidencePath,
       verificationNo,
+      route,
     }));
     return { shipments, sources: buildSources(shipments, generatedAt), generatedAt };
   }
@@ -189,6 +190,16 @@ app.delete('/api/automation/runs', async (req, res, next) => {
   }
 });
 
+app.post('/api/automation/runs/delete-batch', async (req, res, next) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter((id: unknown): id is string => typeof id === 'string') : [];
+    if (!ids.length) throw new Error('请选择要删除的任务记录');
+    res.json({ runs: await engine.deleteRuns(ids) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.delete('/api/automation/runs/:id', async (req, res, next) => {
   try {
     res.json({ runs: await engine.deleteRuns([req.params.id]) });
@@ -212,6 +223,7 @@ app.post('/api/automation/tasks', async (req, res, next) => {
       scope: req.body?.scope,
       carrierCodes: Array.isArray(req.body?.carrierCodes) ? req.body.carrierCodes.filter((value: unknown): value is string => typeof value === 'string') : [],
       shipmentIds: Array.isArray(req.body?.shipmentIds) ? req.body.shipmentIds.filter((value: unknown): value is string => typeof value === 'string') : [],
+      scheduleTime: typeof req.body?.scheduleTime === 'string' ? req.body.scheduleTime : null,
     });
     res.json({ task, tasks: await engine.listTasks() });
   } catch (error) {
@@ -229,6 +241,16 @@ app.patch('/api/automation/tasks/:id', async (req, res, next) => {
 });
 
 app.delete('/api/automation/tasks', async (req, res, next) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter((id: unknown): id is string => typeof id === 'string') : [];
+    if (!ids.length) throw new Error('请选择要删除的自动化任务');
+    res.json({ tasks: await engine.deleteTasks(ids) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/automation/tasks/delete-batch', async (req, res, next) => {
   try {
     const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter((id: unknown): id is string => typeof id === 'string') : [];
     if (!ids.length) throw new Error('请选择要删除的自动化任务');
@@ -302,6 +324,17 @@ app.post('/api/backups/create', async (_req, res, next) => {
     if (!(await engine.store.exists())) throw new Error('尚未导入 Excel，无法创建备份');
     const backupPath = await engine.store.backup('手动创建备份');
     res.json({ backupPath, backups: await engine.store.listBackups() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/backups/delete-batch', async (req, res, next) => {
+  try {
+    const names: string[] = Array.isArray(req.body?.names) ? req.body.names.filter((name: unknown): name is string => typeof name === 'string') : [];
+    if (!names.length) throw new Error('请选择要删除的备份文件');
+    for (const name of [...new Set(names)]) await engine.store.deleteBackup(name);
+    res.json({ ok: true, backups: await engine.store.listBackups() });
   } catch (error) {
     next(error);
   }
