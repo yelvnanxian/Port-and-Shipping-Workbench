@@ -21,6 +21,7 @@ import {
   Menu,
   MessageSquare,
   MoreHorizontal,
+  Pencil,
   RefreshCw,
   Save,
   Send,
@@ -48,6 +49,26 @@ interface SettingsView {
 }
 
 type RunSelection = { carrierCodes?: string[]; shipmentIds?: string[] };
+
+interface ManualForm {
+  mode: 'new' | 'edit';
+  id?: string;
+  billNo: string;
+  containerNo: string;
+  carrierHint: string;
+  arrivalTime: string;
+  dischargeTime: string;
+  vesselState: NonNullable<Shipment['vesselState']>;
+  note: string;
+}
+
+function manualInputTime(value: string | null) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value.replace(' ', 'T').slice(0, 16);
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
 
 const navItems: Array<{ id: PageId; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'overview', label: '运营总览', icon: LayoutDashboard },
@@ -191,6 +212,8 @@ export default function App() {
   const [intakeOpen, setIntakeOpen] = useState(false);
   const [intakeText, setIntakeText] = useState('');
   const [intakeSaving, setIntakeSaving] = useState(false);
+  const [manualForm, setManualForm] = useState<ManualForm | null>(null);
+  const [manualSaving, setManualSaving] = useState(false);
   const [moreFilterOpen, setMoreFilterOpen] = useState(false);
   const [onlyIncomplete, setOnlyIncomplete] = useState(false);
   const [onlyException, setOnlyException] = useState(false);
@@ -388,6 +411,37 @@ export default function App() {
     }
   }
 
+  function openManualNew() {
+    setManualForm({ mode: 'new', billNo: '', containerNo: '', carrierHint: '', arrivalTime: '', dischargeTime: '', vesselState: '未到港未卸船', note: '' });
+  }
+
+  function openManualEdit(shipment: Shipment) {
+    setManualForm({ mode: 'edit', id: shipment.id, billNo: shipment.billNo, containerNo: shipment.containerNo, carrierHint: shipment.carrier, arrivalTime: manualInputTime(shipment.eta), dischargeTime: manualInputTime(shipment.dischargeTime), vesselState: shipment.vesselState || '未到港未卸船', note: '' });
+  }
+
+  async function saveManualForm() {
+    if (!manualForm) return;
+    if (!manualForm.billNo.trim()) {
+      setToast('提单号不能为空');
+      return;
+    }
+    setManualSaving(true);
+    try {
+      const payload = manualForm.mode === 'new'
+        ? await apiRequest<{ dashboard: DashboardData; automation: AutomationStatus }>('/api/shipments/manual', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(manualForm) })
+        : await apiRequest<{ dashboard: DashboardData; automation: AutomationStatus }>(`/api/shipments/${encodeURIComponent(manualForm.id || '')}/manual`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(manualForm) });
+      setData(payload.dashboard);
+      setAutomation(payload.automation);
+      setManualForm(null);
+      setDetail(null);
+      setToast(manualForm.mode === 'new' ? '人工补录已保存到 Excel' : '人工修改已保存到 Excel');
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : '人工补录保存失败');
+    } finally {
+      setManualSaving(false);
+    }
+  }
+
   async function handleExport() {
     if (!automation?.workbook) {
       setToast('请先导入 Excel 或新增单号');
@@ -496,7 +550,7 @@ export default function App() {
           <div className={activePage === 'overview' ? '' : 'hidden-page'}>
           <section className="page-heading">
             <div><p className="eyebrow">OPERATIONS OVERVIEW</p><h1>运营总览</h1><p>集中追踪船期、靠泊与卸船动态，及时掌握异常变化。</p></div>
-            <div className="heading-actions"><button className="secondary-button add-record-button" onClick={() => setIntakeOpen(true)}><Ship size={17} />新增单号</button>{selected.size > 0 && <button className="secondary-button" onClick={handleSelectedSync} disabled={syncing}><RefreshCw size={17} className={syncing ? 'spin' : ''} />更新已选 ({selected.size})</button>}<button className="secondary-button" onClick={handleExport}><Download size={17} />导出 Excel</button><button className="primary-button" onClick={() => handleSync()} disabled={syncing}><RefreshCw size={17} className={syncing ? 'spin' : ''} />{syncing ? '同步中…' : '同步最新数据'}</button></div>
+            <div className="heading-actions"><button className="secondary-button add-record-button" onClick={() => setIntakeOpen(true)}><Ship size={17} />新增单号</button><button className="secondary-button" onClick={openManualNew}><Pencil size={16} />人工补录</button>{selected.size > 0 && <button className="secondary-button" onClick={handleSelectedSync} disabled={syncing}><RefreshCw size={17} className={syncing ? 'spin' : ''} />更新已选 ({selected.size})</button>}<button className="secondary-button" onClick={handleExport}><Download size={17} />导出 Excel</button><button className="primary-button" onClick={() => handleSync()} disabled={syncing}><RefreshCw size={17} className={syncing ? 'spin' : ''} />{syncing ? '同步中…' : '同步最新数据'}</button></div>
           </section>
 
           <section className="automation-panel">
@@ -565,7 +619,7 @@ export default function App() {
                       {showUpdatedColumn && <td><div className="update-cell"><span>{timeAgo(item.lastUpdated)}</span><small>{formatDateTime(item.lastUpdated)}</small></div></td>}
                       {showNoteColumn && <td><span className="note-cell" title={item.note}>{item.note || '—'}</span></td>}
                       <td><ProgressBadge shipment={item} /></td>
-                      <td><button className="row-action" onClick={() => setDetail(item)}><ChevronRight size={17} /></button></td>
+                      <td><div className="row-actions"><button className="row-action" title="人工修改" onClick={() => openManualEdit(item)}><Pencil size={14} /></button><button className="row-action" onClick={() => setDetail(item)}><ChevronRight size={17} /></button></div></td>
                     </tr>
                   ))}
                 </tbody>
@@ -575,7 +629,7 @@ export default function App() {
           </section>
           <p className="legal-note">数据仅用于运营辅助，最终船期以船司及码头官方信息为准。</p>
           </div>
-          {activePage !== 'overview' && <ModulePage page={activePage} data={data} automation={automation} syncing={syncing} onSync={handleSync} onToggleAutomation={handleToggleAutomation} onCreateBackup={handleCreateBackup} onRestoreBackup={handleRestoreBackup} onAutomationUpdated={setAutomation} onUpload={() => uploadInput.current?.click()} onToast={setToast} onOpenDetail={setDetail} />}
+          {activePage !== 'overview' && <ModulePage page={activePage} data={data} automation={automation} syncing={syncing} onSync={handleSync} onToggleAutomation={handleToggleAutomation} onCreateBackup={handleCreateBackup} onRestoreBackup={handleRestoreBackup} onAutomationUpdated={setAutomation} onUpload={() => uploadInput.current?.click()} onToast={setToast} onOpenDetail={setDetail} onOpenEdit={openManualEdit} onOpenManual={openManualNew} />}
         </div>
       </main>
 
@@ -603,7 +657,8 @@ export default function App() {
         </section>
       </div>}
 
-      {detail && <div className="drawer-backdrop" onClick={() => setDetail(null)}><aside className="detail-drawer" onClick={(event) => event.stopPropagation()}><button className="drawer-close" onClick={() => setDetail(null)}><X size={19} /></button><p className="eyebrow">SHIPMENT DETAIL</p><h2>单号追踪详情</h2><div className="drawer-carrier"><CarrierMark code={detail.carrierCode} /><div><strong>{detail.carrier}</strong><span>{detail.billNo}</span></div></div><div className="detail-grid"><DetailItem label="提单号" value={detail.billNo} /><DetailItem label="官网查询号" value={detail.verificationNo || detail.billNo} /><DetailItem label="柜号" value={detail.containerNo || '—'} /><DetailItem label="查询进度" value={<ProgressBadge shipment={detail} />} /><DetailItem label="船只状态" value={<VesselStateBadge shipment={detail} />} /></div><div className="timeline"><TimelineItem label="到港时间 ATA / ETA" value={formatDateTime(detail.eta)} active={Boolean(detail.eta)} /><TimelineItem label="卸船时间" value={formatDateTime(detail.dischargeTime)} active={Boolean(detail.dischargeTime)} last /></div>{detail.note && <div className="detail-alert"><CircleAlert size={17} /><div><strong>查询备注</strong><span>{detail.note}</span></div></div>}<div className="verification-card"><div><Globe2 size={17} /><div><strong>官网真实性核验</strong><span>官网复核会复制船司实际接受的查询号；森罗会自动去除 SMLM 前缀。部分官网会要求重新查询或接受 Cookie。</span></div></div><VerificationActions shipment={detail} /></div><div className="drawer-meta">数据更新于 {formatDateTime(detail.lastUpdated)}</div></aside></div>}
+      {detail && <div className="drawer-backdrop" onClick={() => setDetail(null)}><aside className="detail-drawer" onClick={(event) => event.stopPropagation()}><button className="drawer-close" onClick={() => setDetail(null)}><X size={19} /></button><p className="eyebrow">SHIPMENT DETAIL</p><h2>单号追踪详情</h2><div className="drawer-carrier"><CarrierMark code={detail.carrierCode} /><div><strong>{detail.carrier}</strong><span>{detail.billNo}</span></div></div><div className="detail-grid"><DetailItem label="提单号" value={detail.billNo} /><DetailItem label="官网查询号" value={detail.verificationNo || detail.billNo} /><DetailItem label="柜号" value={detail.containerNo || '—'} /><DetailItem label="查询进度" value={<ProgressBadge shipment={detail} />} /><DetailItem label="船只状态" value={<VesselStateBadge shipment={detail} />} /></div><div className="timeline"><TimelineItem label="到港时间 ATA / ETA" value={formatDateTime(detail.eta)} active={Boolean(detail.eta)} /><TimelineItem label="卸船时间" value={formatDateTime(detail.dischargeTime)} active={Boolean(detail.dischargeTime)} last /></div>{detail.note && <div className="detail-alert"><CircleAlert size={17} /><div><strong>查询备注</strong><span>{detail.note}</span></div></div>}<div className="verification-card"><div><Globe2 size={17} /><div><strong>官网真实性核验</strong><span>官网复核会复制船司实际接受的查询号；森罗会自动去除 SMLM 前缀。部分官网会要求重新查询或接受 Cookie。</span></div></div><VerificationActions shipment={detail} /></div><div className="drawer-actions"><button className="secondary-button" onClick={() => openManualEdit(detail)}><Pencil size={15} />人工修改状态</button></div><div className="drawer-meta">数据更新于 {formatDateTime(detail.lastUpdated)}</div></aside></div>}
+      {manualForm && <ManualFormModal form={manualForm} saving={manualSaving} onChange={setManualForm} onClose={() => !manualSaving && setManualForm(null)} onSave={saveManualForm} />}
       {toast && <div className="toast"><Check size={17} />{toast}</div>}
     </div>
   );
@@ -656,7 +711,7 @@ function fullDate(value: string) {
   return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value));
 }
 
-function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomation, onCreateBackup, onRestoreBackup, onAutomationUpdated, onUpload, onToast, onOpenDetail }: {
+function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomation, onCreateBackup, onRestoreBackup, onAutomationUpdated, onUpload, onToast, onOpenDetail, onOpenEdit, onOpenManual }: {
   page: Exclude<PageId, 'overview'>;
   data: DashboardData | null;
   automation: AutomationStatus | null;
@@ -669,6 +724,8 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
   onUpload: () => void;
   onToast: (message: string) => void;
   onOpenDetail: (shipment: Shipment) => void;
+  onOpenEdit: (shipment: Shipment) => void;
+  onOpenManual: () => void;
 }) {
   const [carrierRules, setCarrierRules] = useState<CarrierRuleView[]>([]);
   const [runs, setRuns] = useState<RunView[]>([]);
@@ -914,7 +971,7 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
   return <div className="module-page">
     <section className="page-heading module-heading">
       <div><p className="eyebrow">{pageInfo[0]}</p><h1>{pageInfo[1]}</h1><p>{pageInfo[2]}</p></div>
-      {page === 'tracking' && <div className="heading-actions"><button className="secondary-button" onClick={onUpload}><Upload size={16} />导入 Excel</button><a className="primary-link-button" href="/api/workbooks/current"><Download size={16} />下载当前 Excel</a></div>}
+      {page === 'tracking' && <div className="heading-actions"><button className="secondary-button" onClick={onOpenManual}><Pencil size={16} />人工补录</button><button className="secondary-button" onClick={onUpload}><Upload size={16} />导入 Excel</button><a className="primary-link-button" href="/api/workbooks/current"><Download size={16} />下载当前 Excel</a></div>}
       {page === 'automation' && <button className="primary-button" onClick={async () => { await onSync(); await refreshModuleData(); }} disabled={syncing}><RefreshCw size={16} className={syncing ? 'spin' : ''} />立即执行</button>}
     </section>
 
@@ -923,7 +980,7 @@ function ModulePage({ page, data, automation, syncing, onSync, onToggleAutomatio
       {page === 'tracking' && <section className="module-card">
       <div className="module-card-header"><div><strong>全部追踪记录</strong><span>Excel 当前共 {data?.shipments.length || 0} 条 · 可单独更新某一条船期</span></div><div className="compact-legend"><span className="legend-dot success" />已完成卸船<span className="legend-dot info" />等待卸船<span className="legend-dot muted-dot" />等待到港</div></div>
       <div className="module-table-wrap"><table className="module-table"><thead><tr><th>船司</th><th>提单号</th><th>柜号</th><th>到港时间</th><th>卸船时间</th><th>船只状态</th><th>进度</th><th>最后更新</th><th>真实性核验</th><th>操作</th></tr></thead><tbody>
-        {(data?.shipments || []).map((item) => <tr key={item.id}><td><div className="carrier-cell"><CarrierMark code={item.carrierCode} /><div><strong>{carrierLabel(item.carrierCode, item.carrier)}</strong><span>{item.carrierCode}</span></div></div></td><td className="mono">{item.billNo}</td><td className="mono">{item.containerNo || '—'}</td><td><div className="date-cell eta">{formatDateTime(item.eta, true)}</div></td><td><div className="date-cell discharge">{formatDateTime(item.dischargeTime, true)}</div></td><td><VesselStateBadge shipment={item} /></td><td><ProgressBadge shipment={item} /></td><td>{timeAgo(item.lastUpdated)}</td><td><VerificationActions shipment={item} compact /></td><td><div className="row-actions"><button className="row-action" title="只更新这一条船期" onClick={() => syncShipment(item.id)} disabled={syncing}><RefreshCw size={14} /></button><button className="row-action" title="查看追踪详情" onClick={() => onOpenDetail(item)}><ChevronRight size={17} /></button></div></td></tr>)}
+        {(data?.shipments || []).map((item) => <tr key={item.id}><td><div className="carrier-cell"><CarrierMark code={item.carrierCode} /><div><strong>{carrierLabel(item.carrierCode, item.carrier)}</strong><span>{item.carrierCode}</span></div></div></td><td className="mono">{item.billNo}</td><td className="mono">{item.containerNo || '—'}</td><td><div className="date-cell eta">{formatDateTime(item.eta, true)}</div></td><td><div className="date-cell discharge">{formatDateTime(item.dischargeTime, true)}</div></td><td><VesselStateBadge shipment={item} /></td><td><ProgressBadge shipment={item} /></td><td>{timeAgo(item.lastUpdated)}</td><td><VerificationActions shipment={item} compact /></td><td><div className="row-actions"><button className="row-action" title="人工修改状态" onClick={() => onOpenEdit(item)}><Pencil size={14} /></button><button className="row-action" title="只更新这一条船期" onClick={() => syncShipment(item.id)} disabled={syncing}><RefreshCw size={14} /></button><button className="row-action" title="查看追踪详情" onClick={() => onOpenDetail(item)}><ChevronRight size={17} /></button></div></td></tr>)}
       </tbody></table></div>
     </section>}
 
@@ -983,6 +1040,37 @@ function SyncProgress({ progress }: { progress: NonNullable<AutomationStatus['cu
     <div className="sync-progress-track"><span style={{ width: `${percent}%` }} /></div>
     <div className="sync-progress-foot"><span>成功 {progress.success}</span><span>失败 {progress.failed}</span><span>跳过 {progress.skipped}</span><span className="sync-current">{progress.currentBills.length ? `当前：${progress.currentBills.slice(0, 3).map((item) => `${item.carrier} ${item.billNo}`).join('、')}${progress.currentBills.length > 3 ? '…' : ''}` : '正在切换下一条'}</span></div>
   </section>;
+}
+
+function ManualFormModal({ form, saving, onChange, onClose, onSave }: { form: ManualForm; saving: boolean; onChange: (form: ManualForm) => void; onClose: () => void; onSave: () => void }) {
+  function update(patch: Partial<ManualForm>) {
+    onChange({ ...form, ...patch });
+  }
+
+  function updateState(vesselState: ManualForm['vesselState']) {
+    update({
+      vesselState,
+      arrivalTime: vesselState === '未到港未卸船' ? '' : form.arrivalTime,
+      dischargeTime: vesselState === '已到港已卸船' ? form.dischargeTime : '',
+    });
+  }
+
+  return <div className="modal-backdrop manual-backdrop" role="presentation" onMouseDown={onClose}>
+    <section className="manual-modal" role="dialog" aria-modal="true" aria-labelledby="manual-form-title" onMouseDown={(event) => event.stopPropagation()}>
+      <div className="modal-heading"><div><p className="eyebrow">MANUAL TRACKING ENTRY</p><h2 id="manual-form-title">{form.mode === 'new' ? '人工补录追踪数据' : '人工修改船期状态'}</h2><p>保存前会自动备份 Excel，并在备注中标记为人工数据。</p></div><button className="drawer-close" onClick={onClose} disabled={saving}><X size={19} /></button></div>
+      <div className="manual-grid">
+        <label className="setting-field"><span>提单号</span><input value={form.billNo} onChange={(event) => update({ billNo: event.target.value.toUpperCase() })} disabled={form.mode === 'edit'} placeholder="必填" /></label>
+        <label className="setting-field"><span>柜号</span><input value={form.containerNo} onChange={(event) => update({ containerNo: event.target.value.toUpperCase() })} disabled={form.mode === 'edit'} placeholder="可选" /></label>
+        <label className="setting-field manual-full"><span>船司</span><input value={form.carrierHint} onChange={(event) => update({ carrierHint: event.target.value })} disabled={form.mode === 'edit'} placeholder="可不填，系统按提单号识别" /></label>
+        <label className="setting-field"><span>到港时间</span><input type="datetime-local" value={form.arrivalTime} onChange={(event) => update({ arrivalTime: event.target.value })} disabled={form.vesselState === '未到港未卸船'} /></label>
+        <label className="setting-field"><span>卸船时间</span><input type="datetime-local" value={form.dischargeTime} onChange={(event) => update({ dischargeTime: event.target.value })} disabled={form.vesselState !== '已到港已卸船'} /></label>
+        <label className="setting-field manual-full"><span>船只状态</span><select value={form.vesselState} onChange={(event) => updateState(event.target.value as ManualForm['vesselState'])}><option value="未到港未卸船">未到港未卸船</option><option value="已到港未卸船">已到港未卸船</option><option value="已到港已卸船">已到港已卸船</option></select></label>
+        <label className="setting-field manual-full"><span>人工备注</span><textarea value={form.note} onChange={(event) => update({ note: event.target.value })} placeholder="例如：人工从码头回执核实，或官网人工查询结果" /></label>
+      </div>
+      <div className="manual-hint"><CircleAlert size={15} /><span>选择“未到港未卸船”会清空到港和卸船时间；选择“已到港未卸船”会清空卸船时间。人工补录内容会直接写入当前 Excel。</span></div>
+      <div className="modal-actions"><button className="secondary-button" onClick={onClose} disabled={saving}>取消</button><button className="primary-button" onClick={onSave} disabled={saving || !form.billNo.trim()}>{saving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}{saving ? '保存中…' : '保存人工数据'}</button></div>
+    </section>
+  </div>;
 }
 
 function DetailItem({ label, value }: { label: string; value: React.ReactNode }) {

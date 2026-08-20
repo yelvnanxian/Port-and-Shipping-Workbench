@@ -342,6 +342,44 @@ app.post('/api/intake', async (req, res, next) => {
   }
 });
 
+function workbookRowId(value: unknown) {
+  if (typeof value !== 'string') throw new Error('船期编号不合法');
+  const match = value.match(/^XLSX-(\d+)$/);
+  if (!match) throw new Error('船期编号不合法');
+  return Number(match[1]);
+}
+
+app.post('/api/shipments/manual', async (req, res, next) => {
+  try {
+    const result = await engine.manualAppend({
+      billNo: typeof req.body?.billNo === 'string' ? req.body.billNo : '',
+      containerNo: typeof req.body?.containerNo === 'string' ? req.body.containerNo : '',
+      carrierHint: typeof req.body?.carrierHint === 'string' ? req.body.carrierHint : '',
+      arrivalTime: req.body?.arrivalTime,
+      dischargeTime: req.body?.dischargeTime,
+      vesselState: req.body?.vesselState,
+      note: typeof req.body?.note === 'string' ? req.body.note : '',
+    });
+    res.json({ ...result, dashboard: await dashboardPayload(), automation: await engine.status() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/shipments/:id/manual', async (req, res, next) => {
+  try {
+    const result = await engine.manualUpdate(workbookRowId(req.params.id), {
+      arrivalTime: req.body?.arrivalTime,
+      dischargeTime: req.body?.dischargeTime,
+      vesselState: req.body?.vesselState,
+      note: typeof req.body?.note === 'string' ? req.body.note : '',
+    });
+    res.json({ ...result, dashboard: await dashboardPayload(), automation: await engine.status() });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/automation/run', async (req, res, next) => {
   try {
     const carrierCodes = Array.isArray(req.body?.carrierCodes) ? req.body.carrierCodes.filter((value: unknown): value is string => typeof value === 'string') : undefined;

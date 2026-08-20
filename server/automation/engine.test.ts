@@ -124,3 +124,35 @@ test('自定义任务按船司范围运行并支持删除', async () => {
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test('人工补录和人工修改会写回状态、时间并创建备份', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-manual-'));
+  try {
+    const store = new WorkbookStore(root);
+    const engine = new AutomationEngine(store);
+    const created = await engine.manualAppend({
+      billNo: 'HDUJGLA26BZ04040',
+      containerNo: 'SEKU6633329',
+      arrivalTime: '2026-08-20T10:00',
+      dischargeTime: '2026-08-20T12:00',
+      vesselState: '已到港已卸船',
+      note: '码头回执确认',
+    });
+    assert.equal(created.added.length, 1);
+    const record = (await engine.store.open()).sheet;
+    assert.equal(record.getCell(2, 6).text, '已到港已卸船');
+    assert.match(record.getCell(2, 8).text, /人工补录/);
+    const updated = await engine.manualUpdate(2, {
+      arrivalTime: '2026-08-20T11:00',
+      dischargeTime: null,
+      vesselState: '已到港未卸船',
+      note: '卸船尚未完成',
+    });
+    assert.equal(updated.record.vesselState, '已到港未卸船');
+    assert.equal(updated.record.dischargeTime, null);
+    assert.match(updated.record.note, /人工修改/);
+    assert.ok((await engine.store.listBackups()).length >= 1);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

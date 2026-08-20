@@ -103,7 +103,18 @@ export class WorkbookStore {
 
   async backup(reason = '自动更新') {
     if (!(await this.exists())) return null;
-    const target = path.join(this.backupDirectory, `船期数据_${timestampForFile()}.xlsx`);
+    const baseName = `船期数据_${timestampForFile()}`;
+    let target = path.join(this.backupDirectory, `${baseName}.xlsx`);
+    let suffix = 1;
+    while (true) {
+      try {
+        await fs.access(target);
+        target = path.join(this.backupDirectory, `${baseName}_${suffix}.xlsx`);
+        suffix += 1;
+      } catch {
+        break;
+      }
+    }
     await fs.copyFile(this.currentPath, target);
     await fs.writeFile(`${target}.json`, JSON.stringify({ reason, createdAt: new Date().toISOString() }, null, 2));
     return target;
@@ -236,7 +247,7 @@ export class WorkbookStore {
     await fs.rm(`${backupPath}.json`, { force: true });
   }
 
-  async appendRecords(entries: Array<{ billNo: string; containerNo?: string; carrierHint?: string }>) {
+  async appendRecords(entries: Array<{ billNo: string; containerNo?: string; carrierHint?: string; arrivalTime?: TrackingTime; dischargeTime?: TrackingTime; vesselState?: VesselState; note?: string; progress?: QueryProgress }>) {
     await this.initialize();
     let workbook: ExcelJS.Workbook;
     let sheet: ExcelJS.Worksheet;
@@ -270,12 +281,17 @@ export class WorkbookStore {
         duplicates.push(billNo);
         continue;
       }
-      const row = sheet.addRow([entry.carrierHint?.trim() || '', '', billNo, entry.containerNo?.trim().toUpperCase() || '', '未卸船', '未到港未卸船', '', '已加入单号库，等待查询', '待查询']);
+      const arrivalTime = entry.arrivalTime ?? null;
+      const dischargeTime = entry.dischargeTime ?? null;
+      const vesselState = entry.vesselState || (dischargeTime ? '已到港已卸船' : arrivalTime ? '已到港未卸船' : '未到港未卸船');
+      const note = entry.note || '已加入单号库，等待查询';
+      const progress = entry.progress || '待查询';
+      const row = sheet.addRow([entry.carrierHint?.trim() || '', arrivalTime, billNo, entry.containerNo?.trim().toUpperCase() || '', dischargeTime ?? '未卸船', vesselState, arrivalTime || dischargeTime ? new Date() : '', note, progress]);
       row.height = 29;
       if (row.number % 2 === 0) row.eachCell((cell) => { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'F3F8F7' } }; });
       row.getCell(headerMap.get('备注')!).alignment = { wrapText: true, vertical: 'middle' };
       existing.add(billNo);
-      added.push({ rowNumber: row.number, carrierHint: entry.carrierHint?.trim() || '', billNo, containerNo: entry.containerNo?.trim().toUpperCase() || '', arrivalTime: null, dischargeTime: null, vesselState: '未到港未卸船', lastUpdated: null, note: '已加入单号库，等待查询', progress: '待查询' });
+      added.push({ rowNumber: row.number, carrierHint: entry.carrierHint?.trim() || '', billNo, containerNo: entry.containerNo?.trim().toUpperCase() || '', arrivalTime, dischargeTime, vesselState, lastUpdated: arrivalTime || dischargeTime ? new Date() : null, note, progress });
     }
     await this.save(workbook);
     return { metadata: await this.metadata(), added, duplicates };

@@ -15,7 +15,7 @@ import { OfficialSiteProbeProvider } from './official-probe.js';
 import { SmLineTrackingProvider } from './smline.js';
 import { RateLimiter } from './rate-limiter.js';
 import { CarrierRoutingTrackingProvider, trackRecord, type TrackingProvider } from './tracker.js';
-import type { AutomationSettings, AutomationTask, AutomationTaskScope, FailedTrackingDetail, RunProgress, RunSummary, TrackingTime, WorkbookRecord } from './types.js';
+import type { AutomationSettings, AutomationTask, AutomationTaskScope, FailedTrackingDetail, QueryProgress, RunProgress, RunSummary, TrackingTime, VesselState, WorkbookRecord } from './types.js';
 import { WorkbookStore } from './workbook.js';
 
 function isQueryable(record: WorkbookRecord) {
@@ -32,6 +32,26 @@ function publicTime(value: TrackingTime) {
 
 function sourceUrlFromNote(note: string) {
   return note.match(/(?:^|；)来源=(https?:\/\/[^；\s]+)/i)?.[1] || '';
+}
+
+function manualTime(value: unknown): TrackingTime {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value !== 'string') throw new Error('时间必须是文本或空值');
+  const normalized = value.trim().replace('T', ' ');
+  if (!normalized) return null;
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(normalized);
+  const localValue = /\d{2}:\d{2}$/.test(normalized) ? `${normalized}:00` : normalized;
+  const withTimezone = hasTimezone ? normalized : `${localValue}+08:00`;
+  const parsed = new Date(withTimezone.replace(' ', 'T'));
+  if (Number.isNaN(parsed.getTime())) throw new Error(`无法识别时间：${value}`);
+  return withTimezone;
+}
+
+function manualState(value: unknown): VesselState {
+  if (value !== '未到港未卸船' && value !== '已到港未卸船' && value !== '已到港已卸船') {
+    throw new Error('船只状态不合法');
+  }
+  return value;
 }
 
 export function evidencePathFromNote(note: string) {
@@ -151,6 +171,70 @@ export class AutomationEngine {
     tasks[index] = { ...tasks[index], enabled: patch.enabled ?? tasks[index].enabled, updatedAt: new Date().toISOString() };
     await this.saveTasks(tasks);
     return tasks[index];
+  }
+
+  async manualAppend(input: { billNo: string; containerNo?: string; carrierHint?: string; arrivalTime?: unknown; dischargeTime?: unknown; vesselState: unknown; note?: string }) {
+    if (this.running) throw new Error('自动更新正在执行，请稍后再进行人工补录');
+    const billNo = input.billNo.trim().toUpperCase();
+    if (!billNo) throw new Error('提单号不能为空');
+    const arrivalTime = manualTime(input.arrivalTime);
+    const dischargeTime = manualTime(input.dischargeTime);
+    const vesselState = manualState(input.vesselState);
+    const note = input.note?.trim() ? `人工补录：${input.note.trim()}` : '人工补录数据';
+    if (await this.store.exists()) {
+      const opened = await this.store.open();
+      if (this.store.readRecords(opened.sheet, opened.headerMap).some((record) => record.billNo === billNo)) {
+        throw new Error(`提单号已存在：${billNo}`);
+      }
+    }
+    const backupPath = await this.store.backup('人工补录前备份');
+    const result = await this.store.appendRecords([{
+      billNo,
+      containerNo: input.containerNo,
+      carrierHint: input.carrierHint,
+      arrivalTime,
+      dischargeTime,
+      vesselState,
+      note,
+      progress: '已完成',
+    }]);
+    if (result.duplicates.length) throw new Error(`提单号已存在：${result.duplicates.join('、')}`);
+    const addedRecord = result.added[0];
+    if (addedRecord) {
+      const opened = await this.store.open();
+      const records = this.store.readRecords(opened.sheet, opened.headerMap);
+      const record = records.find((item) => item.rowNumber === addedRecord.rowNumber);
+      if (record) {
+        record.lastUpdated = new Date();
+        this.store.writeRecord(opened.sheet, opened.headerMap, record);
+        await this.store.save(opened.workbook);
+      }
+    }
+    return { ...result, backupPath };
+  }
+
+  async manualUpdate(rowNumber: number, input: { arrivalTime?: unknown; dischargeTime?: unknown; vesselState: unknown; note?: string }) {
+    if (this.running) throw new Error('自动更新正在执行，请稍后再进行人工补录');
+    if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new Error('船期记录编号不合法');
+    const arrivalTime = manualTime(input.arrivalTime);
+    const dischargeTime = manualTime(input.dischargeTime);
+    const vesselState = manualState(input.vesselState);
+    const opened = await this.store.open();
+    const records = this.store.readRecords(opened.sheet, opened.headerMap);
+    const record = records.find((item) => item.rowNumber === rowNumber);
+    if (!record) throw new Error('找不到对应船期记录');
+    const backupPath = await this.store.backup('人工修改前备份');
+    record.arrivalTime = arrivalTime;
+    record.dischargeTime = dischargeTime;
+    record.vesselState = vesselState;
+    record.progress = '已完成' as QueryProgress;
+    record.lastUpdated = new Date();
+    record.note = input.note?.trim()
+      ? `人工修改：${input.note.trim()}`
+      : `${record.note ? `${record.note}；` : ''}人工修改船期状态`;
+    this.store.writeRecord(opened.sheet, opened.headerMap, record);
+    await this.store.save(opened.workbook);
+    return { record, backupPath };
   }
 
   async settings(): Promise<AutomationSettings> {
