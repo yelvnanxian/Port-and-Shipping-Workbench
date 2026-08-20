@@ -1,5 +1,40 @@
 import type { RunSummary } from './types.js';
 
+const MAX_FAILED_BILLS_PER_GROUP = 3;
+
+export function summarizeFailures(failedDetails: RunSummary['failedDetails']): string {
+  if (failedDetails.length === 0) return '无';
+
+  const groups = new Map<string, { carrier: string; category: string; billNos: string[]; count: number }>();
+  for (const detail of failedDetails) {
+    const key = `${detail.carrier}\u0000${detail.category}`;
+    const group = groups.get(key) ?? { carrier: detail.carrier, category: detail.category, billNos: [], count: 0 };
+    group.count += 1;
+    if (detail.billNo && !group.billNos.includes(detail.billNo)) group.billNos.push(detail.billNo);
+    groups.set(key, group);
+  }
+
+  return [...groups.values()].map((group) => {
+    const billNos = group.billNos.slice(0, MAX_FAILED_BILLS_PER_GROUP).join('、');
+    const omitted = group.billNos.length > MAX_FAILED_BILLS_PER_GROUP ? ` 等 ${group.count} 票` : '';
+    const examples = billNos ? `：${billNos}${omitted}` : '';
+    return `${group.carrier} ${group.count} 票（${group.category}）${examples}`;
+  }).join('\n');
+}
+
+export function buildWeComRunContent(summary: RunSummary): string {
+  return [
+    '【船期自动更新完成】',
+    `更新时间：${new Date(summary.finishedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}`,
+    `查询总数：${summary.total}`,
+    `成功：${summary.success}`,
+    `未完成：${summary.unfinished}`,
+    `失败：${summary.failed}`,
+    '失败概况：',
+    summarizeFailures(summary.failedDetails),
+  ].join('\n');
+}
+
 async function sendText(webhook: string | undefined, content: string): Promise<'sent' | 'skipped' | 'failed'> {
   if (!webhook) return 'skipped';
   try {
@@ -22,20 +57,7 @@ async function sendText(webhook: string | undefined, content: string): Promise<'
 
 export async function notifyWeCom(summary: RunSummary, configuredWebhook?: string): Promise<'sent' | 'skipped' | 'failed'> {
   const webhook = (configuredWebhook ?? process.env.WECHAT_WEBHOOK_URL)?.trim();
-  const failed = summary.failedDetails.length
-    ? summary.failedDetails.map((detail, index) => `${index + 1}. ${detail.carrier}｜提单 ${detail.billNo}｜柜号 ${detail.containerNo || '未提供'}｜${detail.category}｜${detail.reason}${detail.evidencePath ? `｜浏览器证据 ${detail.evidencePath}` : ''}`).join('\n')
-    : '无';
-  const content = [
-    '【船期自动更新完成】',
-    `更新时间：${new Date(summary.finishedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}`,
-    `查询总数：${summary.total}`,
-    `成功：${summary.success}`,
-    `未完成：${summary.unfinished}`,
-    `失败：${summary.failed}`,
-    '失败明细：',
-    failed,
-  ].join('\n');
-  return sendText(webhook, content);
+  return sendText(webhook, buildWeComRunContent(summary));
 }
 
 export function notifyWeComTest(configuredWebhook: string) {
