@@ -2,9 +2,10 @@ import ExcelJS from 'exceljs';
 import fs from 'node:fs/promises';
 import JSZip from 'jszip';
 import path from 'node:path';
-import type { QueryProgress, TrackingTime, VesselState, WorkbookRecord } from './types.js';
+import type { ManualMark, QueryProgress, TrackingTime, VesselState, WorkbookRecord } from './types.js';
 
-export const REQUIRED_HEADERS = ['船司', '到港时间', '提单号', '柜号', '卸船时间', '船只状态', '最后更新时间', '备注', '进度'] as const;
+const LEGACY_REQUIRED_HEADERS = ['船司', '到港时间', '提单号', '柜号', '卸船时间', '船只状态', '最后更新时间', '备注', '进度'] as const;
+export const REQUIRED_HEADERS = ['船司', '到港时间', '提单号', '柜号', '卸船时间', '船只状态', '人工标记', '最后更新时间', '备注', '进度'] as const;
 
 type HeaderName = (typeof REQUIRED_HEADERS)[number];
 
@@ -15,6 +16,7 @@ const COLUMN_WIDTHS: Record<HeaderName, number> = {
   柜号: 18,
   卸船时间: 25,
   船只状态: 18,
+  人工标记: 14,
   最后更新时间: 21,
   备注: 72,
   进度: 12,
@@ -38,6 +40,10 @@ function asTrackingTime(value: unknown, displayedText: string): TrackingTime {
   if (parsed) return parsed;
   const text = displayedText.trim();
   return text && text !== '未卸船' ? text : null;
+}
+
+function asManualMark(value: string): ManualMark {
+  return value === '已清关' || value === '查验中' || value === '其他' ? value : '';
 }
 
 async function normalizeNamespacePrefixes(filePath: string) {
@@ -124,7 +130,11 @@ export class WorkbookStore {
     if (!(await this.exists())) throw new Error('尚未导入 Excel 文件');
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(this.currentPath);
+    const headerValues = workbook.worksheets[0]?.getRow(1).values;
+    const hadManualMark = Array.isArray(headerValues)
+      && headerValues.some((value) => String(value || '').trim() === '人工标记');
     const headerMap = this.validate(workbook);
+    if (!hadManualMark) await workbook.xlsx.writeFile(this.currentPath);
     return { workbook, sheet: workbook.worksheets[0], headerMap };
   }
 
@@ -136,8 +146,18 @@ export class WorkbookStore {
       const value = cell.text.trim() as HeaderName;
       if (REQUIRED_HEADERS.includes(value)) headerMap.set(value, column);
     });
-    const missing = REQUIRED_HEADERS.filter((header) => !headerMap.has(header));
+    const missing = LEGACY_REQUIRED_HEADERS.filter((header) => !headerMap.has(header));
     if (missing.length) throw new Error(`Excel 缺少表头：${missing.join('、')}`);
+    if (!headerMap.has('人工标记')) {
+      const column = Math.max(sheet.columnCount + 1, ...headerMap.values());
+      const cell = sheet.getRow(1).getCell(column);
+      cell.value = '人工标记';
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: '0B3347' } };
+      cell.font = { bold: true, color: { argb: 'FFFFFF' } };
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      sheet.getColumn(column).width = COLUMN_WIDTHS['人工标记'];
+      headerMap.set('人工标记', column);
+    }
     return headerMap;
   }
 
@@ -157,6 +177,7 @@ export class WorkbookStore {
         arrivalTime: asTrackingTime(row.getCell(headerMap.get('到港时间')!).value, text(row, '到港时间')),
         dischargeTime: asTrackingTime(row.getCell(headerMap.get('卸船时间')!).value, text(row, '卸船时间')),
         vesselState: text(row, '船只状态') as VesselState | '',
+        manualMark: asManualMark(text(row, '人工标记')),
         lastUpdated: asDate(row.getCell(headerMap.get('最后更新时间')!).value),
         note: text(row, '备注'),
         progress: text(row, '进度') as QueryProgress | '',
@@ -174,6 +195,7 @@ export class WorkbookStore {
     set('到港时间', record.arrivalTime ?? null);
     set('卸船时间', record.dischargeTime ?? '未卸船');
     set('船只状态', record.vesselState || null);
+    set('人工标记', record.manualMark || null);
     set('最后更新时间', record.lastUpdated ?? null);
     set('备注', record.note || null);
     set('进度', record.progress || null);
@@ -206,7 +228,7 @@ export class WorkbookStore {
       size: stat.size,
       modifiedAt: stat.mtime.toISOString(),
       records: records.length,
-      queryable: records.filter((record) => !record.vesselState || record.vesselState !== '已到港已卸船').length,
+      queryable: records.filter((record) => record.manualMark !== '已清关' && (!record.vesselState || record.vesselState !== '已到港已卸船')).length,
     };
   }
 
@@ -247,7 +269,7 @@ export class WorkbookStore {
     await fs.rm(`${backupPath}.json`, { force: true });
   }
 
-  async appendRecords(entries: Array<{ billNo: string; containerNo?: string; carrierHint?: string; arrivalTime?: TrackingTime; dischargeTime?: TrackingTime; vesselState?: VesselState; note?: string; progress?: QueryProgress }>) {
+  async appendRecords(entries: Array<{ billNo: string; containerNo?: string; carrierHint?: string; arrivalTime?: TrackingTime; dischargeTime?: TrackingTime; vesselState?: VesselState; manualMark?: ManualMark; note?: string; progress?: QueryProgress }>) {
     await this.initialize();
     let workbook: ExcelJS.Workbook;
     let sheet: ExcelJS.Worksheet;
@@ -261,7 +283,7 @@ export class WorkbookStore {
       workbook = new ExcelJS.Workbook();
       sheet = workbook.addWorksheet('船期追踪', { views: [{ state: 'frozen', ySplit: 1 }] });
       sheet.addRow([...REQUIRED_HEADERS]);
-      sheet.columns = [{ width: 18 }, { width: 21 }, { width: 20 }, { width: 18 }, { width: 21 }, { width: 19 }, { width: 21 }, { width: 38 }, { width: 13 }];
+      sheet.columns = REQUIRED_HEADERS.map((header) => ({ width: COLUMN_WIDTHS[header] }));
       const header = sheet.getRow(1);
       header.height = 30;
       header.eachCell((cell) => {
@@ -284,16 +306,62 @@ export class WorkbookStore {
       const arrivalTime = entry.arrivalTime ?? null;
       const dischargeTime = entry.dischargeTime ?? null;
       const vesselState = entry.vesselState || (dischargeTime ? '已到港已卸船' : arrivalTime ? '已到港未卸船' : '未到港未卸船');
+      const manualMark = entry.manualMark || '';
       const note = entry.note || '已加入单号库，等待查询';
       const progress = entry.progress || '待查询';
-      const row = sheet.addRow([entry.carrierHint?.trim() || '', arrivalTime, billNo, entry.containerNo?.trim().toUpperCase() || '', dischargeTime ?? '未卸船', vesselState, arrivalTime || dischargeTime ? new Date() : '', note, progress]);
+      const values: Record<HeaderName, ExcelJS.CellValue> = {
+        船司: entry.carrierHint?.trim() || '', 到港时间: arrivalTime, 提单号: billNo,
+        柜号: entry.containerNo?.trim().toUpperCase() || '', 卸船时间: dischargeTime ?? '未卸船',
+        船只状态: vesselState, 人工标记: manualMark, 最后更新时间: arrivalTime || dischargeTime ? new Date() : '',
+        备注: note, 进度: progress,
+      };
+      const row = sheet.addRow(REQUIRED_HEADERS.map((header) => values[header]));
       row.height = 29;
       if (row.number % 2 === 0) row.eachCell((cell) => { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'F3F8F7' } }; });
       row.getCell(headerMap.get('备注')!).alignment = { wrapText: true, vertical: 'middle' };
       existing.add(billNo);
-      added.push({ rowNumber: row.number, carrierHint: entry.carrierHint?.trim() || '', billNo, containerNo: entry.containerNo?.trim().toUpperCase() || '', arrivalTime, dischargeTime, vesselState, lastUpdated: arrivalTime || dischargeTime ? new Date() : null, note, progress });
+      added.push({ rowNumber: row.number, carrierHint: entry.carrierHint?.trim() || '', billNo, containerNo: entry.containerNo?.trim().toUpperCase() || '', arrivalTime, dischargeTime, vesselState, manualMark, lastUpdated: arrivalTime || dischargeTime ? new Date() : null, note, progress });
     }
     await this.save(workbook);
     return { metadata: await this.metadata(), added, duplicates };
+  }
+
+  async deleteRecords(rowNumbers: number[]) {
+    const requested = [...new Set(rowNumbers.filter((rowNumber) => Number.isInteger(rowNumber) && rowNumber >= 2))];
+    if (!requested.length) throw new Error('请选择要删除的船期记录');
+    const opened = await this.open();
+    const existing = new Set(this.readRecords(opened.sheet, opened.headerMap).map((record) => record.rowNumber));
+    const missing = requested.filter((rowNumber) => !existing.has(rowNumber));
+    if (missing.length) throw new Error(`找不到船期记录：${missing.join('、')}`);
+    requested.sort((left, right) => right - left).forEach((rowNumber) => opened.sheet.spliceRows(rowNumber, 1));
+    await this.save(opened.workbook);
+    return { deleted: requested.length, metadata: await this.metadata() };
+  }
+
+  async exportRecords(rowNumbers: number[]) {
+    const requested = new Set(rowNumbers.filter((rowNumber) => Number.isInteger(rowNumber) && rowNumber >= 2));
+    if (!requested.size) throw new Error('当前列表没有可导出的记录');
+    const opened = await this.open();
+    const records = this.readRecords(opened.sheet, opened.headerMap).filter((record) => requested.has(record.rowNumber));
+    if (!records.length) throw new Error('当前列表没有可导出的记录');
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('筛选结果', { views: [{ state: 'frozen', ySplit: 1 }] });
+    sheet.addRow([...REQUIRED_HEADERS]);
+    sheet.columns = REQUIRED_HEADERS.map((header) => ({ width: COLUMN_WIDTHS[header] }));
+    sheet.getRow(1).eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: '0B3347' } };
+      cell.font = { bold: true, color: { argb: 'FFFFFF' } };
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+    });
+    for (const record of records) {
+      const values: Record<HeaderName, ExcelJS.CellValue> = {
+        船司: record.carrierHint, 到港时间: record.arrivalTime, 提单号: record.billNo, 柜号: record.containerNo,
+        卸船时间: record.dischargeTime ?? '未卸船', 船只状态: record.vesselState, 人工标记: record.manualMark,
+        最后更新时间: record.lastUpdated, 备注: record.note, 进度: record.progress,
+      };
+      const row = sheet.addRow(REQUIRED_HEADERS.map((header) => values[header]));
+      row.getCell(REQUIRED_HEADERS.indexOf('备注') + 1).alignment = { wrapText: true, vertical: 'middle' };
+    }
+    return Buffer.from(await workbook.xlsx.writeBuffer());
   }
 }

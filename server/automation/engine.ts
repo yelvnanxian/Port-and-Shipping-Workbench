@@ -15,11 +15,12 @@ import { OfficialSiteProbeProvider } from './official-probe.js';
 import { SmLineTrackingProvider } from './smline.js';
 import { RateLimiter } from './rate-limiter.js';
 import { CarrierRoutingTrackingProvider, trackRecord, type TrackingProvider } from './tracker.js';
-import type { AutomationSettings, AutomationTask, AutomationTaskScope, FailedTrackingDetail, QueryProgress, RunProgress, RunSummary, TrackingTime, VesselState, WorkbookRecord } from './types.js';
+import type { AutomationSettings, AutomationTask, AutomationTaskScope, FailedTrackingDetail, ManualMark, QueryProgress, RunProgress, RunSummary, TrackingTime, VesselState, WorkbookRecord } from './types.js';
 import { WorkbookStore } from './workbook.js';
 
 function isQueryable(record: WorkbookRecord) {
-  return !record.vesselState || record.vesselState === '未到港未卸船' || record.vesselState === '已到港未卸船';
+  return record.manualMark !== '已清关'
+    && (!record.vesselState || record.vesselState === '未到港未卸船' || record.vesselState === '已到港未卸船');
 }
 
 function failedNote(detail: FailedTrackingDetail) {
@@ -56,6 +57,11 @@ function manualState(value: unknown): VesselState {
     throw new Error('船只状态不合法');
   }
   return value;
+}
+
+function manualMark(value: unknown): ManualMark {
+  if (value === '' || value === '已清关' || value === '查验中' || value === '其他') return value;
+  throw new Error('人工标记不合法');
 }
 
 export function evidencePathFromNote(note: string) {
@@ -242,6 +248,27 @@ export class AutomationEngine {
     this.store.writeRecord(opened.sheet, opened.headerMap, record);
     await this.store.save(opened.workbook);
     return { record, backupPath };
+  }
+
+  async updateManualMark(rowNumber: number, value: unknown) {
+    if (this.running) throw new Error('自动更新正在执行，请稍后再修改人工标记');
+    if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new Error('船期记录编号不合法');
+    const opened = await this.store.open();
+    const record = this.store.readRecords(opened.sheet, opened.headerMap).find((item) => item.rowNumber === rowNumber);
+    if (!record) throw new Error('找不到对应船期记录');
+    const nextMark = manualMark(value);
+    const backupPath = await this.store.backup('修改人工标记前备份');
+    record.manualMark = nextMark;
+    this.store.writeRecord(opened.sheet, opened.headerMap, record);
+    await this.store.save(opened.workbook);
+    return { record, backupPath };
+  }
+
+  async deleteShipments(rowNumbers: number[]) {
+    if (this.running) throw new Error('自动更新正在执行，请稍后再删除船期记录');
+    const backupPath = await this.store.backup('删除船期记录前备份');
+    const result = await this.store.deleteRecords(rowNumbers);
+    return { ...result, backupPath };
   }
 
   async settings(): Promise<AutomationSettings> {

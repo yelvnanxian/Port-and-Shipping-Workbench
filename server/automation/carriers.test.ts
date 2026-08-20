@@ -32,7 +32,7 @@ test('马士基去前缀失败后自动改用完整提单号', async () => {
       return result;
     },
   };
-  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '马士基', billNo: 'MAEU271552824', containerNo: 'CICU6040856', arrivalTime: null, dischargeTime: null, vesselState: '', lastUpdated: null, note: '', progress: '' };
+  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '马士基', billNo: 'MAEU271552824', containerNo: 'CICU6040856', arrivalTime: null, dischargeTime: null, vesselState: '', manualMark: '', lastUpdated: null, note: '', progress: '' };
   const tracked = await trackRecord(record, provider);
   assert.deepEqual(calls, ['271552824', 'MAEU271552824']);
   assert.match(tracked.result.rawSummary, /自动改用完整提单号 MAEU271552824/);
@@ -49,7 +49,7 @@ test('马士基两个提单号均失败后自动改用柜号', async () => {
       return containerResult;
     },
   };
-  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '马士基', billNo: 'MAEU271552824', containerNo: 'CICU6040856', arrivalTime: null, dischargeTime: null, vesselState: '', lastUpdated: null, note: '', progress: '' };
+  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '马士基', billNo: 'MAEU271552824', containerNo: 'CICU6040856', arrivalTime: null, dischargeTime: null, vesselState: '', manualMark: '', lastUpdated: null, note: '', progress: '' };
   const tracked = await trackRecord(record, provider);
   assert.deepEqual(calls, ['271552824', 'MAEU271552824', 'CICU6040856']);
   assert.match(tracked.result.rawSummary, /自动改用柜号 CICU6040856/);
@@ -102,7 +102,7 @@ test('万海提单查询失败后自动使用柜号查询', async () => {
       return containerResult;
     },
   };
-  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '万海', billNo: 'WHLC025G709663', containerNo: 'WHSU8284656', arrivalTime: null, dischargeTime: null, vesselState: '', lastUpdated: null, note: '', progress: '' };
+  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '万海', billNo: 'WHLC025G709663', containerNo: 'WHSU8284656', arrivalTime: null, dischargeTime: null, vesselState: '', manualMark: '', lastUpdated: null, note: '', progress: '' };
   const tracked = await trackRecord(record, provider);
   assert.ok(calls.includes('bill'));
   assert.ok(calls.includes('container'));
@@ -115,14 +115,14 @@ test('万海提单和柜号均失败时保留两次失败原因', async () => {
       throw new Error(input.queryType === 'bill' ? '提单无记录' : '柜号查询被风控');
     },
   };
-  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '万海', billNo: 'WHLC025G709663', containerNo: 'WHSU8284656', arrivalTime: null, dischargeTime: null, vesselState: '', lastUpdated: null, note: '', progress: '' };
+  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '万海', billNo: 'WHLC025G709663', containerNo: 'WHSU8284656', arrivalTime: null, dischargeTime: null, vesselState: '', manualMark: '', lastUpdated: null, note: '', progress: '' };
   await assert.rejects(() => trackRecord(record, provider), /提单号与柜号查询均失败/);
 });
 
 test('万海两路都成功且数据一致时精简合并备注', async () => {
   const result: TrackingResult = { arrivalTime: new Date('2026-08-20T09:00:00Z'), arrivalKind: 'ETA', arrived: false, dischargeTime: null, rawSummary: '万海查询成功', sourceUrl: 'https://cn.wanhai.com' };
   const provider: TrackingProvider = { async query() { return result; } };
-  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '万海', billNo: 'WHLC025G709663', containerNo: 'WHSU8284656', arrivalTime: null, dischargeTime: null, vesselState: '', lastUpdated: null, note: '', progress: '' };
+  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '万海', billNo: 'WHLC025G709663', containerNo: 'WHSU8284656', arrivalTime: null, dischargeTime: null, vesselState: '', manualMark: '', lastUpdated: null, note: '', progress: '' };
   const tracked = await trackRecord(record, provider);
   assert.match(tracked.result.rawSummary, /OR 双查核验一致/);
 });
@@ -135,7 +135,7 @@ test('森罗按 OR 规则采用任一路成功结果', async () => {
       return result;
     },
   };
-  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '森罗', billNo: 'SMLMNJBD6A755700', containerNo: 'SMCU1312616', arrivalTime: null, dischargeTime: null, vesselState: '', lastUpdated: null, note: '', progress: '' };
+  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '森罗', billNo: 'SMLMNJBD6A755700', containerNo: 'SMCU1312616', arrivalTime: null, dischargeTime: null, vesselState: '', manualMark: '', lastUpdated: null, note: '', progress: '' };
   const tracked = await trackRecord(record, provider);
   assert.equal(tracked.result.arrivalTime?.toISOString(), '2026-08-20T09:00:00.000Z');
   assert.match(tracked.result.rawSummary, /OR 规则采用成功结果/);
@@ -144,7 +144,7 @@ test('森罗按 OR 规则采用任一路成功结果', async () => {
 test('森罗两路返回相同结果时精简合并备注', async () => {
   const result: TrackingResult = { arrivalTime: new Date('2026-08-20T09:00:00Z'), arrivalKind: 'ETA', arrived: false, dischargeTime: null, rawSummary: '森罗查询成功', sourceUrl: 'https://esvc.smlines.com' };
   const provider: TrackingProvider = { async query() { return result; } };
-  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '森罗', billNo: 'SMLMNJBD6A755700', containerNo: 'SMCU1312616', arrivalTime: null, dischargeTime: null, vesselState: '', lastUpdated: null, note: '', progress: '' };
+  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '森罗', billNo: 'SMLMNJBD6A755700', containerNo: 'SMCU1312616', arrivalTime: null, dischargeTime: null, vesselState: '', manualMark: '', lastUpdated: null, note: '', progress: '' };
   const tracked = await trackRecord(record, provider);
   assert.match(tracked.result.rawSummary, /OR 双查核验一致/);
   assert.equal(tracked.result.rawSummary.match(/森罗查询成功/g)?.length, 1);

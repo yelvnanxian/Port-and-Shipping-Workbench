@@ -139,9 +139,9 @@ test('人工补录和人工修改会写回状态、时间并创建备份', async
       note: '码头回执确认',
     });
     assert.equal(created.added.length, 1);
-    const record = (await engine.store.open()).sheet;
-    assert.equal(record.getCell(2, 6).text, '已到港已卸船');
-    assert.match(record.getCell(2, 8).text, /人工补录/);
+    const opened = await engine.store.open();
+    assert.equal(opened.sheet.getCell(2, opened.headerMap.get('船只状态')!).text, '已到港已卸船');
+    assert.match(opened.sheet.getCell(2, opened.headerMap.get('备注')!).text, /人工补录/);
     const updated = await engine.manualUpdate(2, {
       arrivalTime: '2026-08-20T11:00',
       dischargeTime: null,
@@ -152,6 +152,50 @@ test('人工补录和人工修改会写回状态、时间并创建备份', async
     assert.equal(updated.record.dischargeTime, null);
     assert.match(updated.record.note, /人工修改/);
     assert.ok((await engine.store.listBackups()).length >= 1);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('标记已清关后自动任务跳过该记录', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-cleared-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([{ billNo: 'OOLU2171963250', containerNo: 'OOCU7496887' }]);
+    const engine = new AutomationEngine(store);
+    let calls = 0;
+    Object.defineProperty(engine, 'provider', { value: () => ({ async query() { calls += 1; throw new Error('不应查询已清关记录'); } }) });
+
+    await engine.updateManualMark(2, '已清关');
+    const summary = await engine.run('manual');
+
+    assert.equal(summary.total, 0);
+    assert.equal(summary.skipped, 1);
+    assert.equal(calls, 0);
+    assert.equal((await store.metadata())?.queryable, 0);
+    assert.ok((await store.listBackups()).length >= 1);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('删除船期前创建备份并只删除指定记录', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-delete-shipment-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([
+      { billNo: 'OOLU2171963250', containerNo: 'OOCU7496887' },
+      { billNo: 'HDUJGLA26BZ04040', containerNo: 'SEKU6633329' },
+    ]);
+    const engine = new AutomationEngine(store);
+
+    const result = await engine.deleteShipments([2]);
+    const opened = await store.open();
+    const records = store.readRecords(opened.sheet, opened.headerMap);
+
+    assert.equal(result.deleted, 1);
+    assert.deepEqual(records.map((record) => record.billNo), ['HDUJGLA26BZ04040']);
+    assert.equal((await store.listBackups()).length, 1);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

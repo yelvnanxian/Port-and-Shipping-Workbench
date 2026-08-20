@@ -1,5 +1,6 @@
 export type VesselState = '未到港未卸船' | '已到港未卸船' | '已到港已卸船';
 export type QueryProgress = '待查询' | '查询中' | '已完成' | '失败';
+export type ManualMark = '' | '已清关' | '查验中' | '其他';
 export type ArrivalKind = 'ATA' | 'ETA' | null;
 export type TrackingTime = Date | string | null;
 export type TrackingFailureCategory =
@@ -18,6 +19,7 @@ export interface WorkbookRecord {
   arrivalTime: TrackingTime;
   dischargeTime: TrackingTime;
   vesselState: VesselState | '';
+  manualMark: ManualMark;
   lastUpdated: Date | null;
   note: string;
   progress: QueryProgress | '';

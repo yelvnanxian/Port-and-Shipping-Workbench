@@ -1,10 +1,36 @@
 import assert from 'node:assert/strict';
+import ExcelJS from 'exceljs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { AutomationEngine } from './engine.js';
 import { WorkbookStore } from './workbook.js';
+
+test('opening a legacy workbook adds the manual mark column without losing data', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-legacy-mark-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.initialize();
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('船期追踪');
+    sheet.addRow(['船司', '到港时间', '提单号', '柜号', '卸船时间', '船只状态', '最后更新时间', '备注', '进度']);
+    sheet.addRow(['东方海外', '', 'OOLU2171963250', 'OOCU7496887', '未卸船', '未到港未卸船', '', '真实订单', '待查询']);
+    await workbook.xlsx.writeFile(store.currentPath);
+
+    const opened = await store.open();
+    const records = store.readRecords(opened.sheet, opened.headerMap);
+
+    assert.ok(opened.headerMap.has('人工标记'));
+    assert.equal(records[0].billNo, 'OOLU2171963250');
+    assert.equal(records[0].manualMark, '');
+    const reopened = new ExcelJS.Workbook();
+    await reopened.xlsx.readFile(store.currentPath);
+    assert.ok((reopened.worksheets[0].getRow(1).values as ExcelJS.CellValue[]).includes('人工标记'));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
 
 test('automation settings persist across engine instances', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-settings-'));
@@ -81,6 +107,28 @@ test('writing results preserves empty cells and makes failure details readable',
     assert.equal(row.getCell(saved.headerMap.get('船只状态')!).value, null);
     assert.ok(saved.sheet.getColumn(saved.headerMap.get('备注')!).width! >= 72);
     assert.ok(row.height! >= 36);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('filtered export contains only requested workbook rows', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-filter-export-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([
+      { billNo: 'OOLU2171963250', containerNo: 'OOCU7496887' },
+      { billNo: 'HDUJGLA26BZ04040', containerNo: 'SEKU6633329' },
+    ]);
+
+    const buffer = await store.exportRecords([3]);
+    const exported = new ExcelJS.Workbook();
+    await exported.xlsx.load(new Uint8Array(buffer).buffer);
+    const sheet = exported.worksheets[0];
+
+    assert.equal(sheet.rowCount, 2);
+    assert.equal(sheet.getRow(2).getCell(3).text, 'HDUJGLA26BZ04040');
+    assert.equal(sheet.getRow(2).getCell(7).text, '');
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

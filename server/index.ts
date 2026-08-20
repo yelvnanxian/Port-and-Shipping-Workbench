@@ -91,6 +91,7 @@ async function dashboardPayload() {
       lastUpdated: record.lastUpdated?.toISOString() || new Date(0).toISOString(),
       note: record.note || (record.progress ? `进度：${record.progress}` : '待首次查询'),
       vesselState: record.vesselState || '未到港未卸船',
+      manualMark: record.manualMark,
       progress: record.progress || '待查询',
       sourceUrl,
       evidencePath,
@@ -381,6 +382,38 @@ function workbookRowId(value: unknown) {
   if (!match) throw new Error('船期编号不合法');
   return Number(match[1]);
 }
+
+app.patch('/api/shipments/:id/mark', async (req, res, next) => {
+  try {
+    const result = await engine.updateManualMark(workbookRowId(req.params.id), req.body?.manualMark);
+    res.json({ ...result, dashboard: await dashboardPayload(), automation: await engine.status() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/shipments/delete-batch', async (req, res, next) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const rowNumbers = ids.map(workbookRowId);
+    const result = await engine.deleteShipments(rowNumbers);
+    res.json({ ...result, dashboard: await dashboardPayload(), automation: await engine.status() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/shipments/export', async (req, res, next) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const buffer = await engine.store.exportRecords(ids.map(workbookRowId));
+    res.setHeader('content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent('船期筛选结果.xlsx')}`);
+    res.send(buffer);
+  } catch (error) {
+    next(error);
+  }
+});
 
 app.post('/api/shipments/manual', async (req, res, next) => {
   try {

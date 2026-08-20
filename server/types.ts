@@ -1,4 +1,5 @@
 export type ShipmentStatus = '待靠泊' | '作业中' | '已卸船' | '计划变更';
+export type ManualMark = '' | '已清关' | '查验中' | '其他';
 
 export interface Shipment {
   id: string;
@@ -15,6 +16,7 @@ export interface Shipment {
   lastUpdated: string;
   note?: string;
   vesselState?: '未到港未卸船' | '已到港未卸船' | '已到港已卸船';
+  manualMark: ManualMark;
   progress?: '待查询' | '查询中' | '已完成' | '失败';
   sourceUrl?: string;
   evidencePath?: string;
