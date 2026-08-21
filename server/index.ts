@@ -3,12 +3,14 @@ import cors from 'cors';
 import express from 'express';
 import multer from 'multer';
 import path from 'node:path';
+import fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { ALL_CARRIER_RULES } from './automation/carriers.js';
 import { AutomationEngine } from './automation/engine.js';
 import { notifyWeComTest } from './automation/notifier.js';
 import { startScheduler } from './automation/scheduler.js';
 import { corsOrigin, createRateLimiter, securityHeaders } from './security.js';
+import { legacyEvidenceDirectory, safeSourceCode, sourceEvidenceDirectory } from './automation/source-storage.js';
 import type { CarrierSource, Shipment } from './types.js';
 
 const app = express();
@@ -307,10 +309,43 @@ app.get('/api/carriers', (_req, res) => {
   res.json({ carriers: ALL_CARRIER_RULES });
 });
 
-app.use('/api/browser-evidence', express.static(path.join(engine.store.dataDirectory, 'browser-evidence'), {
-  fallthrough: false,
-  index: false,
-}));
+async function sendEvidence(res: express.Response, directory: string, requestedName: string) {
+  const fileName = path.basename(requestedName);
+  if (fileName !== requestedName || !/\.png$/i.test(fileName)) {
+    res.status(400).json({ error: '证据文件名不合法' });
+    return;
+  }
+  const filePath = path.join(directory, fileName);
+  try {
+    await fs.access(filePath);
+    res.sendFile(filePath);
+  } catch {
+    res.status(404).json({ error: '证据文件不存在' });
+  }
+}
+
+// 只暴露截图证据，不直接暴露 data/sources（其中包含 Cookie/storage state）。
+app.get('/api/browser-evidence/:carrier/:filename', async (req, res, next) => {
+  try {
+    const carrier = safeSourceCode(req.params.carrier);
+    if (carrier !== req.params.carrier.toUpperCase()) {
+      res.status(400).json({ error: '船司标识不合法' });
+      return;
+    }
+    await sendEvidence(res, sourceEvidenceDirectory(engine.store.dataDirectory, carrier), req.params.filename);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 兼容升级前已写入的扁平证据路径。
+app.get('/api/browser-evidence/:filename', async (req, res, next) => {
+  try {
+    await sendEvidence(res, legacyEvidenceDirectory(engine.store.dataDirectory), req.params.filename);
+  } catch (error) {
+    next(error);
+  }
+});
 
 app.get('/api/backups', async (_req, res, next) => {
   try {

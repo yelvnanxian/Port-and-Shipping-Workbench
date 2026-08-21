@@ -7,6 +7,7 @@ import { parseMaerskTrackingText } from './maersk.js';
 import { parseOoclDate } from './oocl.js';
 import { probeUrl } from './official-probe.js';
 import { parseZimTrackingText } from './zim.js';
+import { legacyStatePath, sourceEvidenceDirectory, sourceEvidenceUrl, sourceStatePath } from './source-storage.js';
 import type { TrackingProvider } from './tracker.js';
 import type { ArrivalKind, TrackingQuery, TrackingResult } from './types.js';
 
@@ -457,7 +458,7 @@ export class BrowserTrackingProvider implements TrackingProvider {
   private closing: Promise<void> | null = null;
 
   constructor(
-    private readonly evidenceDirectory: string,
+    private readonly dataDirectory: string,
     private readonly timeoutMs = DEFAULT_TIMEOUT_MS,
   ) {}
 
@@ -483,30 +484,42 @@ export class BrowserTrackingProvider implements TrackingProvider {
   }
 
   private async saveEvidence(page: Page, input: TrackingQuery, outcome: 'success' | 'failure') {
-    await fs.mkdir(this.evidenceDirectory, { recursive: true });
+    const evidenceDirectory = sourceEvidenceDirectory(this.dataDirectory, input.rule.code);
+    await fs.mkdir(evidenceDirectory, { recursive: true });
     const reference = normalizedReference(input.queryType === 'container' ? input.containerNo : input.originalBillNo).slice(0, 32) || 'UNKNOWN';
     const fileName = `${new Date().toISOString().replace(/[:.]/g, '-')}_${input.rule.code}_${reference}_${outcome}.png`;
     try {
-      await page.screenshot({ path: path.join(this.evidenceDirectory, fileName), fullPage: true });
-      return `/api/browser-evidence/${encodeURIComponent(fileName)}`;
+      await page.screenshot({ path: path.join(evidenceDirectory, fileName), fullPage: true });
+      return sourceEvidenceUrl(input.rule.code, fileName);
     } catch {
       return undefined;
     }
   }
 
   private statePath(input: TrackingQuery) {
-    return path.join(path.dirname(this.evidenceDirectory), 'browser-state', `${input.rule.code}.json`);
+    return sourceStatePath(this.dataDirectory, input.rule.code);
+  }
+
+  private async existingStatePath(input: TrackingQuery) {
+    const current = this.statePath(input);
+    try {
+      await fs.access(current);
+      return current;
+    } catch {
+      const legacy = legacyStatePath(this.dataDirectory, input.rule.code);
+      try {
+        await fs.access(legacy);
+        return legacy;
+      } catch {
+        return undefined;
+      }
+    }
   }
 
   private async getContext(browser: Browser, input: TrackingQuery): Promise<BrowserContext> {
     const existing = this.contexts.get(input.rule.code);
     if (existing) return existing;
-    const statePath = this.statePath(input);
-    let storageState: string | undefined;
-    try {
-      await fs.access(statePath);
-      storageState = statePath;
-    } catch { /* 首次访问还没有 Cookie 状态 */ }
+    const storageState = await this.existingStatePath(input);
 
     // 每个船司使用不同的 User-Agent，进一步降低指纹相似度
     const userAgent = getUserAgent(input.rule.code);

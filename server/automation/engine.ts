@@ -89,11 +89,11 @@ export class AutomationEngine {
 
   private provider(settings: AutomationSettings): TrackingProvider {
     const browser = settings.browserAutomationEnabled
-      ? new BrowserTrackingProvider(path.join(this.store.dataDirectory, 'browser-evidence'))
+      ? new BrowserTrackingProvider(this.store.dataDirectory)
       : null;
     const withBrowserFallback = (primary: TrackingProvider) => browser ? new FallbackTrackingProvider(primary, browser) : primary;
     const hmm = settings.browserAutomationEnabled
-      ? new HmmTrackingProvider(path.join(this.store.dataDirectory, 'browser-evidence'))
+      ? new HmmTrackingProvider(this.store.dataDirectory)
       : new OfficialSiteProbeProvider();
     return new CarrierRoutingTrackingProvider(new Map<string, TrackingProvider>([
       ['OOCL', withBrowserFallback(new OoclTrackingProvider())],

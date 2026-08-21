@@ -3,6 +3,7 @@ import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
 import { browserExecutablePath } from './browser.js';
 import { classifyTrackingError, trackingError } from './errors.js';
+import { legacyStatePath, sourceEvidenceDirectory, sourceEvidenceUrl, sourceStatePath } from './source-storage.js';
 import type { TrackingProvider } from './tracker.js';
 import type { TrackingQuery, TrackingResult } from './types.js';
 
@@ -131,7 +132,7 @@ export class HmmTrackingProvider implements TrackingProvider {
   private queue: Promise<void> = Promise.resolve();
 
   constructor(
-    private readonly evidenceDirectory: string,
+    private readonly dataDirectory: string,
     private readonly timeoutMs = DEFAULT_TIMEOUT_MS,
   ) {}
 
@@ -154,16 +155,29 @@ export class HmmTrackingProvider implements TrackingProvider {
   }
 
   private statePath() {
-    return path.join(path.dirname(this.evidenceDirectory), 'browser-state', 'HMM.json');
+    return sourceStatePath(this.dataDirectory, 'HMM');
+  }
+
+  private async existingStatePath() {
+    const current = this.statePath();
+    try {
+      await fs.access(current);
+      return current;
+    } catch {
+      const legacy = legacyStatePath(this.dataDirectory, 'HMM');
+      try {
+        await fs.access(legacy);
+        return legacy;
+      } catch {
+        return undefined;
+      }
+    }
   }
 
   private async getContext() {
     if (this.context) return this.context;
     let storageState: string | undefined;
-    try {
-      await fs.access(this.statePath());
-      storageState = this.statePath();
-    } catch { /* 首次查询还没有韩新会话 */ }
+    storageState = await this.existingStatePath();
     this.context = await (await this.getBrowser()).newContext({
       locale: 'zh-CN',
       timezoneId: 'Asia/Shanghai',
@@ -182,12 +196,13 @@ export class HmmTrackingProvider implements TrackingProvider {
   }
 
   private async saveEvidence(page: Page, input: TrackingQuery, outcome: 'success' | 'failure') {
-    await fs.mkdir(this.evidenceDirectory, { recursive: true });
+    const evidenceDirectory = sourceEvidenceDirectory(this.dataDirectory, 'HMM');
+    await fs.mkdir(evidenceDirectory, { recursive: true });
     const reference = normalizedReference(input.originalBillNo).slice(0, 32) || 'UNKNOWN';
     const fileName = `${new Date().toISOString().replace(/[:.]/g, '-')}_HMM_${reference}_${outcome}.png`;
     try {
-      await page.screenshot({ path: path.join(this.evidenceDirectory, fileName), fullPage: true });
-      return `/api/browser-evidence/${encodeURIComponent(fileName)}`;
+      await page.screenshot({ path: path.join(evidenceDirectory, fileName), fullPage: true });
+      return sourceEvidenceUrl('HMM', fileName);
     } catch {
       return undefined;
     }

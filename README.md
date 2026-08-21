@@ -145,7 +145,7 @@ RATE_LIMIT_REQUESTS_PER_MINUTE=10
 - `BROWSER_HEADLESS=false` 可切换为有头模式，反检测效果更好但需要图形界面；服务器环境保持 `true`。
 - `BROWSER_HUMAN_VERIFY=true` 允许万海、以星、赫伯罗特、达飞、东方海外遇到官网人机验证时暂停等待人工操作；必须同时设置 `BROWSER_HEADLESS=false`，系统会打开 Chrome 窗口并在验证通过后继续解析。
 - 如果验证页出现，直接在打开的 Chrome 窗口按官网提示完成验证，不要关闭窗口；控制台会显示“人工验证已通过”后继续写入 Excel。等待时间由 `BROWSER_HUMAN_VERIFY_TIMEOUT_MS` 控制，默认 180 秒。无界面模式遇到验证会明确失败并提示切换有头模式，不会写入猜测数据。
-- 验证通过后的 Cookie/localStorage 会保存到 `data/browser-state/`，后续运行会复用同一船司会话和稳定浏览器标识；会话失效时系统再次提示人工验证。
+- 验证通过后的 Cookie/localStorage 会按船司保存到 `data/sources/{船司代码}/browser-state/`，后续运行只复用同一船司会话；升级时仍会兼容读取旧的 `data/browser-state/` 文件，会话失效时系统再次提示人工验证。
 - `HMM_BROWSER_HEADLESS=false` 是韩新海运专用设置。其官网会拦截无头 Chrome，必须在已登录图形桌面的电脑上运行；定时查询时会短暂打开 Chrome 窗口。
 - `BROWSER_HUMAN_BEHAVIOR=true` 启用真人行为模拟（随机延迟、逐字符打字），可降低风控触发率。
 - `RATE_LIMIT_REQUESTS_PER_MINUTE=10` 控制默认每分钟请求数，风控严重的船司（万海 3 次/分钟、以星达飞 5 次/分钟）在代码中单独限流。
@@ -300,7 +300,9 @@ pm2 restart port-ops-workbench
 - `data/backups/`：历史备份
 - `data/settings.json`：企业微信和自动化设置，包含敏感信息
 - `data/tasks.json`：工作台中创建的自定义任务及执行顺序
-- `data/browser-state/`：各船司 Cookie 同意状态，可选
+- `data/browser-state/`：旧版本各船司 Cookie，可选；新版运行数据位于 `data/sources/{船司代码}/`
+- `data/sources/{船司代码}/browser-state/`：该船司专用 Cookie/localStorage，禁止对外暴露
+- `data/sources/{船司代码}/evidence/`：该船司浏览器查询截图证据
 
 不要复制旧的 `data/browser-evidence/` 也能正常运行；该目录只是失败截图证据。迁移后重新执行 `npm start`，并在“系统设置”中发送一次企业微信测试。
 
@@ -320,8 +322,8 @@ pm2 restart port-ops-workbench
 
 - 工作台固定使用真实官网/官方接口。只有官方查询成功并解析出字段时才写入时间；验证码、风控、接口错误或格式异常都会明确写入“失败”和原因，不会伪造结果。
 - 系统设置中可启用“网页模拟点击”。官方接口或直连失败后，系统使用本机 Chrome 串行打开船司页面、填写单号并读取渲染结果；无需手工操作。
-- 浏览器页面必须同时显示对应提单号/柜号和明确的 ATA、ETA 或实际卸船字段才会写入。成功和失败都会尝试保存页面截图至 `data/browser-evidence/`；成功证据显示在追踪列表和详情页，失败证据显示在运行历史中。只有截图实际保存成功时才生成查看入口。
-- 浏览器会按船司复用会话，并将 Cookie 同意状态保存到本机 `data/browser-state/`；中远海运会自动点击“允许全部”，后续任务不再重复弹窗。
+- 浏览器页面必须同时显示对应提单号/柜号和明确的 ATA、ETA 或实际卸船字段才会写入。成功和失败都会尝试按船司保存页面截图至 `data/sources/{船司代码}/evidence/`；成功证据显示在追踪列表和详情页，失败证据显示在运行历史中。只有截图实际保存成功时才生成查看入口。
+- 浏览器会按船司复用会话，并将 Cookie 同意状态保存到本机 `data/sources/{船司代码}/browser-state/`；中远海运会自动点击“允许全部”，后续任务不再重复弹窗。旧版本的 `data/browser-evidence/` 截图 URL 和 `data/browser-state/` Cookie 仍可兼容读取。
 - 万海先按提单查询，提单失败且 Excel 有柜号时会自动改用柜号再次查询；成功结果和两次失败原因都会标明实际查询方式。
 - 船期追踪列表和详情页提供“官网核验”入口，使用本次抓取保存的官方来源地址，并自动复制提单号；不支持结果直链的官网会打开官方查询页供粘贴复查。
 
