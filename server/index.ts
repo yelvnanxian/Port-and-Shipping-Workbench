@@ -146,6 +146,58 @@ app.get('/api/health', async (_req, res) => {
 // 除健康检查和登录接口外，所有业务 API 都要求有效 Session；写请求还要求 CSRF Token。
 app.use('/api', auth.requireSession);
 
+app.get('/api/auth/users', auth.requireRole('admin'), async (_req, res, next) => {
+  try {
+    res.json({ users: await auth.listUsers() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/auth/users', auth.requireRole('admin'), async (req, res, next) => {
+  try {
+    const user = await auth.createUser({
+      username: typeof req.body?.username === 'string' ? req.body.username : '',
+      password: typeof req.body?.password === 'string' ? req.body.password : '',
+      role: req.body?.role,
+    });
+    res.status(201).json({ user, users: await auth.listUsers() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/auth/users/:id', auth.requireRole('admin'), async (req, res, next) => {
+  try {
+    if (req.body?.role !== undefined && typeof req.body.role !== 'string') throw new Error('用户角色不合法');
+    if (req.body?.enabled !== undefined && typeof req.body.enabled !== 'boolean') throw new Error('账号状态不合法');
+    const user = await auth.updateUser(String(req.params.id), {
+      role: req.body?.role,
+      enabled: req.body?.enabled,
+    }, req.authUser!.id);
+    res.json({ user, users: await auth.listUsers() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/auth/users/:id/password', auth.requireRole('admin'), async (req, res, next) => {
+  try {
+    const user = await auth.resetPassword(String(req.params.id), typeof req.body?.password === 'string' ? req.body.password : '', req.authUser!.id);
+    res.json({ user, users: await auth.listUsers() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/auth/users/:id', auth.requireRole('admin'), async (req, res, next) => {
+  try {
+    res.json({ users: await auth.deleteUser(String(req.params.id), req.authUser!.id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/dashboard', async (_req, res, next) => {
   try {
     res.json(await dashboardPayload());

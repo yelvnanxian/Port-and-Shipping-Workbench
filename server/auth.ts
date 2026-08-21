@@ -5,7 +5,8 @@ import type { NextFunction, Request, Response } from 'express';
 
 export type UserRole = 'admin' | 'user';
 export interface AuthUser { id: string; username: string; role: UserRole }
-interface StoredUser extends AuthUser { salt: string; passwordHash: string; enabled: boolean }
+export interface AuthUserView extends AuthUser { enabled: boolean; createdAt: string; updatedAt: string }
+interface StoredUser extends AuthUserView { salt: string; passwordHash: string }
 interface Session { token: string; csrfToken: string; user: AuthUser; expiresAt: number }
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
@@ -31,6 +32,21 @@ function cookieValue(req: Request, name: string) {
   return item ? decodeURIComponent(item.slice(name.length + 1)) : undefined;
 }
 
+function cleanUsername(value: string) {
+  const username = value.trim();
+  if (!/^[\p{L}\p{N}._-]{2,32}$/u.test(username)) throw new Error('用户名需为 2-32 位字母、数字或中文字符');
+  return username;
+}
+
+function cleanPassword(value: string) {
+  if (value.length < 12 || value.length > 128) throw new Error('密码长度必须为 12-128 位');
+  return value;
+}
+
+function toAuthUser(user: StoredUser): AuthUser {
+  return { id: user.id, username: user.username, role: user.role };
+}
+
 declare global {
   namespace Express {
     interface Request { authUser?: AuthUser; authCsrfToken?: string }
@@ -50,27 +66,38 @@ export class AuthService {
 
   private async loadUsers() {
     if (this.users) return this.users;
-    const adminPassword = process.env.AUTH_ADMIN_PASSWORD?.trim();
-    const userPassword = process.env.AUTH_USER_PASSWORD?.trim();
-    // 环境变量是管理员部署时的权威配置，允许在不手工编辑 users.json 的情况下轮换密码。
-    if (adminPassword || userPassword) {
-      const users: StoredUser[] = [];
-      if (adminPassword) users.push({ id: 'user-admin', username: process.env.AUTH_ADMIN_USERNAME?.trim() || 'admin', role: 'admin', enabled: true, ...hashPassword(adminPassword) });
-      if (userPassword) users.push({ id: 'user-standard', username: process.env.AUTH_USER_USERNAME?.trim() || 'operator', role: 'user', enabled: true, ...hashPassword(userPassword) });
-      this.users = users;
-      await fs.mkdir(path.dirname(this.usersPath), { recursive: true });
-      await fs.writeFile(this.usersPath, JSON.stringify(users, null, 2), { mode: 0o600 });
-      return users;
-    }
     try {
       const parsed = JSON.parse(await fs.readFile(this.usersPath, 'utf8')) as StoredUser[];
       if (Array.isArray(parsed) && parsed.length) {
-        this.users = parsed;
-        return parsed;
+        this.users = parsed.map((user) => ({
+          ...user,
+          createdAt: user.createdAt || new Date().toISOString(),
+          updatedAt: user.updatedAt || new Date().toISOString(),
+          enabled: user.enabled !== false,
+        }));
+        return this.users;
       }
     } catch { /* 首次启动按环境变量初始化 */ }
-    this.users = [];
+    const now = new Date().toISOString();
+    const users: StoredUser[] = [];
+    const adminPassword = process.env.AUTH_ADMIN_PASSWORD?.trim();
+    const userPassword = process.env.AUTH_USER_PASSWORD?.trim();
+    if (adminPassword) users.push({ id: 'user-admin', username: process.env.AUTH_ADMIN_USERNAME?.trim() || 'admin', role: 'admin', enabled: true, createdAt: now, updatedAt: now, ...hashPassword(cleanPassword(adminPassword)) });
+    if (userPassword) users.push({ id: 'user-standard', username: process.env.AUTH_USER_USERNAME?.trim() || 'operator', role: 'user', enabled: true, createdAt: now, updatedAt: now, ...hashPassword(cleanPassword(userPassword)) });
+    this.users = users;
+    if (users.length) await this.saveUsers();
     return this.users;
+  }
+
+  private async saveUsers() {
+    await fs.mkdir(path.dirname(this.usersPath), { recursive: true });
+    const temporaryPath = `${this.usersPath}.tmp-${process.pid}`;
+    await fs.writeFile(temporaryPath, JSON.stringify(this.users || [], null, 2), { mode: 0o600 });
+    await fs.rename(temporaryPath, this.usersPath);
+  }
+
+  private async usersOrThrow() {
+    return this.users || await this.loadUsers();
   }
 
   private cookieOptions() {
@@ -90,9 +117,9 @@ export class AuthService {
     this.failedLogins.delete(clientKey);
     const token = crypto.randomBytes(32).toString('base64url');
     const csrfToken = crypto.randomBytes(24).toString('base64url');
-    const publicUser = { id: user.id, username: user.username, role: user.role } satisfies AuthUser;
-    this.sessions.set(token, { token, csrfToken, user: publicUser, expiresAt: Date.now() + SESSION_TTL_MS });
-    return { user: publicUser, csrfToken, token };
+    const sessionUser = toAuthUser(user);
+    this.sessions.set(token, { token, csrfToken, user: sessionUser, expiresAt: Date.now() + SESSION_TTL_MS });
+    return { user: sessionUser, csrfToken, token };
   }
 
   sessionFromRequest(req: Request) {
@@ -121,6 +148,73 @@ export class AuthService {
     if (token) this.sessions.delete(token);
   }
 
+  async listUsers(): Promise<AuthUserView[]> {
+    const users = await this.usersOrThrow();
+    return users.map(({ salt: _salt, passwordHash: _passwordHash, ...view }) => view);
+  }
+
+  async createUser(input: { username: string; password: string; role: UserRole }) {
+    if (!this.enabled) throw new Error('请先在 .env 中设置 AUTH_ENABLED=true 后再管理登录账号');
+    const users = await this.usersOrThrow();
+    const username = cleanUsername(input.username);
+    const password = cleanPassword(input.password);
+    if (input.role !== 'admin' && input.role !== 'user') throw new Error('用户角色不合法');
+    if (users.some((user) => user.username.toLowerCase() === username.toLowerCase())) throw new Error('用户名已存在');
+    const now = new Date().toISOString();
+    const user: StoredUser = { id: `user-${crypto.randomBytes(8).toString('hex')}`, username, role: input.role, enabled: true, createdAt: now, updatedAt: now, ...hashPassword(password) };
+    users.push(user);
+    await this.saveUsers();
+    return publicUserView(user);
+  }
+
+  async updateUser(id: string, patch: { role?: UserRole; enabled?: boolean }, actorId: string) {
+    const users = await this.usersOrThrow();
+    const user = users.find((item) => item.id === id);
+    if (!user) throw new Error('用户不存在');
+    if (patch.role !== undefined && patch.role !== 'admin' && patch.role !== 'user') throw new Error('用户角色不合法');
+    const nextRole = patch.role || user.role;
+    const nextEnabled = patch.enabled ?? user.enabled;
+    const roleChanged = nextRole !== user.role;
+    if (user.id === actorId && (!nextEnabled || nextRole !== 'admin')) throw new Error('不能停用或降级当前登录的管理员账号');
+    if (user.role === 'admin' && (nextRole !== 'admin' || !nextEnabled) && users.filter((item) => item.role === 'admin' && item.enabled).length <= 1) throw new Error('至少需要保留一个启用的管理员账号');
+    user.role = nextRole;
+    user.enabled = nextEnabled;
+    user.updatedAt = new Date().toISOString();
+    await this.saveUsers();
+    if (!nextEnabled || roleChanged) this.revokeUserSessions(id);
+    return publicUserView(user);
+  }
+
+  async resetPassword(id: string, password: string, actorId: string) {
+    const users = await this.usersOrThrow();
+    const user = users.find((item) => item.id === id);
+    if (!user) throw new Error('用户不存在');
+    const passwordData = hashPassword(cleanPassword(password));
+    user.salt = passwordData.salt;
+    user.passwordHash = passwordData.passwordHash;
+    user.updatedAt = new Date().toISOString();
+    await this.saveUsers();
+    if (id !== actorId) this.revokeUserSessions(id);
+    return publicUserView(user);
+  }
+
+  async deleteUser(id: string, actorId: string) {
+    const users = await this.usersOrThrow();
+    const index = users.findIndex((item) => item.id === id);
+    if (index < 0) throw new Error('用户不存在');
+    if (id === actorId) throw new Error('不能删除当前登录账号');
+    const user = users[index];
+    if (user.role === 'admin' && user.enabled && users.filter((item) => item.role === 'admin' && item.enabled).length <= 1) throw new Error('至少需要保留一个启用的管理员账号');
+    users.splice(index, 1);
+    await this.saveUsers();
+    this.revokeUserSessions(id);
+    return this.listUsers();
+  }
+
+  private revokeUserSessions(userId: string) {
+    for (const [token, session] of this.sessions) if (session.user.id === userId) this.sessions.delete(token);
+  }
+
   requireSession = (req: Request, res: Response, next: NextFunction) => {
     const current = this.sessionFromRequest(req);
     if (!current) { res.status(401).json({ message: '请先登录', code: 'AUTH_REQUIRED' }); return; }
@@ -138,6 +232,10 @@ export class AuthService {
       next();
     };
   }
+}
+
+function publicUserView(user: StoredUser): AuthUserView {
+  return { id: user.id, username: user.username, role: user.role, enabled: user.enabled, createdAt: user.createdAt, updatedAt: user.updatedAt };
 }
 
 export { SESSION_COOKIE };

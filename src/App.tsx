@@ -16,6 +16,7 @@ import {
   FileCheck2,
   Filter,
   Globe2,
+  KeyRound,
   LayoutDashboard,
   LoaderCircle,
   Menu,
@@ -33,6 +34,8 @@ import {
   Timer,
   Trash2,
   Upload,
+  UserPlus,
+  Users,
   X,
 } from 'lucide-react';
 import type { AutomationStatus, AutomationTask, CarrierSource, DashboardData, ManualMark, Shipment, ShipmentStatus } from './types';
@@ -54,6 +57,15 @@ interface AuthSession {
   authenticated: boolean;
   csrfToken: string;
   user: { id: string; username: string; role: AuthRole } | null;
+}
+
+interface AuthManagedUser {
+  id: string;
+  username: string;
+  role: 'admin' | 'user';
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 let csrfToken = '';
@@ -841,7 +853,7 @@ export default function App() {
           </section>
           <p className="legal-note">数据仅用于运营辅助，最终船期以船司及码头官方信息为准。</p>
           </div>
-          {activePage !== 'overview' && <ModulePage page={activePage} data={data} automation={automation} syncing={syncing} onSync={handleSync} onMark={handleManualMark} onDelete={handleDeleteShipments} onToggleAutomation={handleToggleAutomation} onCreateBackup={handleCreateBackup} onRestoreBackup={handleRestoreBackup} onAutomationUpdated={setAutomation} onUpload={() => uploadInput.current?.click()} onToast={setToast} onOpenDetail={setDetail} onOpenEdit={openManualEdit} onOpenManual={openManualNew} />}
+          {activePage !== 'overview' && <ModulePage page={activePage} data={data} automation={automation} authEnabled={Boolean(auth?.enabled)} currentUser={auth?.user || null} syncing={syncing} onSync={handleSync} onMark={handleManualMark} onDelete={handleDeleteShipments} onToggleAutomation={handleToggleAutomation} onCreateBackup={handleCreateBackup} onRestoreBackup={handleRestoreBackup} onAutomationUpdated={setAutomation} onUpload={() => uploadInput.current?.click()} onToast={setToast} onOpenDetail={setDetail} onOpenEdit={openManualEdit} onOpenManual={openManualNew} />}
         </div>
       </main>
 
@@ -924,10 +936,12 @@ function fullDate(value: string) {
   return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value));
 }
 
-function ModulePage({ page, data, automation, syncing, onSync, onMark, onDelete, onToggleAutomation, onCreateBackup, onRestoreBackup, onAutomationUpdated, onUpload, onToast, onOpenDetail, onOpenEdit, onOpenManual }: {
+function ModulePage({ page, data, automation, authEnabled, currentUser, syncing, onSync, onMark, onDelete, onToggleAutomation, onCreateBackup, onRestoreBackup, onAutomationUpdated, onUpload, onToast, onOpenDetail, onOpenEdit, onOpenManual }: {
   page: Exclude<PageId, 'overview'>;
   data: DashboardData | null;
   automation: AutomationStatus | null;
+  authEnabled: boolean;
+  currentUser: AuthSession['user'];
   syncing: boolean;
   onSync: (selection?: RunSelection) => Promise<void>;
   onMark: (id: string, manualMark: ManualMark) => Promise<void>;
@@ -947,6 +961,13 @@ function ModulePage({ page, data, automation, syncing, onSync, onMark, onDelete,
   const [tasks, setTasks] = useState<AutomationTask[]>([]);
   const [backups, setBackups] = useState<BackupView[]>([]);
   const [settingsView, setSettingsView] = useState<SettingsView | null>(null);
+  const [managedUsers, setManagedUsers] = useState<AuthManagedUser[]>([]);
+  const [userModalMode, setUserModalMode] = useState<'create' | 'reset' | null>(null);
+  const [userModalTarget, setUserModalTarget] = useState<AuthManagedUser | null>(null);
+  const [userNameInput, setUserNameInput] = useState('');
+  const [userPasswordInput, setUserPasswordInput] = useState('');
+  const [userRoleInput, setUserRoleInput] = useState<AuthManagedUser['role']>('user');
+  const [userSaving, setUserSaving] = useState(false);
   const [webhookInput, setWebhookInput] = useState('');
   const [webhookSaving, setWebhookSaving] = useState(false);
   const [webhookTesting, setWebhookTesting] = useState(false);
@@ -975,7 +996,10 @@ function ModulePage({ page, data, automation, syncing, onSync, onMark, onDelete,
       if (page === 'automation' || page === 'exports') requests.push(apiRequest<{ runs: RunView[] }>('/api/automation/runs').then((payload) => setRuns(payload.runs || [])));
       if (page === 'automation') requests.push(apiRequest<{ tasks: AutomationTask[] }>('/api/automation/tasks').then((payload) => setTasks(payload.tasks || [])));
       if (page === 'exports') requests.push(apiRequest<{ backups: BackupView[] }>('/api/backups').then((payload) => setBackups(payload.backups || [])));
-      if (page === 'settings') requests.push(apiRequest<SettingsView>('/api/automation/settings').then((payload) => { setSettingsView(payload); setWebhookInput(''); }));
+      if (page === 'settings') {
+        requests.push(apiRequest<SettingsView>('/api/automation/settings').then((payload) => { setSettingsView(payload); setWebhookInput(''); }));
+        if (currentUser?.role === 'admin') requests.push(apiRequest<{ users: AuthManagedUser[] }>('/api/auth/users').then((payload) => setManagedUsers(payload.users || [])));
+      }
       await Promise.all(requests);
     } catch {
       onToast('模块数据加载失败');
@@ -1043,6 +1067,62 @@ function ModulePage({ page, data, automation, syncing, onSync, onMark, onDelete,
       onToast(error instanceof Error ? error.message : '浏览器采集设置保存失败');
     } finally {
       setBrowserSaving(false);
+    }
+  }
+
+  function openCreateUser() {
+    setUserModalMode('create');
+    setUserModalTarget(null);
+    setUserNameInput('');
+    setUserPasswordInput('');
+    setUserRoleInput('user');
+  }
+
+  function openResetPassword(user: AuthManagedUser) {
+    setUserModalMode('reset');
+    setUserModalTarget(user);
+    setUserNameInput(user.username);
+    setUserPasswordInput('');
+  }
+
+  function closeUserModal() {
+    if (!userSaving) setUserModalMode(null);
+  }
+
+  async function saveManagedUser() {
+    setUserSaving(true);
+    try {
+      const payload = userModalMode === 'create'
+        ? await apiRequest<{ users: AuthManagedUser[] }>('/api/auth/users', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: userNameInput, password: userPasswordInput, role: userRoleInput }) })
+        : await apiRequest<{ users: AuthManagedUser[] }>(`/api/auth/users/${encodeURIComponent(userModalTarget!.id)}/password`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: userPasswordInput }) });
+      setManagedUsers(payload.users || []);
+      setUserModalMode(null);
+      onToast(userModalMode === 'create' ? '账号已创建' : '密码已重置');
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '账号操作失败');
+    } finally {
+      setUserSaving(false);
+    }
+  }
+
+  async function updateManagedUser(user: AuthManagedUser, patch: { role?: AuthManagedUser['role']; enabled?: boolean }) {
+    try {
+      const payload = await apiRequest<{ users: AuthManagedUser[] }>(`/api/auth/users/${encodeURIComponent(user.id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) });
+      setManagedUsers(payload.users || []);
+      onToast('账号权限已更新');
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '账号更新失败');
+    }
+  }
+
+  async function deleteManagedUser(user: AuthManagedUser) {
+    if (!window.confirm(`确认删除账号“${user.username}”？删除后无法恢复。`)) return;
+    try {
+      const payload = await apiRequest<{ users: AuthManagedUser[] }>(`/api/auth/users/${encodeURIComponent(user.id)}`, { method: 'DELETE' });
+      setManagedUsers(payload.users || []);
+      onToast('账号已删除');
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '账号删除失败');
     }
   }
 
@@ -1272,6 +1352,8 @@ function ModulePage({ page, data, automation, syncing, onSync, onMark, onDelete,
       <article className="settings-card"><div className="settings-card-title"><Globe2 size={19} /><div><strong>网页模拟点击</strong><span>官方接口失败后的自动备用通道</span></div><span className={settingsView?.browserAutomationEnabled ? 'setting-ok' : 'setting-warn'}>{settingsView?.browserAutomationEnabled ? '已启用' : '已停用'}</span></div><div className="setting-row"><span>浏览器备用查询</span><label className="setting-toggle"><span>{settingsView?.browserAutomationEnabled ? '启用' : '停用'}</span><input type="checkbox" checked={Boolean(settingsView?.browserAutomationEnabled)} disabled={browserSaving} onChange={(event) => saveBrowserAutomation(event.target.checked)} /><span className="switch-slider" /></label></div><div className="setting-row"><span>运行方式</span><strong>系统 Chrome · 无界面</strong></div><div className="setting-row"><span>并发策略</span><strong>单线程串行，降低风控</strong></div><div className="setting-help">页面必须同时显示对应提单号/柜号和明确时间字段才会写入；验证码、空页面或无法核验的数据仍按失败处理，并保存证据截图。</div></article>
       <article className="settings-card wecom-settings"><div className="settings-card-title"><MessageSquare size={19} /><div><strong>企业微信通知</strong><span>任务完成后发送汇总</span></div><span className={settingsView?.notificationConfigured || automation?.notificationConfigured ? 'setting-ok' : 'setting-warn'}>{settingsView?.notificationConfigured || automation?.notificationConfigured ? '已配置' : '待配置'}</span></div><div className="setting-help">可直接在这里保存企业微信机器人 Webhook。密钥只保存在本机服务端，不会回显完整地址。</div><label className="setting-field"><span>机器人 Webhook</span><input type="url" value={webhookInput} onChange={(event) => setWebhookInput(event.target.value)} placeholder={settingsView?.webhookPreview || 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…'} /></label><div className="setting-preview">{settingsView?.notificationConfigured ? `当前配置：${settingsView.webhookPreview}` : '当前未配置企业微信通知'}</div><div className="setting-actions"><button className="secondary-button" onClick={testWebhook} disabled={webhookTesting || (!webhookInput.trim() && !settingsView?.notificationConfigured)}><Send size={15} />{webhookTesting ? '发送中…' : '发送测试'}</button><button className="primary-button" onClick={saveWebhook} disabled={webhookSaving}>{webhookSaving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}{webhookSaving ? '保存中…' : '保存配置'}</button></div></article>
     </section>}
+    {page === 'settings' && currentUser?.role === 'admin' && <section className="settings-card account-settings-card"><div className="settings-card-title"><Users size={19} /><div><strong>账号与权限</strong><span>管理工作台登录账号、角色和使用状态</span></div><button className="primary-button compact-button" onClick={openCreateUser} disabled={!authEnabled}><UserPlus size={14} />新增账号</button></div>{!authEnabled && <div className="setting-help account-warning">当前处于免登录兼容模式。请在 `.env` 设置 `AUTH_ENABLED=true` 并重启服务后，才能启用账号登录和新增账号。</div>}<div className="account-table-wrap"><table className="account-table"><thead><tr><th>账号</th><th>角色</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{managedUsers.length ? managedUsers.map((user) => <tr key={user.id}><td><strong>{user.username}</strong>{user.id === currentUser.id && <span className="account-self">当前账号</span>}</td><td><select value={user.role} disabled={user.id === currentUser.id || !authEnabled} onChange={(event) => void updateManagedUser(user, { role: event.target.value as AuthManagedUser['role'] })}><option value="admin">管理员</option><option value="user">普通用户</option></select></td><td><button className={`account-status ${user.enabled ? 'enabled' : 'disabled'}`} disabled={!authEnabled} onClick={() => void updateManagedUser(user, { enabled: !user.enabled })}>{user.enabled ? '已启用' : '已停用'}</button></td><td>{fullDate(user.createdAt)}</td><td><div className="account-actions"><button className="text-action-button" onClick={() => openResetPassword(user)} disabled={!authEnabled}><KeyRound size={13} />重置密码</button>{user.id !== currentUser.id && <button className="row-action danger-action" title="删除账号" onClick={() => void deleteManagedUser(user)} disabled={!authEnabled}><Trash2 size={14} /></button>}</div></td></tr>) : <tr><td colSpan={5}><div className="empty-module">暂无账号，请先配置登录后新增账号。</div></td></tr>}</tbody></table></div><div className="setting-help">密码只保存为哈希值。停用账号会立即撤销其当前 Session；至少保留一个启用的管理员账号。</div></section>}
+    {userModalMode && <div className="modal-backdrop" role="presentation" onMouseDown={closeUserModal}><section className="settings-modal account-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">ACCOUNT MANAGEMENT</p><h2>{userModalMode === 'create' ? '新增账号' : '重置密码'}</h2><p>{userModalMode === 'create' ? '创建后账号可以立即登录工作台。' : `为 ${userModalTarget?.username} 设置新密码。`}</p></div><button className="drawer-close" onClick={closeUserModal} disabled={userSaving}><X size={19} /></button></div>{userModalMode === 'create' && <><label className="setting-field"><span>用户名</span><input autoFocus value={userNameInput} onChange={(event) => setUserNameInput(event.target.value)} placeholder="2-32 位字符" /></label><label className="setting-field"><span>角色</span><select value={userRoleInput} onChange={(event) => setUserRoleInput(event.target.value as AuthManagedUser['role'])}><option value="user">普通用户</option><option value="admin">管理员</option></select></label></>}<label className="setting-field"><span>新密码</span><input type="password" autoFocus={userModalMode === 'reset'} value={userPasswordInput} onChange={(event) => setUserPasswordInput(event.target.value)} placeholder="至少 12 位" /></label><div className="setting-help">密码长度要求 12-128 位，建议使用随机密码。</div><div className="modal-actions"><button className="secondary-button" onClick={closeUserModal} disabled={userSaving}>取消</button><button className="primary-button" onClick={() => void saveManagedUser()} disabled={userSaving || (userModalMode === 'create' && !userNameInput.trim()) || userPasswordInput.length < 12}>{userSaving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}{userSaving ? '保存中…' : '保存'}</button></div></section></div>}
   </div>;
 }
 

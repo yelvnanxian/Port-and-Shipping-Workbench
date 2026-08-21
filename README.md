@@ -155,14 +155,16 @@ RATE_LIMIT_REQUESTS_PER_MINUTE=10
 - `BROWSER_HUMAN_BEHAVIOR=true` 启用真人行为模拟（随机延迟、逐字符打字），可降低风控触发率。
 - `RATE_LIMIT_REQUESTS_PER_MINUTE=10` 控制默认每分钟请求数，风控严重的船司（万海 3 次/分钟、以星达飞 5 次/分钟）在代码中单独限流。
 - 修改 `.env` 后必须重启服务。
-- 首次启用登录后，服务会在 `data/users.json` 保存密码哈希（不会保存明文密码）；修改 `.env` 中的管理员密码后重启即可轮换密码。不要把该文件提交到 Git。
+- 首次启用登录后，服务会在 `data/users.json` 保存密码哈希（不会保存明文密码）；后续账号、角色、启停和密码请在“系统设置 → 账号与权限”中管理。不要把该文件提交到 Git。
 - `APP_HOST=127.0.0.1` 只允许本机和 Cloudflare Tunnel 访问；如果确实需要局域网直连，再改成 `0.0.0.0` 并配合防火墙限制来源。
 - `APP_ORIGIN` 是允许跨域请求的前端来源，多个来源用英文逗号分隔；不要配置为 `*`。
 - `APP_TRUST_PROXY=true` 只应在确定请求只能经过可信反向代理时启用；否则客户端可能伪造转发 IP，影响限流判断。
 - `APP_RATE_LIMIT_ENABLED=true` 会启用基础请求限流；它与下面的登录、Session、CSRF 和管理员权限共同生效。
 - `AUTH_ENABLED=true` 开启登录 Session；必须同时设置 `AUTH_ADMIN_PASSWORD`（建议至少 16 位随机密码）。可选设置 `AUTH_USER_USERNAME` 与 `AUTH_USER_PASSWORD` 创建一个普通用户账号。
 - 如果只是本机临时开发且暂不需要登录，可显式设置 `AUTH_ENABLED=false`；公网或 Tunnel 访问不要关闭。
+- `.env` 中的账号只用于首次初始化 `data/users.json`；如果已经生成用户文件，后续请使用可视化账号管理，不要直接依赖修改环境变量。
 - 管理员可以修改系统设置、创建/删除/执行自动化任务、删除/恢复备份、导入 Excel、删除或人工修改船期；普通用户可以查看、筛选、导出和发起同步，但不能执行上述危险操作。
+- 管理员可在“系统设置 → 账号与权限”中可视化新增账号、切换管理员/普通用户、启用/停用、重置密码和删除账号；删除当前账号、停用最后一个管理员等高风险操作会被拒绝。
 - Session 使用 HttpOnly、SameSite=Strict Cookie；所有写请求要求 CSRF Token。启用 HTTPS 反向代理时将 `APP_HTTPS=true`，Cookie 会自动启用 Secure 属性。
 - `.env`、`data/settings.json`、浏览器 Cookie 和查询截图均为本地敏感数据，禁止提交到 Git。
 
