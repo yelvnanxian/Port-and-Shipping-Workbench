@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { NextFunction, Request, Response } from 'express';
+import type { AppDatabase } from './database.js';
 
 export type UserRole = 'admin' | 'user';
 export interface AuthUser { id: string; username: string; role: UserRole }
@@ -59,13 +60,22 @@ export class AuthService {
   private readonly failedLogins = new Map<string, { count: number; resetAt: number }>();
   readonly enabled = authEnabled();
   readonly usersPath: string;
+  private readonly database?: AppDatabase;
 
-  constructor(dataDirectory: string) {
+  constructor(dataDirectory: string, database?: AppDatabase) {
     this.usersPath = path.join(dataDirectory, 'users.json');
+    this.database = database?.enabled ? database : undefined;
   }
 
   private async loadUsers() {
     if (this.users) return this.users;
+    if (this.database) {
+      const result = await this.database.query<StoredUser>(`SELECT id, username, role, enabled, created_at AS "createdAt", updated_at AS "updatedAt", salt, password_hash AS "passwordHash" FROM auth_users ORDER BY username`);
+      if (result.rows.length) {
+        this.users = result.rows.map((user) => ({ ...user, enabled: user.enabled !== false }));
+        return this.users;
+      }
+    }
     try {
       const parsed = JSON.parse(await fs.readFile(this.usersPath, 'utf8')) as StoredUser[];
       if (Array.isArray(parsed) && parsed.length) {
@@ -94,6 +104,18 @@ export class AuthService {
     const temporaryPath = `${this.usersPath}.tmp-${process.pid}`;
     await fs.writeFile(temporaryPath, JSON.stringify(this.users || [], null, 2), { mode: 0o600 });
     await fs.rename(temporaryPath, this.usersPath);
+    if (this.database) {
+      await this.database.transaction(async (client) => {
+        await client.query('DELETE FROM auth_users');
+        for (const user of this.users || []) {
+          await client.query(
+            `INSERT INTO auth_users (id, username, role, enabled, created_at, updated_at, salt, password_hash)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [user.id, user.username, user.role, user.enabled, user.createdAt, user.updatedAt, user.salt, user.passwordHash],
+          );
+        }
+      });
+    }
   }
 
   private async usersOrThrow() {

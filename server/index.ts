@@ -12,14 +12,19 @@ import { startScheduler } from './automation/scheduler.js';
 import { corsOrigin, createRateLimiter, securityHeaders } from './security.js';
 import { legacyEvidenceDirectory, safeSourceCode, sourceEvidenceDirectory } from './automation/source-storage.js';
 import { AuthService } from './auth.js';
+import { createAppDatabase } from './database.js';
+import { WorkbookStore } from './automation/workbook.js';
 import type { CarrierSource, Shipment } from './types.js';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
 const host = process.env.APP_HOST || '127.0.0.1';
-const engine = new AutomationEngine();
+const database = createAppDatabase();
+await database.migrate();
+const engine = new AutomationEngine(new WorkbookStore(), database);
 await engine.store.initialize();
-const auth = new AuthService(engine.store.dataDirectory);
+await engine.syncDatabaseFromWorkbook();
+const auth = new AuthService(engine.store.dataDirectory, database);
 startScheduler(engine);
 
 const upload = multer({
@@ -481,6 +486,7 @@ app.post('/api/backups/delete-batch', auth.requireRole('admin'), async (req, res
 app.post('/api/backups/:name/restore', auth.requireRole('admin'), async (req, res, next) => {
   try {
     const workbook = await engine.store.restore(String(req.params.name));
+    await engine.syncDatabaseFromWorkbook();
     lastSync = new Date().toISOString();
     res.json({ workbook, backups: await engine.store.listBackups(), dashboard: await dashboardPayload(), automation: await engine.status() });
   } catch (error) {
@@ -507,6 +513,7 @@ app.post('/api/intake', auth.requireRole('admin'), async (req, res, next) => {
       carrierHint: entry.carrierHint || '',
     }));
     const result = await engine.store.appendRecords(normalized);
+    await engine.syncDatabaseFromWorkbook();
     res.json({ ...result, dashboard: await dashboardPayload(), automation: await engine.status() });
   } catch (error) {
     next(error);
@@ -610,6 +617,7 @@ app.post('/api/workbooks/upload', auth.requireRole('admin'), upload.single('work
   try {
     if (!req.file) throw new Error('请选择 .xlsx 文件');
     const workbook = await engine.store.install(req.file.path);
+    await engine.syncDatabaseFromWorkbook();
     res.json({ workbook, automation: await engine.status(), dashboard: await dashboardPayload() });
   } catch (error) {
     next(error);
@@ -641,7 +649,14 @@ app.use((error: Error, _req: express.Request, res: express.Response, _next: expr
   res.status(500).json({ message: error.message || '采集失败，请检查数据源配置' });
 });
 
-app.listen(port, host, () => {
+const server = app.listen(port, host, () => {
   console.log(`Port operations API listening on http://${host}:${port}`);
   console.log('Schedules enabled: 09:00, 11:00, 17:30 Asia/Shanghai');
+  console.log(`PostgreSQL: ${database.enabled ? 'enabled' : 'disabled (set DATABASE_URL to enable)'}`);
 });
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => {
+    server.close(() => { void database.close().finally(() => process.exit(0)); });
+  });
+}

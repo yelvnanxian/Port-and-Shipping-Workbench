@@ -76,6 +76,7 @@ export interface AutomationStatus {
   schedule: Array<{ time: string; cron: string }>;
   timezone: string;
   notificationConfigured: boolean;
+  databaseConfigured?: boolean;
   supportedCarriers: number;
   lastRun: null | {
     id: string;

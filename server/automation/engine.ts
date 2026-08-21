@@ -17,6 +17,7 @@ import { RateLimiter } from './rate-limiter.js';
 import { CarrierRoutingTrackingProvider, trackRecord, type TrackingProvider } from './tracker.js';
 import type { AutomationSettings, AutomationTask, AutomationTaskScope, FailedTrackingDetail, ManualMark, QueryProgress, RunProgress, RunSummary, TrackingTime, VesselState, WorkbookRecord } from './types.js';
 import { WorkbookStore } from './workbook.js';
+import type { AppDatabase } from '../database.js';
 
 function isQueryable(record: WorkbookRecord) {
   return record.manualMark !== '已清关'
@@ -77,9 +78,11 @@ export class AutomationEngine {
   readonly tasksPath: string;
   private browserEvidenceProvider: BrowserTrackingProvider | null = null;
   private verificationSkipRequested = false;
+  private readonly database?: AppDatabase;
 
-  constructor(store = new WorkbookStore()) {
+  constructor(store = new WorkbookStore(), database?: AppDatabase) {
     this.store = store;
+    this.database = database?.enabled ? database : undefined;
     this.runLogPath = path.join(store.dataDirectory, 'runs.json');
     this.settingsPath = path.join(store.dataDirectory, 'settings.json');
     this.tasksPath = path.join(store.dataDirectory, 'tasks.json');
@@ -128,10 +131,45 @@ export class AutomationEngine {
     return true;
   }
 
+  /** 将 Excel 当前记录镜像到 PostgreSQL；Excel 仍保留为导入/导出文件。 */
+  async syncDatabaseFromWorkbook() {
+    if (!this.database || !(await this.store.exists())) return;
+    const { sheet, headerMap } = await this.store.open();
+    const records = this.store.readRecords(sheet, headerMap);
+    await this.database.transaction(async (client) => {
+      await client.query('DELETE FROM shipments');
+      for (const record of records) {
+        await client.query(
+          `INSERT INTO shipments (source_row, carrier_hint, bill_no, container_no, arrival_time, discharge_time, vessel_state, manual_mark, last_updated, note, progress, synced_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())`,
+          [record.rowNumber, record.carrierHint, record.billNo, record.containerNo, publicTime(record.arrivalTime), publicTime(record.dischargeTime), record.vesselState, record.manualMark, record.lastUpdated, record.note, record.progress],
+        );
+      }
+    });
+  }
+
   async listRuns(): Promise<RunSummary[]> {
+    if (this.database) {
+      const result = await this.database.query<{ payload: RunSummary }>('SELECT payload FROM automation_runs ORDER BY finished_at DESC LIMIT 30');
+      if (result.rows.length) {
+        return result.rows.map(({ payload }) => ({ ...payload, failedBills: payload.failedBills || [], failedDetails: payload.failedDetails || [] }));
+      }
+      // 首次启用数据库时，将已有本地运行记录导入数据库。
+    }
     try {
       const runs = JSON.parse(await fs.readFile(this.runLogPath, 'utf8')) as RunSummary[];
-      return runs.map((run) => ({ ...run, failedBills: run.failedBills || [], failedDetails: run.failedDetails || [] }));
+      const normalized = runs.map((run) => ({ ...run, failedBills: run.failedBills || [], failedDetails: run.failedDetails || [] }));
+      if (this.database && normalized.length) {
+        await this.database.transaction(async (client) => {
+          for (const run of normalized.slice(0, 30)) {
+            await client.query(
+              `INSERT INTO automation_runs (id, payload, started_at, finished_at) VALUES ($1, $2::jsonb, $3, $4) ON CONFLICT (id) DO NOTHING`,
+              [run.id, JSON.stringify(run), run.startedAt, run.finishedAt],
+            );
+          }
+        });
+      }
+      return normalized;
     } catch {
       return [];
     }
@@ -139,6 +177,10 @@ export class AutomationEngine {
 
   async deleteRuns(ids: string[]) {
     const requested = new Set(ids.filter(Boolean));
+    if (this.database && requested.size) {
+      await this.database.query('DELETE FROM automation_runs WHERE id = ANY($1::text[])', [[...requested]]);
+      return this.listRuns();
+    }
     const runs = await this.listRuns();
     const kept = runs.filter((run) => !requested.has(run.id));
     await this.store.initialize();
@@ -147,9 +189,15 @@ export class AutomationEngine {
   }
 
   async listTasks(): Promise<AutomationTask[]> {
+    if (this.database) {
+      const result = await this.database.query<{ payload: AutomationTask }>('SELECT payload FROM automation_tasks ORDER BY created_at');
+      if (result.rows.length) return result.rows.map(({ payload }) => ({ ...payload, scheduleTime: payload.scheduleTime || null }));
+    }
     try {
       const tasks = JSON.parse(await fs.readFile(this.tasksPath, 'utf8')) as AutomationTask[];
-      return Array.isArray(tasks) ? tasks.map((task) => ({ ...task, scheduleTime: task.scheduleTime || null })) : [];
+      const normalized = Array.isArray(tasks) ? tasks.map((task) => ({ ...task, scheduleTime: task.scheduleTime || null })) : [];
+      if (this.database && normalized.length) await this.saveTasks(normalized);
+      return normalized;
     } catch {
       return [];
     }
@@ -158,6 +206,17 @@ export class AutomationEngine {
   private async saveTasks(tasks: AutomationTask[]) {
     await this.store.initialize();
     await fs.writeFile(this.tasksPath, JSON.stringify(tasks, null, 2));
+    if (this.database) {
+      await this.database.transaction(async (client) => {
+        await client.query('DELETE FROM automation_tasks');
+        for (const task of tasks) {
+          await client.query(
+            `INSERT INTO automation_tasks (id, payload, created_at, updated_at) VALUES ($1, $2::jsonb, $3, $4)`,
+            [task.id, JSON.stringify(task), task.createdAt, task.updatedAt],
+          );
+        }
+      });
+    }
   }
 
   async createTask(input: { name: string; scope: AutomationTaskScope; carrierCodes?: string[]; shipmentIds?: string[]; scheduleTime?: string | null }) {
@@ -244,6 +303,7 @@ export class AutomationEngine {
         await this.store.save(opened.workbook);
       }
     }
+    await this.syncDatabaseFromWorkbook();
     return { ...result, backupPath };
   }
 
@@ -268,6 +328,7 @@ export class AutomationEngine {
       : `${record.note ? `${record.note}；` : ''}人工修改船期状态`;
     this.store.writeRecord(opened.sheet, opened.headerMap, record);
     await this.store.save(opened.workbook);
+    await this.syncDatabaseFromWorkbook();
     return { record, backupPath };
   }
 
@@ -282,6 +343,7 @@ export class AutomationEngine {
     record.manualMark = nextMark;
     this.store.writeRecord(opened.sheet, opened.headerMap, record);
     await this.store.save(opened.workbook);
+    await this.syncDatabaseFromWorkbook();
     return { record, backupPath };
   }
 
@@ -289,6 +351,7 @@ export class AutomationEngine {
     if (this.running) throw new Error('自动更新正在执行，请稍后再删除船期记录');
     const backupPath = await this.store.backup('删除船期记录前备份');
     const result = await this.store.deleteRecords(rowNumbers);
+    await this.syncDatabaseFromWorkbook();
     return { ...result, backupPath };
   }
 
@@ -304,13 +367,32 @@ export class AutomationEngine {
       timezone: 'Asia/Shanghai',
       wechatWebhookUrl: process.env.WECHAT_WEBHOOK_URL?.trim() || '',
     };
+    if (this.database) {
+      const result = await this.database.query<{ payload: AutomationSettings }>('SELECT payload FROM automation_settings WHERE id = 1');
+      if (result.rows[0]?.payload) return { ...fallback, ...result.rows[0].payload, schedule: fallback.schedule, wechatWebhookUrl: result.rows[0].payload.wechatWebhookUrl ?? fallback.wechatWebhookUrl };
+    }
     try {
       const saved = JSON.parse(await fs.readFile(this.settingsPath, 'utf8')) as Partial<AutomationSettings>;
-      return { ...fallback, ...saved, schedule: fallback.schedule, wechatWebhookUrl: saved.wechatWebhookUrl ?? fallback.wechatWebhookUrl };
+      const normalized = { ...fallback, ...saved, schedule: fallback.schedule, wechatWebhookUrl: saved.wechatWebhookUrl ?? fallback.wechatWebhookUrl };
+      if (this.database) await this.saveSettings(normalized);
+      return normalized;
     } catch {
       await this.store.initialize();
       await fs.writeFile(this.settingsPath, JSON.stringify(fallback, null, 2));
+      if (this.database) await this.saveSettings(fallback);
       return fallback;
+    }
+  }
+
+  private async saveSettings(settings: AutomationSettings) {
+    await this.store.initialize();
+    await fs.writeFile(this.settingsPath, JSON.stringify(settings, null, 2));
+    if (this.database) {
+      await this.database.query(
+        `INSERT INTO automation_settings (id, payload, updated_at) VALUES (1, $1::jsonb, NOW())
+         ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
+        [JSON.stringify(settings)],
+      );
     }
   }
 
@@ -322,12 +404,23 @@ export class AutomationEngine {
       browserAutomationEnabled: patch.browserAutomationEnabled ?? current.browserAutomationEnabled,
       wechatWebhookUrl: patch.wechatWebhookUrl ?? current.wechatWebhookUrl,
     };
-    await fs.writeFile(this.settingsPath, JSON.stringify(next, null, 2));
+    await this.saveSettings(next);
     return next;
   }
 
   private async saveRun(summary: RunSummary) {
     await this.store.initialize();
+    if (this.database) {
+      await this.database.query(
+        `INSERT INTO automation_runs (id, payload, started_at, finished_at) VALUES ($1, $2::jsonb, $3, $4)
+         ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, finished_at = EXCLUDED.finished_at`,
+        [summary.id, JSON.stringify(summary), summary.startedAt, summary.finishedAt],
+      );
+      await this.database.query(`DELETE FROM automation_runs WHERE id NOT IN (SELECT id FROM automation_runs ORDER BY finished_at DESC LIMIT 30)`);
+      const runs = await this.listRuns();
+      await fs.writeFile(this.runLogPath, JSON.stringify(runs, null, 2));
+      return;
+    }
     const runs = await this.listRuns();
     await fs.writeFile(this.runLogPath, JSON.stringify([summary, ...runs].slice(0, 30), null, 2));
   }
@@ -356,6 +449,7 @@ export class AutomationEngine {
       const settings = await this.settings();
       const { workbook, sheet, headerMap } = await this.store.open();
       const allRecords = this.store.readRecords(sheet, headerMap);
+      await this.syncDatabaseFromWorkbook();
       const selectedCarrierCodes = selection?.carrierCodes?.length ? new Set(selection.carrierCodes.map((code) => code.toUpperCase())) : null;
       const selectedShipmentIds = selection?.shipmentIds?.length ? new Set(selection.shipmentIds) : null;
       const records = allRecords.filter((record) => {
@@ -423,6 +517,7 @@ export class AutomationEngine {
         this.store.writeRecord(sheet, headerMap, record);
       }
       await this.store.save(workbook);
+      await this.syncDatabaseFromWorkbook();
       this.currentRun.phase = 'querying';
 
       let cursor = 0;
@@ -508,6 +603,7 @@ export class AutomationEngine {
       await Promise.all(Array.from({ length: Math.min(5, records.length) }, () => worker()));
       this.currentRun.phase = 'saving';
       await this.store.save(workbook);
+      await this.syncDatabaseFromWorkbook();
 
       const finishedAt = new Date();
       const summary: RunSummary = {
@@ -575,6 +671,7 @@ export class AutomationEngine {
       schedule: settings.schedule,
       timezone: settings.timezone,
       notificationConfigured: Boolean(settings.wechatWebhookUrl),
+      databaseConfigured: Boolean(this.database),
       lastRun: runs[0] || null,
       supportedCarriers: 15,
     };

@@ -119,6 +119,9 @@ BROWSER_HUMAN_VERIFY_TIMEOUT_MS=180000
 HMM_BROWSER_HEADLESS=false
 BROWSER_HUMAN_BEHAVIOR=true
 RATE_LIMIT_REQUESTS_PER_MINUTE=10
+DATABASE_URL=postgresql://port_ops:请替换密码@127.0.0.1:5432/port_ops
+DATABASE_SSL=false
+DB_POOL_MAX=10
 ```
 
 Windows 示例：
@@ -156,6 +159,8 @@ RATE_LIMIT_REQUESTS_PER_MINUTE=10
 - `HMM_BROWSER_HEADLESS=false` 是韩新海运专用设置。其官网会拦截无头 Chrome，必须在已登录图形桌面的电脑上运行；定时查询时会短暂打开 Chrome 窗口。
 - `BROWSER_HUMAN_BEHAVIOR=true` 启用真人行为模拟（随机延迟、逐字符打字），可降低风控触发率。
 - `RATE_LIMIT_REQUESTS_PER_MINUTE=10` 控制默认每分钟请求数，风控严重的船司（万海 3 次/分钟、以星达飞 5 次/分钟）在代码中单独限流。
+- 配置 `DATABASE_URL` 后，服务启动会自动创建/升级 PostgreSQL 表，并将用户、系统设置、自动化任务和运行记录写入数据库；未配置时继续使用现有本地 JSON 文件模式。订单 Excel、备份文件和浏览器截图仍保留在本地文件系统，便于导入、导出和证据查看。
+- PostgreSQL 使用连接池，`DB_POOL_MAX` 默认 10；云数据库通常需要 `DATABASE_SSL=true`。数据库连接失败时服务会直接启动失败并提示原因，不会静默切回另一套数据源。
 - 修改 `.env` 后必须重启服务。
 - 首次启用登录后，服务会在 `data/users.json` 保存密码哈希（不会保存明文密码）；后续账号、角色、启停和密码请在“系统设置 → 账号与权限”中管理。不要把该文件提交到 Git。
 - `APP_HOST=127.0.0.1` 只允许本机和 Cloudflare Tunnel 访问；如果确实需要局域网直连，再改成 `0.0.0.0` 并配合防火墙限制来源。
@@ -177,6 +182,28 @@ npm test
 npm run build
 npm start
 ```
+
+### PostgreSQL（现在启用时）
+
+macOS 可使用 Homebrew 安装：
+
+```bash
+brew install postgresql@16
+brew services start postgresql@16
+createdb port_ops
+psql port_ops -c "CREATE USER port_ops WITH PASSWORD '请替换为强密码';"
+psql postgres -c "ALTER DATABASE port_ops OWNER TO port_ops;"
+psql port_ops -c "GRANT ALL ON SCHEMA public TO port_ops;"
+```
+
+然后在 `.env` 中配置：
+
+```dotenv
+DATABASE_URL=postgresql://port_ops:你的密码@127.0.0.1:5432/port_ops
+DATABASE_SSL=false
+```
+
+重启 `npm start` 后，项目会自动执行表结构迁移。首次启用数据库时，会把现有 `data/users.json`、`data/settings.json`、`data/tasks.json` 和 `data/runs.json` 导入 PostgreSQL。建议确认迁移成功后再做一次数据库备份。
 
 看到以下提示表示启动成功：
 
