@@ -106,6 +106,11 @@ APP_ORIGIN=https://ship.example.com
 APP_TRUST_PROXY=false
 APP_HTTPS=false
 APP_RATE_LIMIT_ENABLED=true
+AUTH_ENABLED=true
+AUTH_ADMIN_USERNAME=admin
+AUTH_ADMIN_PASSWORD=请替换为至少16位随机密码
+AUTH_USER_USERNAME=operator
+AUTH_USER_PASSWORD=
 WECHAT_WEBHOOK_URL=
 BROWSER_EXECUTABLE_PATH=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
 BROWSER_HEADLESS=true
@@ -150,10 +155,15 @@ RATE_LIMIT_REQUESTS_PER_MINUTE=10
 - `BROWSER_HUMAN_BEHAVIOR=true` 启用真人行为模拟（随机延迟、逐字符打字），可降低风控触发率。
 - `RATE_LIMIT_REQUESTS_PER_MINUTE=10` 控制默认每分钟请求数，风控严重的船司（万海 3 次/分钟、以星达飞 5 次/分钟）在代码中单独限流。
 - 修改 `.env` 后必须重启服务。
+- 首次启用登录后，服务会在 `data/users.json` 保存密码哈希（不会保存明文密码）；修改 `.env` 中的管理员密码后重启即可轮换密码。不要把该文件提交到 Git。
 - `APP_HOST=127.0.0.1` 只允许本机和 Cloudflare Tunnel 访问；如果确实需要局域网直连，再改成 `0.0.0.0` 并配合防火墙限制来源。
 - `APP_ORIGIN` 是允许跨域请求的前端来源，多个来源用英文逗号分隔；不要配置为 `*`。
 - `APP_TRUST_PROXY=true` 只应在确定请求只能经过可信反向代理时启用；否则客户端可能伪造转发 IP，影响限流判断。
-- `APP_RATE_LIMIT_ENABLED=true` 会启用基础请求限流。它不是登录认证，公网使用前仍必须增加登录、Session、CSRF 和管理员权限。
+- `APP_RATE_LIMIT_ENABLED=true` 会启用基础请求限流；它与下面的登录、Session、CSRF 和管理员权限共同生效。
+- `AUTH_ENABLED=true` 开启登录 Session；必须同时设置 `AUTH_ADMIN_PASSWORD`（建议至少 16 位随机密码）。可选设置 `AUTH_USER_USERNAME` 与 `AUTH_USER_PASSWORD` 创建一个普通用户账号。
+- 如果只是本机临时开发且暂不需要登录，可显式设置 `AUTH_ENABLED=false`；公网或 Tunnel 访问不要关闭。
+- 管理员可以修改系统设置、创建/删除/执行自动化任务、删除/恢复备份、导入 Excel、删除或人工修改船期；普通用户可以查看、筛选、导出和发起同步，但不能执行上述危险操作。
+- Session 使用 HttpOnly、SameSite=Strict Cookie；所有写请求要求 CSRF Token。启用 HTTPS 反向代理时将 `APP_HTTPS=true`，Cookie 会自动启用 Secure 属性。
 - `.env`、`data/settings.json`、浏览器 Cookie 和查询截图均为本地敏感数据，禁止提交到 Git。
 
 ### 5. 首次验证并启动
@@ -217,7 +227,7 @@ sudo ufw allow 8787/tcp
 sudo ufw status
 ```
 
-不要将 `8787` 端口直接暴露到公网；如需公网使用，应增加 HTTPS、登录认证和访问控制。当前版本已先加入安全响应头、关闭 `X-Powered-By`、限制跨域、限制请求体大小和基础 API 限流，但尚未替代登录认证。
+不要将 `8787` 端口直接暴露到公网；如需公网使用，应增加 HTTPS、登录认证和访问控制。当前版本已加入登录 Session、角色权限、CSRF 校验、安全响应头、关闭 `X-Powered-By`、限制跨域、限制请求体大小和基础 API 限流。
 
 ### 公网共享安全基线
 
@@ -230,7 +240,7 @@ sudo ufw status
 - 限制 JSON 请求体为 1 MB，URL 编码请求体为 100 KB
 - 对全部请求和 API 请求启用基础限流，超过限制返回 HTTP 429
 
-这只是公网发布前的边界加固，不等同于登录认证。下一阶段仍需增加登录 Session、管理员权限、CSRF 防护和危险接口鉴权；完成前不要把临时 Tunnel 地址公开发布。
+这只是公网发布前的边界加固；仍建议通过 Cloudflare Tunnel 或其他 HTTPS 反向代理发布，并定期更换管理员密码和 Tunnel 凭据。
 
 ### 7. 后台常驻运行
 

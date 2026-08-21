@@ -11,6 +11,8 @@ data/settings.json
 data/tasks.json
 data/browser-evidence/
 data/browser-state/
+data/sources/
+data/users.json
 scripts/node_modules
 *.log
 *.tsbuildinfo

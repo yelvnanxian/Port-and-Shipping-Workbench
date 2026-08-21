@@ -48,6 +48,16 @@ interface SettingsView {
   webhookPreview: string;
 }
 
+type AuthRole = 'admin' | 'user';
+interface AuthSession {
+  enabled: boolean;
+  authenticated: boolean;
+  csrfToken: string;
+  user: { id: string; username: string; role: AuthRole } | null;
+}
+
+let csrfToken = '';
+
 type RunSelection = { carrierCodes?: string[]; shipmentIds?: string[] };
 type MetricKey = 'tracking' | 'arriving' | 'working' | 'completed' | 'changed';
 type ShipmentDateField = 'eta' | 'dischargeTime' | 'lastUpdated';
@@ -180,7 +190,8 @@ async function downloadShipmentList(shipments: Shipment[]) {
   if (!shipments.length) throw new Error('当前列表没有可导出的记录');
   const response = await fetch('/api/shipments/export', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    credentials: 'include',
+    headers: { 'content-type': 'application/json', ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}) },
     body: JSON.stringify({ ids: shipments.map((item) => item.id) }),
   });
   if (!response.ok) {
@@ -198,7 +209,9 @@ async function downloadShipmentList(shipments: Shipment[]) {
 }
 
 async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  const headers = new Headers(init?.headers);
+  if (csrfToken && !headers.has('x-csrf-token')) headers.set('x-csrf-token', csrfToken);
+  const response = await fetch(url, { ...init, credentials: 'include', headers });
   const raw = await response.text();
   let payload: unknown = null;
   try {
@@ -269,7 +282,24 @@ function VerificationActions({ shipment, compact = false }: { shipment: Shipment
   </div>;
 }
 
+function LoginScreen({ onLogin }: { onLogin: (username: string, password: string) => Promise<void> }) {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError('');
+    try { await onLogin(username, password); } catch (reason) { setError(reason instanceof Error ? reason.message : '登录失败'); }
+    finally { setSubmitting(false); }
+  }
+  return <main className="login-screen"><form className="login-card" onSubmit={submit}><div className="login-brand"><div className="avatar">A4</div><div><strong>Port Operations</strong><span>船期数据工作台</span></div></div><p className="eyebrow">SECURE ACCESS</p><h1>登录工作台</h1><p className="login-help">请输入账号密码后继续访问真实订单数据。</p><label className="setting-field"><span>用户名</span><input autoFocus value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" /></label><label className="setting-field"><span>密码</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" /></label>{error ? <div className="login-error"><CircleAlert size={15} />{error}</div> : null}<button className="primary-button login-submit" type="submit" disabled={submitting || !username.trim() || !password}>{submitting ? <LoaderCircle size={15} className="spin" /> : null}{submitting ? '登录中…' : '登录'}</button></form></main>;
+}
+
 export default function App() {
+  const [auth, setAuth] = useState<AuthSession | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [activePage, setActivePage] = useState<PageId>(() => {
     const page = window.location.hash.replace('#', '') as PageId;
     return pageTitles[page] ? page : 'overview';
@@ -311,6 +341,26 @@ export default function App() {
   const uploadInput = useRef<HTMLInputElement>(null);
   const runRequestPending = useRef(false);
 
+  async function refreshSession() {
+    const response = await fetch('/api/auth/session', { credentials: 'include' });
+    const payload = await response.json() as AuthSession;
+    csrfToken = payload.csrfToken || '';
+    setAuth(payload);
+    return payload;
+  }
+
+  async function login(username: string, password: string) {
+    const payload = await apiRequest<AuthSession>('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, password }) });
+    csrfToken = payload.csrfToken || '';
+    setAuth(payload);
+  }
+
+  async function logout() {
+    await apiRequest('/api/auth/logout', { method: 'POST' }).catch(() => undefined);
+    csrfToken = '';
+    setAuth((previous) => previous ? { ...previous, authenticated: false, user: null, csrfToken: '' } : previous);
+  }
+
   function navigate(page: PageId) {
     setActivePage(page);
     window.location.hash = page;
@@ -337,8 +387,14 @@ export default function App() {
   }
 
   useEffect(() => {
-    Promise.all([load(), loadAutomation()]).catch((error) => setToast(error.message)).finally(() => setLoading(false));
+    refreshSession().then((session) => {
+      if (!session.enabled || session.authenticated) return Promise.all([load(), loadAutomation()]);
+      return undefined;
+    }).catch((error) => setToast(error.message)).finally(() => { setAuthLoading(false); setLoading(false); });
   }, []);
+
+  if (authLoading) return <main className="login-screen"><div className="login-card login-loading"><LoaderCircle size={24} className="spin" /><span>正在检查登录状态…</span></div></main>;
+  if (auth?.enabled && !auth.authenticated) return <LoginScreen onLogin={login} />;
 
   useEffect(() => {
     if (automation?.running) {
@@ -682,9 +738,9 @@ export default function App() {
         <div className="sidebar-foot">
           <div className="system-health"><span className="health-dot" /><div><strong>采集服务正常</strong><span>{data ? `${data.sources.length} 个数据源在线` : '正在连接服务'}</span></div></div>
           <div className="user-card-wrap">
-            <button className="user-card" onClick={() => navigate('settings')}><div className="avatar">A4</div><div><strong>A4专用版</strong><span>工作台管理员 · 打开系统设置</span></div></button>
+            <button className="user-card" onClick={() => navigate('settings')}><div className="avatar">A4</div><div><strong>{auth?.user?.username || 'A4专用版'}</strong><span>{auth?.user?.role === 'user' ? '普通用户' : '工作台管理员'} · 打开系统设置</span></div></button>
             <button className="user-menu-button" aria-label="打开工作台菜单" title="工作台菜单" onClick={() => setProfileMenuOpen((value) => !value)}><MoreHorizontal size={17} /></button>
-            {profileMenuOpen && <div className="user-menu"><button onClick={() => navigate('settings')}><Settings size={14} />系统设置</button><button onClick={() => { setProfileMenuOpen(false); window.location.reload(); }}><RefreshCw size={14} />重新加载</button></div>}
+            {profileMenuOpen && <div className="user-menu"><button onClick={() => navigate('settings')}><Settings size={14} />系统设置</button><button onClick={() => { setProfileMenuOpen(false); window.location.reload(); }}><RefreshCw size={14} />重新加载</button>{auth?.enabled ? <button onClick={() => { setProfileMenuOpen(false); void logout(); }}><X size={14} />退出登录</button> : null}</div>}
           </div>
         </div>
       </aside>
