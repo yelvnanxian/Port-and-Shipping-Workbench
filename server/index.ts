@@ -8,10 +8,12 @@ import { ALL_CARRIER_RULES } from './automation/carriers.js';
 import { AutomationEngine } from './automation/engine.js';
 import { notifyWeComTest } from './automation/notifier.js';
 import { startScheduler } from './automation/scheduler.js';
+import { corsOrigin, createRateLimiter, securityHeaders } from './security.js';
 import type { CarrierSource, Shipment } from './types.js';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
+const host = process.env.APP_HOST || '127.0.0.1';
 const engine = new AutomationEngine();
 await engine.store.initialize();
 startScheduler(engine);
@@ -24,8 +26,15 @@ const upload = multer({
   },
 });
 
-app.use(cors());
-app.use(express.json());
+app.disable('x-powered-by');
+app.set('trust proxy', process.env.APP_TRUST_PROXY === 'true' ? 1 : false);
+app.use(securityHeaders);
+app.use(cors({ origin: corsOrigin, credentials: true }));
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: false, limit: '100kb' }));
+// 留出前端每秒轮询自动化进度的空间；登录和危险操作的更严格限流会在认证阶段单独增加。
+app.use(createRateLimiter({ windowMs: 5 * 60 * 1000, max: 1000, name: 'all' }));
+app.use('/api', createRateLimiter({ windowMs: 5 * 60 * 1000, max: 600, name: 'api' }));
 
 let lastSync = new Date().toISOString();
 
@@ -504,7 +513,7 @@ app.use((error: Error, _req: express.Request, res: express.Response, _next: expr
   res.status(500).json({ message: error.message || '采集失败，请检查数据源配置' });
 });
 
-app.listen(port, () => {
-  console.log(`Port operations API listening on http://localhost:${port}`);
+app.listen(port, host, () => {
+  console.log(`Port operations API listening on http://${host}:${port}`);
   console.log('Schedules enabled: 09:00, 11:00, 17:30 Asia/Shanghai');
 });

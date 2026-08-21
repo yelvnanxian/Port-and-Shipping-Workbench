@@ -13,6 +13,7 @@
 - Google Chrome 或 Microsoft Edge。项目使用 `playwright-core` 调用系统浏览器，不会自动下载浏览器
 - 可访问各船司官网的网络环境
 - 生产运行只需要开放 `8787` 端口；开发模式还会使用 `5173` 端口
+- 生产公网共享建议通过 Cloudflare Tunnel 转发到 `127.0.0.1:8787`，不要直接开放 `8787` 到公网
 
 建议将电脑时区设置为中国标准时间。任务本身固定按 `Asia/Shanghai` 执行，但正确的系统时间便于核对日志和备份。
 
@@ -100,6 +101,11 @@ macOS 示例：
 
 ```dotenv
 PORT=8787
+APP_HOST=127.0.0.1
+APP_ORIGIN=https://ship.example.com
+APP_TRUST_PROXY=false
+APP_HTTPS=false
+APP_RATE_LIMIT_ENABLED=true
 WECHAT_WEBHOOK_URL=
 BROWSER_EXECUTABLE_PATH=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
 BROWSER_HEADLESS=true
@@ -144,6 +150,10 @@ RATE_LIMIT_REQUESTS_PER_MINUTE=10
 - `BROWSER_HUMAN_BEHAVIOR=true` 启用真人行为模拟（随机延迟、逐字符打字），可降低风控触发率。
 - `RATE_LIMIT_REQUESTS_PER_MINUTE=10` 控制默认每分钟请求数，风控严重的船司（万海 3 次/分钟、以星达飞 5 次/分钟）在代码中单独限流。
 - 修改 `.env` 后必须重启服务。
+- `APP_HOST=127.0.0.1` 只允许本机和 Cloudflare Tunnel 访问；如果确实需要局域网直连，再改成 `0.0.0.0` 并配合防火墙限制来源。
+- `APP_ORIGIN` 是允许跨域请求的前端来源，多个来源用英文逗号分隔；不要配置为 `*`。
+- `APP_TRUST_PROXY=true` 只应在确定请求只能经过可信反向代理时启用；否则客户端可能伪造转发 IP，影响限流判断。
+- `APP_RATE_LIMIT_ENABLED=true` 会启用基础请求限流。它不是登录认证，公网使用前仍必须增加登录、Session、CSRF 和管理员权限。
 - `.env`、`data/settings.json`、浏览器 Cookie 和查询截图均为本地敏感数据，禁止提交到 Git。
 
 ### 5. 首次验证并启动
@@ -181,7 +191,7 @@ Invoke-RestMethod http://localhost:8787/api/health
 
 ### 6. 局域网访问与防火墙
 
-生产服务监听 `8787` 端口。同一局域网的其他电脑可访问 `http://服务器IP:8787`。
+默认生产服务只监听本机 `127.0.0.1:8787`，同一局域网的其他电脑不能直接访问。若不使用 Cloudflare Tunnel、确实需要局域网直连，可将 `.env` 中的 `APP_HOST` 改为 `0.0.0.0`，再配合操作系统防火墙限制来源。
 
 查看服务器 IP：
 
@@ -207,7 +217,20 @@ sudo ufw allow 8787/tcp
 sudo ufw status
 ```
 
-不要将 `8787` 端口直接暴露到公网；如需公网使用，应增加 HTTPS、登录认证和访问控制。
+不要将 `8787` 端口直接暴露到公网；如需公网使用，应增加 HTTPS、登录认证和访问控制。当前版本已先加入安全响应头、关闭 `X-Powered-By`、限制跨域、限制请求体大小和基础 API 限流，但尚未替代登录认证。
+
+### 公网共享安全基线
+
+第一阶段安全加固已经包含：
+
+- 默认绑定 `127.0.0.1`，适合 Cloudflare Tunnel 转发
+- 仅允许 `APP_ORIGIN` 配置的前端来源跨域
+- 移除 Express `X-Powered-By` 标识
+- 增加 `nosniff`、禁止 iframe、Referrer-Policy、Permissions-Policy 等响应头
+- 限制 JSON 请求体为 1 MB，URL 编码请求体为 100 KB
+- 对全部请求和 API 请求启用基础限流，超过限制返回 HTTP 429
+
+这只是公网发布前的边界加固，不等同于登录认证。下一阶段仍需增加登录 Session、管理员权限、CSRF 防护和危险接口鉴权；完成前不要把临时 Tunnel 地址公开发布。
 
 ### 7. 后台常驻运行
 
