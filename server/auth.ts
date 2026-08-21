@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { NextFunction, Request, Response } from 'express';
 import type { AppDatabase } from './database.js';
+import { auditLog } from './audit.js';
 
 export type UserRole = 'admin' | 'user';
 export interface AuthUser { id: string; username: string; role: UserRole }
@@ -134,6 +135,7 @@ export class AuthService {
     if (!user) {
       const current = attempt && attempt.resetAt > now ? attempt : { count: 0, resetAt: now + 15 * 60 * 1000 };
       this.failedLogins.set(clientKey, { count: current.count + 1, resetAt: current.resetAt });
+      await auditLog(path.dirname(this.usersPath), 'auth.login.failure', { clientKey, attempt: current.count + 1 });
       throw new Error('用户名或密码错误');
     }
     this.failedLogins.delete(clientKey);
@@ -141,6 +143,7 @@ export class AuthService {
     const csrfToken = crypto.randomBytes(24).toString('base64url');
     const sessionUser = toAuthUser(user);
     this.sessions.set(token, { token, csrfToken, user: sessionUser, expiresAt: Date.now() + SESSION_TTL_MS });
+    await auditLog(path.dirname(this.usersPath), 'auth.login.success', { userId: sessionUser.id, username: sessionUser.username, clientKey });
     return { user: sessionUser, csrfToken, token };
   }
 
@@ -186,6 +189,7 @@ export class AuthService {
     const user: StoredUser = { id: `user-${crypto.randomBytes(8).toString('hex')}`, username, role: input.role, enabled: true, createdAt: now, updatedAt: now, ...hashPassword(password) };
     users.push(user);
     await this.saveUsers();
+    await auditLog(path.dirname(this.usersPath), 'auth.user.create', { userId: user.id, username: user.username, role: user.role });
     return publicUserView(user);
   }
 
@@ -204,6 +208,7 @@ export class AuthService {
     user.updatedAt = new Date().toISOString();
     await this.saveUsers();
     if (!nextEnabled || roleChanged) this.revokeUserSessions(id);
+    await auditLog(path.dirname(this.usersPath), 'auth.user.update', { actorId, userId: id, role: nextRole, enabled: nextEnabled });
     return publicUserView(user);
   }
 
@@ -217,6 +222,7 @@ export class AuthService {
     user.updatedAt = new Date().toISOString();
     await this.saveUsers();
     if (id !== actorId) this.revokeUserSessions(id);
+    await auditLog(path.dirname(this.usersPath), 'auth.user.password_reset', { actorId, userId: id });
     return publicUserView(user);
   }
 
@@ -230,6 +236,7 @@ export class AuthService {
     users.splice(index, 1);
     await this.saveUsers();
     this.revokeUserSessions(id);
+    await auditLog(path.dirname(this.usersPath), 'auth.user.delete', { actorId, userId: id, username: user.username });
     return this.listUsers();
   }
 

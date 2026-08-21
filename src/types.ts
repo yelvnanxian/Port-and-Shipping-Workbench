@@ -43,6 +43,7 @@ export interface DashboardData {
 
 export interface AutomationStatus {
   running: boolean;
+  queuedRuns?: number;
   currentRun: null | {
     id: string;
     reason: 'manual' | 'scheduled';

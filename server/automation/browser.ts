@@ -313,8 +313,8 @@ function humanVerificationEnabled() {
 }
 
 function humanVerificationTimeout() {
-  const configured = Number(process.env.BROWSER_HUMAN_VERIFY_TIMEOUT_MS || 180_000);
-  return Number.isFinite(configured) && configured >= 10_000 ? configured : 180_000;
+  const configured = Number(process.env.BROWSER_HUMAN_VERIFY_TIMEOUT_MS || 600_000);
+  return Number.isFinite(configured) && configured >= 30_000 ? Math.min(configured, 30 * 60_000) : 600_000;
 }
 
 async function waitForManualVerification(page: Page, input: TrackingQuery, callbacks?: BrowserVerificationCallbacks) {
@@ -334,6 +334,7 @@ async function waitForManualVerification(page: Page, input: TrackingQuery, callb
   console.log(`[BrowserTrackingProvider] ${input.rule.name}需要人工验证，请在打开的 Chrome 窗口完成验证；等待 ${Math.round(timeout / 1000)} 秒`);
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
+    if (page.isClosed()) throw trackingError('查询超时', `${input.rule.name}验证页面已关闭，无法继续查询`);
     if (callbacks?.shouldSkip?.()) {
       throw trackingError('验证码或风控', `${input.rule.name}当前记录已按用户指令跳过人工验证`);
     }
@@ -479,6 +480,23 @@ async function waitForRenderedOutcome(page: Page, queryValue: string, timeout = 
   } while (Date.now() < deadline);
 }
 
+async function waitForStableOutcome(page: Page, queryValue: string, timeout = RESULT_TIMEOUT_MS) {
+  const deadline = Date.now() + timeout;
+  const normalizedQuery = normalizedReference(queryValue);
+  while (Date.now() < deadline) {
+    if (page.isClosed()) throw trackingError('查询超时', '官网查询页面被关闭，未能取得结果');
+    const text = await renderedPageText(page);
+    if (verificationText(text)) {
+      await page.waitForTimeout(500);
+      continue;
+    }
+    const normalized = normalizedReference(text);
+    if (/no result|not found|no shipment|invalid (?:booking|bill|cargo|tracking)|未找到|查无|无记录|不存在/i.test(text)) return;
+    if (normalized.includes(normalizedQuery) && /\bATA\b|\bETA\b|current ETA|arrival in|actual(?: time of)? arrival|estimated(?: time of)? arrival|expected arrival|实际到港|预计到港|实际抵达|预计抵达|discharg|卸船|卸载完成|details/i.test(text)) return;
+    await page.waitForTimeout(350);
+  }
+}
+
 export class BrowserTrackingProvider implements TrackingProvider {
   private browser: Browser | null = null;
   private contexts = new Map<string, BrowserContext>();
@@ -507,6 +525,10 @@ export class BrowserTrackingProvider implements TrackingProvider {
         args: STEALTH_ARGS,
         // 忽略 HTTPS 证书错误（某些船司使用自签证书）
         ignoreDefaultArgs: ['--enable-automation'],
+      });
+      this.browser.on('disconnected', () => {
+        this.browser = null;
+        this.contexts.clear();
       });
     }
     return this.browser;
@@ -626,9 +648,20 @@ export class BrowserTrackingProvider implements TrackingProvider {
           if (input.rule.code === 'ZIM') await preventZimMapScroll(page);
         }
       }
-      await waitForManualVerification(page, input, this.verificationCallbacks);
+      const verificationResolved = await waitForManualVerification(page, input, this.verificationCallbacks);
+      // 东方海外、森罗的验证通过后页面经常只恢复空表单，需要重新提交一次查询。
+      if (verificationResolved && (input.rule.code === 'OOCL' || input.rule.code === 'SMLINE')) {
+        const afterVerification = await renderedPageText(page);
+        if (!normalizedReference(afterVerification).includes(normalizedReference(queryValue)) || !/\bATA\b|\bETA\b|arrival|到港|卸船|discharg/i.test(afterVerification)) {
+          const inputElement = await firstVisibleInput(page);
+          if (inputElement) {
+            await humanType(inputElement, queryValue);
+            await submitTrackingQuery(inputElement);
+          }
+        }
+      }
       if (input.rule.code === 'HAPAG') await openHapagContainerDetails(page, input);
-      await waitForRenderedOutcome(page, queryValue, Math.min(this.timeoutMs, RESULT_TIMEOUT_MS));
+      await waitForStableOutcome(page, queryValue, Math.min(this.timeoutMs, input.rule.code === 'OOCL' || input.rule.code === 'SMLINE' ? 45_000 : RESULT_TIMEOUT_MS));
       sourceUrl = page.url();
       const renderedText = await renderedPageText(page);
       const result = input.rule.code === 'MAERSK'
@@ -642,13 +675,16 @@ export class BrowserTrackingProvider implements TrackingProvider {
       const finalRouteText = result.routeText || parseCarrierRoute({ carrierCode: input.rule.code, text: renderedText, lines: renderedText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) }) || undefined;
       return { ...result, sourceUrl, evidencePath, routeText: finalRouteText };
     } catch (error) {
+      if (page.isClosed() || /target closed|browser has been closed|context has been closed|page crashed/i.test(error instanceof Error ? error.message : String(error))) {
+        throw trackingError('查询超时', `${input.rule.name}浏览器页面已关闭或崩溃，未写入未经核验的数据`, { sourceUrl });
+      }
       const failure = classifyTrackingError(error);
       sourceUrl = page.url() || sourceUrl;
       const evidencePath = await this.saveEvidence(page, input, 'failure');
       throw trackingError(failure.category, `${failure.reason}${navigationWarning ? `；${navigationWarning}` : ''}`, { evidencePath, sourceUrl });
     } finally {
       await this.saveState(context, input).catch(() => undefined);
-      await page.close();
+      await page.close().catch(() => undefined);
     }
   }
 

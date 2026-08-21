@@ -115,7 +115,7 @@ WECHAT_WEBHOOK_URL=
 BROWSER_EXECUTABLE_PATH=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
 BROWSER_HEADLESS=true
 BROWSER_HUMAN_VERIFY=true
-BROWSER_HUMAN_VERIFY_TIMEOUT_MS=180000
+BROWSER_HUMAN_VERIFY_TIMEOUT_MS=600000
 HMM_BROWSER_HEADLESS=false
 BROWSER_HUMAN_BEHAVIOR=true
 RATE_LIMIT_REQUESTS_PER_MINUTE=10
@@ -152,9 +152,9 @@ RATE_LIMIT_REQUESTS_PER_MINUTE=10
 - 如果 Chrome 安装在其他位置，请将 `BROWSER_EXECUTABLE_PATH` 改成实际可执行文件路径。
 - `BROWSER_HEADLESS=false` 可切换为有头模式，反检测效果更好但需要图形界面；服务器环境保持 `true`。
 - `BROWSER_HUMAN_VERIFY=true` 允许万海、以星、赫伯罗特、达飞、东方海外遇到官网人机验证时暂停等待人工操作；必须同时设置 `BROWSER_HEADLESS=false`，系统会打开 Chrome 窗口并在验证通过后继续解析。
-- 如果验证页出现，直接在打开的 Chrome 窗口按官网提示完成验证，不要关闭窗口；控制台会显示“人工验证已通过”后继续写入 Excel。等待时间由 `BROWSER_HUMAN_VERIFY_TIMEOUT_MS` 控制，默认 180 秒。无界面模式遇到验证会明确失败并提示切换有头模式，不会写入猜测数据。
+- 如果验证页出现，直接在打开的 Chrome 窗口按官网提示完成验证，不要关闭窗口；控制台会显示“人工验证已通过”后继续等待结果区域稳定，再写入 Excel。等待时间由 `BROWSER_HUMAN_VERIFY_TIMEOUT_MS` 控制，默认 600 秒（最多 30 分钟）。无界面模式遇到验证会明确失败并提示切换有头模式，不会写入猜测数据。
 - 验证通过后的 Cookie/localStorage 会按船司保存到 `data/sources/{船司代码}/browser-state/`，后续运行只复用同一船司会话；升级时仍会兼容读取旧的 `data/browser-state/` 文件，会话失效时系统再次提示人工验证。
-- 运行过程中如果浏览器再次触发人机验证，工作台会在页面内弹出当前船司、提单号和柜号；完成 Chrome 中的验证后会自动检测并继续，无法处理时可选择“跳过当前记录”，该单号会以失败原因写入运行记录，不会写入猜测时间。
+- 运行过程中如果浏览器再次触发人机验证，工作台会在当前工作台右下角显示非阻塞通知，不会抢占或覆盖用户正在使用的浏览器窗口；完成 Chrome 中的验证后会自动检测，东方海外和森罗会在验证通过后重新提交查询并等待结果稳定，无法处理时可选择“跳过当前记录”，该单号会以失败原因写入运行记录，不会写入猜测时间。
 - 每条成功的浏览器查询都会保存完整页面截图到按船司隔离的证据目录，并在追踪表和单号详情中提供“采集证据”入口。路线解析按船司独立规则执行，识别到的装货港、卸货港和后续交付节点会在详情页显示为线路图。
 - `HMM_BROWSER_HEADLESS=false` 是韩新海运专用设置。其官网会拦截无头 Chrome，必须在已登录图形桌面的电脑上运行；定时查询时会短暂打开 Chrome 窗口。
 - `BROWSER_HUMAN_BEHAVIOR=true` 启用真人行为模拟（随机延迟、逐字符打字），可降低风控触发率。
@@ -174,6 +174,15 @@ RATE_LIMIT_REQUESTS_PER_MINUTE=10
 - 管理员可在“系统设置 → 账号与权限”中可视化新增账号、切换管理员/普通用户、启用/停用、重置密码和删除账号；删除当前账号、停用最后一个管理员等高风险操作会被拒绝。
 - Session 使用 HttpOnly、SameSite=Strict Cookie；所有写请求要求 CSRF Token。启用 HTTPS 反向代理时将 `APP_HTTPS=true`，Cookie 会自动启用 Secure 属性。
 - `.env`、`data/settings.json`、浏览器 Cookie 和查询截图均为本地敏感数据，禁止提交到 Git。
+
+### 安全、队列和异常处理
+
+- 所有业务 API 都要求有效 Session；写请求要求 CSRF，导入、删除、恢复、账号和任务管理等危险操作还要求管理员角色。未知的 `DELETE`、`TRACE`、`CONNECT` 请求会被拒绝，资源编号、文件名、数组长度和字段长度都会在后端重新校验，不能只依赖前端控件。
+- 服务会在 `data/audit.log` 记录登录、API 请求、错误和管理员操作，单文件超过 5MB 自动轮转并最多保留 5 个旧文件；日志不会记录密码、Cookie、CSRF 或完整 Webhook。定期备份或清理 `data/` 时请一并保留审计日志。
+- 多个用户同时点击同步时进入单进程任务队列，状态接口的 `queuedRuns` 会显示排队数量；相同 `x-idempotency-key` 的重复请求会复用同一次运行结果，避免重复点击造成重复抓取。服务重启后不会自动恢复未执行的内存队列，需重新发起未完成任务。
+- 上传只接受不超过 20MB、带 ZIP 魔数且能被 ExcelJS 正常解析的 `.xlsx` 文件；失败上传会清理临时文件。下载和恢复只允许安全的备份文件名，路径穿越会被拒绝。订单数据、任务配置、运行记录和用户应进入 PostgreSQL；Excel、备份、截图、浏览器会话和审计日志仍属于文件型资产，保存在本地并按目录隔离。
+- 浏览器页面关闭、崩溃、导航超时、网络断开或官网结构变化都会归类为失败并保存失败证据，不会写入猜测时间。页面解析必须同时核对单号/柜号和明确时间字段；官网改版时优先查看对应船司的失败截图和审计日志。
+- 前端模块刷新使用独立请求和过期响应丢弃机制，单个模块失败不会清空其他模块；同步完成后只刷新一次核心数据，避免出现“模块数据加载失败”或旧数据覆盖新数据。
 
 ### 5. 首次验证并启动
 

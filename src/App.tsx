@@ -240,6 +240,10 @@ async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
   return payload as T;
 }
 
+function idempotencyKey(prefix: string) {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function StatusBadge({ status }: { status: ShipmentStatus }) {
   const config = {
     待靠泊: { icon: Clock3, className: 'pending' },
@@ -316,8 +320,8 @@ function VerificationModal({ verification, onSkip, onContinue }: {
   onContinue: () => void;
 }) {
   if (!verification) return null;
-  return <div className="modal-backdrop verification-backdrop" role="presentation">
-    <section className="verification-modal" role="dialog" aria-modal="true" aria-labelledby="verification-title">
+  return <div className="verification-notice" role="status" aria-live="polite">
+    <section className="verification-modal" aria-labelledby="verification-title">
       <div className="verification-modal-icon"><ShieldCheckIcon /></div>
       <p className="eyebrow">HUMAN VERIFICATION REQUIRED</p>
       <h2 id="verification-title">需要人工通过船司验证</h2>
@@ -377,6 +381,7 @@ export default function App() {
   const moreFilterRef = useRef<HTMLDivElement>(null);
   const uploadInput = useRef<HTMLInputElement>(null);
   const runRequestPending = useRef(false);
+  const coreRefreshSeq = useRef(0);
 
   const verification = automation?.currentRun?.verification;
   const verificationKey = verification ? `${verification.carrierCode}:${verification.billNo}:${verification.containerNo}` : '';
@@ -401,7 +406,7 @@ export default function App() {
     const payload = await apiRequest<AuthSession>('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, password }) });
     csrfToken = payload.csrfToken || '';
     setAuth(payload);
-    await Promise.all([load(), loadAutomation()]);
+    await refreshCoreData();
     setLoading(false);
   }
 
@@ -447,9 +452,23 @@ export default function App() {
     setAutomation(await apiRequest<AutomationStatus>('/api/automation'));
   }
 
+  async function refreshCoreData() {
+    const requestId = ++coreRefreshSeq.current;
+    const [dashboardResult, automationResult] = await Promise.allSettled([
+      apiRequest<DashboardData>('/api/dashboard'),
+      apiRequest<AutomationStatus>('/api/automation'),
+    ]);
+    if (requestId !== coreRefreshSeq.current) return;
+    if (dashboardResult.status === 'fulfilled') setData(dashboardResult.value);
+    if (automationResult.status === 'fulfilled') setAutomation(automationResult.value);
+    if (dashboardResult.status === 'rejected' && automationResult.status === 'rejected') {
+      throw dashboardResult.reason instanceof Error ? dashboardResult.reason : new Error('工作台数据加载失败');
+    }
+  }
+
   useEffect(() => {
     refreshSession().then((session) => {
-      if (!session.enabled || session.authenticated) return Promise.all([load(), loadAutomation()]);
+      if (!session.enabled || session.authenticated) return refreshCoreData();
       return undefined;
     }).catch((error) => setToast(error.message)).finally(() => { setAuthLoading(false); setLoading(false); });
   }, []);
@@ -472,7 +491,7 @@ export default function App() {
           if (!next.running && !runRequestPending.current) {
             setSyncing(false);
             setPollingRun(false);
-            await Promise.all([load(), loadAutomation()]).catch(() => undefined);
+            await refreshCoreData().catch(() => undefined);
           }
         }
       } catch {
@@ -486,6 +505,10 @@ export default function App() {
       window.clearInterval(timer);
     };
   }, [pollingRun]);
+
+  useEffect(() => {
+    setDetail((current) => current ? data?.shipments.find((shipment) => shipment.id === current.id) || null : current);
+  }, [data]);
 
   const filtered = useMemo(() => {
     if (!data) return [];
@@ -542,6 +565,10 @@ export default function App() {
   };
 
   async function handleSync(selection?: RunSelection) {
+    if (runRequestPending.current) {
+      setToast('已有同步任务正在执行或排队，请等待当前任务完成');
+      return;
+    }
     setSyncing(true);
     setPollingRun(true);
     runRequestPending.current = true;
@@ -549,7 +576,7 @@ export default function App() {
       if (!automation?.workbook) throw new Error('请先导入 Excel 或新增单号');
       const payload = await apiRequest<{ run: { total: number; success: number; failed: number; skipped: number }; dashboard: DashboardData; automation: AutomationStatus }>('/api/automation/run', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', 'x-idempotency-key': idempotencyKey('sync') },
         body: JSON.stringify(selection || {}),
       });
       setData(payload.dashboard);
@@ -655,7 +682,7 @@ export default function App() {
         const shipmentIds = payload.added.map((record) => `XLSX-${record.rowNumber}`);
         const runPayload = await apiRequest<{ run: { success: number }; dashboard: DashboardData; automation: AutomationStatus }>('/api/automation/run', {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: { 'content-type': 'application/json', 'x-idempotency-key': idempotencyKey('intake') },
           body: JSON.stringify({ shipmentIds }),
         });
         completed = runPayload.run.success;
@@ -816,7 +843,7 @@ export default function App() {
         </header>
 
         <div className="content">
-          {(syncing || automation?.running) && automation?.currentRun && <SyncProgress progress={automation.currentRun} />}
+          {(syncing || automation?.running) && automation?.currentRun && <SyncProgress progress={automation.currentRun} queuedRuns={automation.queuedRuns || 0} />}
           <div className={activePage === 'overview' ? '' : 'hidden-page'}>
           <section className="page-heading">
             <div><p className="eyebrow">OPERATIONS OVERVIEW</p><h1>运营总览</h1><p>集中追踪船期、靠泊与卸船动态，及时掌握异常变化。</p></div>
@@ -1035,8 +1062,10 @@ function ModulePage({ page, data, automation, authEnabled, currentUser, syncing,
   const [deletingTask, setDeletingTask] = useState('');
   const [moduleLoading, setModuleLoading] = useState(false);
   const [selectedShipments, setSelectedShipments] = useState<Set<string>>(new Set());
+  const moduleRefreshSeq = useRef(0);
 
   async function refreshModuleData() {
+    const requestId = ++moduleRefreshSeq.current;
     setModuleLoading(true);
     try {
       const requests: Promise<void>[] = [];
@@ -1048,9 +1077,13 @@ function ModulePage({ page, data, automation, authEnabled, currentUser, syncing,
         requests.push(apiRequest<SettingsView>('/api/automation/settings').then((payload) => { setSettingsView(payload); setWebhookInput(''); }));
         if (currentUser?.role === 'admin') requests.push(apiRequest<{ users: AuthManagedUser[] }>('/api/auth/users').then((payload) => setManagedUsers(payload.users || [])));
       }
-      await Promise.all(requests);
+      const results = await Promise.allSettled(requests);
+      if (requestId !== moduleRefreshSeq.current) return;
+      const failed = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (failed.length === results.length && results.length > 0) onToast('当前模块数据暂时无法加载，请稍后重试');
+      else if (failed.length) onToast(`部分模块加载失败（${failed.length} 项），已保留其他可用数据`);
     } catch {
-      onToast('模块数据加载失败');
+      onToast('当前模块数据暂时无法加载，请稍后重试');
     } finally {
       setModuleLoading(false);
     }
@@ -1277,7 +1310,7 @@ function ModulePage({ page, data, automation, authEnabled, currentUser, syncing,
     setTaskRunning(true);
     try {
       const orderedTaskIds = tasks.filter((task) => selectedTasks.has(task.id)).map((task) => task.id);
-      const payload = await apiRequest<{ runs: RunView[]; tasks: AutomationTask[]; dashboard: DashboardData; automation: AutomationStatus }>('/api/automation/tasks/run-batch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: orderedTaskIds }) });
+      const payload = await apiRequest<{ runs: RunView[]; tasks: AutomationTask[]; dashboard: DashboardData; automation: AutomationStatus }>('/api/automation/tasks/run-batch', { method: 'POST', headers: { 'content-type': 'application/json', 'x-idempotency-key': idempotencyKey('task-batch') }, body: JSON.stringify({ ids: orderedTaskIds }) });
       setTasks(payload.tasks || []);
       onToast(`已按选择顺序完成 ${payload.runs.length} 条任务`);
       await refreshModuleData();
@@ -1291,7 +1324,7 @@ function ModulePage({ page, data, automation, authEnabled, currentUser, syncing,
   async function runTask(task: AutomationTask) {
     setTaskRunning(true);
     try {
-      const payload = await apiRequest<{ tasks: AutomationTask[]; dashboard: DashboardData; automation: AutomationStatus }>(`/api/automation/tasks/${encodeURIComponent(task.id)}/run`, { method: 'POST' });
+      const payload = await apiRequest<{ tasks: AutomationTask[]; dashboard: DashboardData; automation: AutomationStatus }>(`/api/automation/tasks/${encodeURIComponent(task.id)}/run`, { method: 'POST', headers: { 'x-idempotency-key': idempotencyKey(`task-${task.id}`) } });
       setTasks(payload.tasks || []);
       onToast(`任务“${task.name}”已完成`);
       await refreshModuleData();
@@ -1492,7 +1525,7 @@ function SourcePill({ source }: { source: CarrierSource }) {
   return <div className="source-pill"><span className="source-color" style={{ background: source.color }} /><div><strong>{carrierLabel(source.code, source.name)}</strong><span>{source.recordCount} 条 · {source.status === 'online' ? '真实查询成功' : source.status === 'warning' ? '官网返回异常' : '等待本次真实查询'}</span></div><span className={`source-status ${source.status}`} /></div>;
 }
 
-function SyncProgress({ progress }: { progress: NonNullable<AutomationStatus['currentRun']> }) {
+function SyncProgress({ progress, queuedRuns }: { progress: NonNullable<AutomationStatus['currentRun']>; queuedRuns: number }) {
   const percent = progress.total ? Math.min(100, Math.round((progress.completed / progress.total) * 100)) : 0;
   const phaseLabel = {
     preparing: '准备查询数据',
@@ -1503,7 +1536,7 @@ function SyncProgress({ progress }: { progress: NonNullable<AutomationStatus['cu
   return <section className="sync-progress" aria-live="polite">
     <div className="sync-progress-head"><div><strong>{phaseLabel}</strong><span>任务 {progress.id} · {progress.completed} / {progress.total} 条已处理</span></div><strong>{percent}%</strong></div>
     <div className="sync-progress-track"><span style={{ width: `${percent}%` }} /></div>
-    <div className="sync-progress-foot"><span>成功 {progress.success}</span><span>失败 {progress.failed}</span><span>跳过 {progress.skipped}</span><span className="sync-current">{progress.currentBills.length ? `当前：${progress.currentBills.slice(0, 3).map((item) => `${item.carrier} ${item.billNo}`).join('、')}${progress.currentBills.length > 3 ? '…' : ''}` : '正在切换下一条'}</span></div>
+    <div className="sync-progress-foot"><span>成功 {progress.success}</span><span>失败 {progress.failed}</span><span>跳过 {progress.skipped}</span>{queuedRuns > 0 && <span>排队 {queuedRuns}</span>}<span className="sync-current">{progress.currentBills.length ? `当前：${progress.currentBills.slice(0, 3).map((item) => `${item.carrier} ${item.billNo}`).join('、')}${progress.currentBills.length > 3 ? '…' : ''}` : '正在切换下一条'}</span></div>
   </section>;
 }
 

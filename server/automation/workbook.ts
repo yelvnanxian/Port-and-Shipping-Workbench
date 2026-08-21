@@ -49,8 +49,12 @@ function asManualMark(value: string): ManualMark {
 async function normalizeNamespacePrefixes(filePath: string) {
   const input = await fs.readFile(filePath);
   const zip = await JSZip.loadAsync(input);
+  const entries = Object.values(zip.files);
+  if (entries.length > 5_000) throw new Error('Excel 压缩包文件数量异常，已拒绝导入');
+  const uncompressedSize = entries.reduce((total, entry) => total + Number((entry as typeof entry & { _data?: { uncompressedSize?: number } })._data?.uncompressedSize || 0), 0);
+  if (uncompressedSize > 100 * 1024 * 1024) throw new Error('Excel 解压后体积超过 100MB，已拒绝导入');
   let changed = false;
-  for (const entry of Object.values(zip.files)) {
+  for (const entry of entries) {
     if (entry.dir || !(entry.name.endsWith('.xml') || entry.name.endsWith('.rels'))) continue;
     const xml = await entry.async('string');
     const normalized = xml
@@ -97,14 +101,23 @@ export class WorkbookStore {
 
   async install(uploadedPath: string) {
     await this.initialize();
-    if (await this.exists()) await this.backup('上传替换');
-    await normalizeNamespacePrefixes(uploadedPath);
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.readFile(uploadedPath);
-    this.validate(workbook);
-    await fs.copyFile(uploadedPath, this.currentPath);
-    await fs.rm(uploadedPath, { force: true });
-    return this.metadata();
+    try {
+      const stat = await fs.stat(uploadedPath);
+      if (stat.size <= 0 || stat.size > 20 * 1024 * 1024) throw new Error('Excel 文件大小必须在 1B 至 20MB 之间');
+      const magic = await fs.open(uploadedPath, 'r');
+      const header = Buffer.alloc(4);
+      await magic.read(header, 0, 4, 0).finally(() => magic.close().catch(() => undefined));
+      if (header[0] !== 0x50 || header[1] !== 0x4b) throw new Error('上传内容不是有效的 .xlsx 文件');
+      if (await this.exists()) await this.backup('上传替换');
+      await normalizeNamespacePrefixes(uploadedPath);
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.readFile(uploadedPath);
+      this.validate(workbook);
+      await fs.copyFile(uploadedPath, this.currentPath);
+      return this.metadata();
+    } finally {
+      await fs.rm(uploadedPath, { force: true }).catch(() => undefined);
+    }
   }
 
   async backup(reason = '自动更新') {
@@ -134,7 +147,7 @@ export class WorkbookStore {
     const hadManualMark = Array.isArray(headerValues)
       && headerValues.some((value) => String(value || '').trim() === '人工标记');
     const headerMap = this.validate(workbook);
-    if (!hadManualMark) await workbook.xlsx.writeFile(this.currentPath);
+    if (!hadManualMark) await this.save(workbook);
     return { workbook, sheet: workbook.worksheets[0], headerMap };
   }
 
@@ -214,7 +227,14 @@ export class WorkbookStore {
   }
 
   async save(workbook: ExcelJS.Workbook) {
-    await workbook.xlsx.writeFile(this.currentPath);
+    await this.initialize();
+    const temporaryPath = `${this.currentPath}.tmp-${process.pid}-${Date.now()}`;
+    try {
+      await workbook.xlsx.writeFile(temporaryPath);
+      await fs.rename(temporaryPath, this.currentPath);
+    } finally {
+      await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+    }
   }
 
   async metadata() {

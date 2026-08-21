@@ -1,16 +1,21 @@
-.verification-backdrop {
+.verification-notice {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
   z-index: 80;
-  align-items: flex-start;
-  padding-top: 12vh;
+  width: min(480px, calc(100vw - 36px));
+  pointer-events: none;
 }
 
 .verification-modal {
-  width: min(480px, calc(100vw - 32px));
+  width: 100%;
   padding: 28px;
   border: 1px solid rgba(196, 117, 40, .28);
   border-radius: 18px;
   background: #fffdf8;
   box-shadow: 0 24px 70px rgba(23, 37, 43, .22);
+  pointer-events: auto;
+  animation: verificationNoticeIn .2s ease;
 }
 
 .verification-modal-icon {
@@ -73,4 +78,9 @@
   gap: 10px;
   justify-content: flex-end;
   margin-bottom: 12px;
+}
+
+@keyframes verificationNoticeIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
 }

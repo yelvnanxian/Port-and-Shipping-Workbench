@@ -37,6 +37,7 @@ export function startScheduler(engine: AutomationEngine): ScheduledTask[] {
           try {
             await engine.runTask(task.id);
           } catch (error) {
+            executedTaskKeys.delete(taskKey);
             console.error(`Custom scheduled task ${task.id} failed:`, error);
           }
         }

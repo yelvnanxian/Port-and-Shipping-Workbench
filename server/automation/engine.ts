@@ -65,12 +65,31 @@ function manualMark(value: unknown): ManualMark {
   throw new Error('人工标记不合法');
 }
 
+async function writeJsonAtomic(filePath: string, value: unknown) {
+  const temporaryPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    await fs.writeFile(temporaryPath, JSON.stringify(value, null, 2), { mode: 0o600 });
+    await fs.rename(temporaryPath, filePath);
+  } finally {
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+}
+
 export function evidencePathFromNote(note: string) {
   return note.match(/(?:^|；)成功证据=(\/api\/browser-evidence\/[^；\s]+)/i)?.[1] || '';
 }
 
 export class AutomationEngine {
   private running = false;
+  private processingQueue = false;
+  private readonly runQueue: Array<{
+    reason: RunSummary['reason'];
+    selection?: { carrierCodes?: string[]; shipmentIds?: string[] };
+    resolve: (summary: RunSummary) => void;
+    reject: (error: unknown) => void;
+  }> = [];
+  private readonly idempotentRuns = new Map<string, { createdAt: number; promise: Promise<RunSummary> }>();
+  private readonly idempotentTaskRuns = new Map<string, { createdAt: number; promise: Promise<RunSummary> }>();
   private currentRun: RunProgress | null = null;
   readonly store: WorkbookStore;
   readonly runLogPath: string;
@@ -90,6 +109,10 @@ export class AutomationEngine {
 
   get isRunning() {
     return this.running;
+  }
+
+  get queuedRuns() {
+    return this.runQueue.length;
   }
 
   private provider(settings: AutomationSettings): TrackingProvider {
@@ -184,7 +207,7 @@ export class AutomationEngine {
     const runs = await this.listRuns();
     const kept = runs.filter((run) => !requested.has(run.id));
     await this.store.initialize();
-    await fs.writeFile(this.runLogPath, JSON.stringify(kept, null, 2));
+    await writeJsonAtomic(this.runLogPath, kept);
     return kept;
   }
 
@@ -205,7 +228,7 @@ export class AutomationEngine {
 
   private async saveTasks(tasks: AutomationTask[]) {
     await this.store.initialize();
-    await fs.writeFile(this.tasksPath, JSON.stringify(tasks, null, 2));
+    await writeJsonAtomic(this.tasksPath, tasks);
     if (this.database) {
       await this.database.transaction(async (client) => {
         await client.query('DELETE FROM automation_tasks');
@@ -222,9 +245,11 @@ export class AutomationEngine {
   async createTask(input: { name: string; scope: AutomationTaskScope; carrierCodes?: string[]; shipmentIds?: string[]; scheduleTime?: string | null }) {
     const name = input.name.trim();
     if (!name) throw new Error('任务名称不能为空');
+    if (name.length > 80) throw new Error('任务名称不能超过 80 个字符');
     if (!['all', 'carrier', 'shipment'].includes(input.scope)) throw new Error('任务范围不合法');
     const carrierCodes = [...new Set((input.carrierCodes || []).map((code) => code.trim().toUpperCase()).filter(Boolean))];
     const shipmentIds = [...new Set((input.shipmentIds || []).map((id) => id.trim()).filter(Boolean))];
+    if (carrierCodes.length > 15 || shipmentIds.length > 200) throw new Error('任务选择数量超过限制');
     const scheduleTime = input.scheduleTime?.trim() || null;
     if (scheduleTime && !/^([01]\d|2[0-3]):[0-5]\d$/.test(scheduleTime)) throw new Error('任务时间必须是 HH:mm 格式');
     if (input.scope === 'carrier' && !carrierCodes.length) throw new Error('请选择至少一个船司');
@@ -270,6 +295,10 @@ export class AutomationEngine {
     if (this.running) throw new Error('自动更新正在执行，请稍后再进行人工补录');
     const billNo = input.billNo.trim().toUpperCase();
     if (!billNo) throw new Error('提单号不能为空');
+    if (billNo.length > 64) throw new Error('提单号不能超过 64 个字符');
+    if ((input.containerNo || '').length > 32) throw new Error('柜号不能超过 32 个字符');
+    if ((input.carrierHint || '').length > 40) throw new Error('船司备注不能超过 40 个字符');
+    if ((input.note || '').length > 1000) throw new Error('备注不能超过 1000 个字符');
     const arrivalTime = manualTime(input.arrivalTime);
     const dischargeTime = manualTime(input.dischargeTime);
     const vesselState = manualState(input.vesselState);
@@ -313,6 +342,7 @@ export class AutomationEngine {
     const arrivalTime = manualTime(input.arrivalTime);
     const dischargeTime = manualTime(input.dischargeTime);
     const vesselState = manualState(input.vesselState);
+    if ((input.note || '').length > 1000) throw new Error('备注不能超过 1000 个字符');
     const opened = await this.store.open();
     const records = this.store.readRecords(opened.sheet, opened.headerMap);
     const record = records.find((item) => item.rowNumber === rowNumber);
@@ -378,7 +408,7 @@ export class AutomationEngine {
       return normalized;
     } catch {
       await this.store.initialize();
-      await fs.writeFile(this.settingsPath, JSON.stringify(fallback, null, 2));
+      await writeJsonAtomic(this.settingsPath, fallback);
       if (this.database) await this.saveSettings(fallback);
       return fallback;
     }
@@ -386,7 +416,7 @@ export class AutomationEngine {
 
   private async saveSettings(settings: AutomationSettings) {
     await this.store.initialize();
-    await fs.writeFile(this.settingsPath, JSON.stringify(settings, null, 2));
+      await writeJsonAtomic(this.settingsPath, settings);
     if (this.database) {
       await this.database.query(
         `INSERT INTO automation_settings (id, payload, updated_at) VALUES (1, $1::jsonb, NOW())
@@ -418,14 +448,14 @@ export class AutomationEngine {
       );
       await this.database.query(`DELETE FROM automation_runs WHERE id NOT IN (SELECT id FROM automation_runs ORDER BY finished_at DESC LIMIT 30)`);
       const runs = await this.listRuns();
-      await fs.writeFile(this.runLogPath, JSON.stringify(runs, null, 2));
+      await writeJsonAtomic(this.runLogPath, runs);
       return;
     }
     const runs = await this.listRuns();
-    await fs.writeFile(this.runLogPath, JSON.stringify([summary, ...runs].slice(0, 30), null, 2));
+    await writeJsonAtomic(this.runLogPath, [summary, ...runs].slice(0, 30));
   }
 
-  async run(reason: RunSummary['reason'], selection?: { carrierCodes?: string[]; shipmentIds?: string[] }): Promise<RunSummary> {
+  private async executeRun(reason: RunSummary['reason'], selection?: { carrierCodes?: string[]; shipmentIds?: string[] }): Promise<RunSummary> {
     if (this.running) throw new Error('已有更新任务正在执行');
     this.running = true;
     const startedAt = new Date();
@@ -638,7 +668,49 @@ export class AutomationEngine {
     }
   }
 
-  async runTask(id: string) {
+  /**
+   * 所有入口统一进入单进程队列。这样多个用户同时点击时会等待前一个任务完成，
+   * 而不会互相覆盖 Excel、浏览器上下文或运行记录。
+   */
+  async run(
+    reason: RunSummary['reason'],
+    selection?: { carrierCodes?: string[]; shipmentIds?: string[] },
+    idempotencyKey?: string,
+  ): Promise<RunSummary> {
+    const key = idempotencyKey?.trim();
+    if (key) {
+      const existing = this.idempotentRuns.get(key);
+      if (existing && Date.now() - existing.createdAt < 10 * 60 * 1000) return existing.promise;
+      for (const [storedKey, stored] of this.idempotentRuns) {
+        if (Date.now() - stored.createdAt >= 10 * 60 * 1000) this.idempotentRuns.delete(storedKey);
+      }
+    }
+    const promise = new Promise<RunSummary>((resolve, reject) => {
+      this.runQueue.push({ reason, selection, resolve, reject });
+      void this.processRunQueue();
+    });
+    if (key) this.idempotentRuns.set(key, { createdAt: Date.now(), promise });
+    return promise;
+  }
+
+  private async processRunQueue() {
+    if (this.processingQueue) return;
+    this.processingQueue = true;
+    try {
+      while (this.runQueue.length) {
+        const next = this.runQueue.shift()!;
+        try {
+          next.resolve(await this.executeRun(next.reason, next.selection));
+        } catch (error) {
+          next.reject(error);
+        }
+      }
+    } finally {
+      this.processingQueue = false;
+    }
+  }
+
+  private async executeTask(id: string) {
     const task = (await this.listTasks()).find((item) => item.id === id);
     if (!task) throw new Error('自动化任务不存在');
     if (!task.enabled) throw new Error('自动化任务已停用');
@@ -657,12 +729,24 @@ export class AutomationEngine {
     return run;
   }
 
+  async runTask(id: string, idempotencyKey?: string) {
+    const key = idempotencyKey?.trim();
+    if (!key) return this.executeTask(id);
+    const storedKey = `${id}:${key}`;
+    const existing = this.idempotentTaskRuns.get(storedKey);
+    if (existing && Date.now() - existing.createdAt < 10 * 60 * 1000) return existing.promise;
+    const promise = this.executeTask(id);
+    this.idempotentTaskRuns.set(storedKey, { createdAt: Date.now(), promise });
+    return promise;
+  }
+
   async status() {
     const workbook = await this.store.metadata();
     const runs = await this.listRuns();
     const settings = await this.settings();
     return {
       running: this.running,
+      queuedRuns: this.runQueue.length,
       currentRun: this.currentRun ? { ...this.currentRun, currentBills: [...this.currentRun.currentBills] } : null,
       mode: 'live' as const,
       enabled: settings.enabled,
