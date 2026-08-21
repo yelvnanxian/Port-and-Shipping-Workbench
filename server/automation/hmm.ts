@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
 import { browserExecutablePath } from './browser.js';
+import type { BrowserVerificationCallbacks } from './browser.js';
 import { classifyTrackingError, trackingError } from './errors.js';
 import { legacyStatePath, sourceEvidenceDirectory, sourceEvidenceUrl, sourceStatePath } from './source-storage.js';
 import type { TrackingProvider } from './tracker.js';
@@ -80,6 +81,45 @@ function localTime(value: string | undefined) {
   return value ? `${value}（官网当地时间）` : null;
 }
 
+function verificationText(text: string) {
+  return /access to this site has been limited|access denied|security check|captcha|verify you are human|challenge|验证码|安全验证|被阻止/i.test(text);
+}
+
+function humanVerificationEnabled() {
+  return process.env.HMM_BROWSER_HEADLESS !== 'true' && process.env.BROWSER_HUMAN_VERIFY !== 'false';
+}
+
+function humanVerificationTimeout() {
+  const configured = Number(process.env.BROWSER_HUMAN_VERIFY_TIMEOUT_MS || 180_000);
+  return Number.isFinite(configured) && configured >= 10_000 ? configured : 180_000;
+}
+
+async function waitForManualVerification(page: Page, input: TrackingQuery, callbacks?: BrowserVerificationCallbacks) {
+  let text = await page.locator('body').innerText().catch(() => '');
+  if (!verificationText(text)) return;
+  if (!humanVerificationEnabled()) {
+    throw trackingError('验证码或风控', '韩新海运官网需要人工验证；请将 HMM_BROWSER_HEADLESS=false 后重试');
+  }
+  callbacks?.onRequired?.({
+    carrier: input.rule.name,
+    carrierCode: input.rule.code,
+    billNo: input.originalBillNo,
+    containerNo: input.containerNo,
+    sourceUrl: page.url() || HMM_SOURCE,
+  });
+  const deadline = Date.now() + humanVerificationTimeout();
+  while (Date.now() < deadline) {
+    if (callbacks?.shouldSkip?.()) throw trackingError('验证码或风控', '韩新海运当前记录已按用户指令跳过人工验证');
+    await page.waitForTimeout(1_000);
+    text = await page.locator('body').innerText().catch(() => '');
+    if (!verificationText(text)) {
+      callbacks?.onResolved?.();
+      return;
+    }
+  }
+  throw trackingError('验证码或风控', '韩新海运人工验证等待超时，请完成验证后重新执行');
+}
+
 export function parseHmmTrackingHtml(html: string, expectedBillNo: string, expectedContainerNo = ''): TrackingResult {
   const bodyText = plainText(html);
   if (/access to this site has been limited|access denied|security check|captcha|verify you are human/i.test(bodyText)) {
@@ -114,6 +154,7 @@ export function parseHmmTrackingHtml(html: string, expectedBillNo: string, expec
   }
 
   const latest = events[0];
+  const routeLocations = events.map((event) => event.location.trim()).filter((location, index, all) => location && all.indexOf(location) === index);
   return {
     arrivalTime: null,
     arrivalTimeText,
@@ -123,6 +164,7 @@ export function parseHmmTrackingHtml(html: string, expectedBillNo: string, expec
     dischargeTimeText,
     rawSummary: `韩新海运官网浏览器查询解析成功；官网提单=${returnedBill}；官网柜号=${returnedContainer || '未提供'}${arrivalEvent ? `；实际到港事件=${arrivalEvent.status} ${arrivalEvent.dateTime}` : scheduledArrival ? `；预计到港=${scheduledArrival.dateTime}` : ''}${dischargeEvent ? `；实际卸船事件=${dischargeEvent.status} ${dischargeEvent.dateTime}` : '；未发现实际卸船事件'}${latest ? `；最新事件=${latest.status} ${latest.dateTime}` : ''}；官网明确所有时间均为当地时间`,
     sourceUrl: HMM_SOURCE,
+    routeText: routeLocations.length > 1 ? routeLocations.join(' → ') : null,
   };
 }
 
@@ -134,6 +176,7 @@ export class HmmTrackingProvider implements TrackingProvider {
   constructor(
     private readonly dataDirectory: string,
     private readonly timeoutMs = DEFAULT_TIMEOUT_MS,
+    private readonly verificationCallbacks?: BrowserVerificationCallbacks,
   ) {}
 
   query(input: TrackingQuery): Promise<TrackingResult> {
@@ -222,7 +265,9 @@ export class HmmTrackingProvider implements TrackingProvider {
       await page.goto(HMM_SOURCE, { waitUntil: 'domcontentloaded', timeout: this.timeoutMs });
       sourceUrl = page.url();
       const initialText = await page.locator('body').innerText().catch(() => '');
-      if (/access to this site has been limited|access denied|security check/i.test(initialText)) {
+      await waitForManualVerification(page, input, this.verificationCallbacks);
+      const afterVerification = await page.locator('body').innerText().catch(() => '');
+      if (/access to this site has been limited|access denied|security check/i.test(afterVerification)) {
         throw trackingError('验证码或风控', '韩新海运官网限制了当前浏览器会话；该站必须使用有界面的真实 Chrome 会话');
       }
       await page.waitForFunction("typeof search === 'function'", undefined, { timeout: this.timeoutMs });
@@ -234,7 +279,9 @@ export class HmmTrackingProvider implements TrackingProvider {
       if (!response.ok()) throw trackingError('官网接口异常', `韩新海运官网查询返回 HTTP ${response.status()}`);
       const html = await response.text();
       await page.waitForTimeout(1_000);
-      const result = parseHmmTrackingHtml(html, billNo, input.containerNo.trim().toUpperCase());
+      await waitForManualVerification(page, input, this.verificationCallbacks);
+      const renderedHtml = await page.content().catch(() => html);
+      const result = parseHmmTrackingHtml(renderedHtml, billNo, input.containerNo.trim().toUpperCase());
       const evidencePath = await this.saveEvidence(page, input, 'success');
       return { ...result, sourceUrl, evidencePath };
     } catch (error) {

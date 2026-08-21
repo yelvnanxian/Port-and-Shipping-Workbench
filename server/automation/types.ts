@@ -110,6 +110,13 @@ export interface RunProgress {
   failed: number;
   skipped: number;
   currentBills: Array<{ billNo: string; carrier: string }>;
+  verification?: {
+    carrier: string;
+    carrierCode: string;
+    billNo: string;
+    containerNo: string;
+    sourceUrl: string;
+  };
   startedAt: string;
 }
 

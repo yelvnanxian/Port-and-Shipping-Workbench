@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { buildQueryBillNo, resolveCarrierRule } from './carriers.js';
-import { BrowserTrackingProvider, FallbackTrackingProvider } from './browser.js';
+import { BrowserTrackingProvider, FallbackTrackingProvider, type BrowserVerificationCallbacks } from './browser.js';
 import { classifyTrackingError } from './errors.js';
 import { EvergreenTrackingProvider } from './evergreen.js';
 import { MatsonTrackingProvider } from './matson.js';
@@ -75,6 +75,8 @@ export class AutomationEngine {
   readonly runLogPath: string;
   readonly settingsPath: string;
   readonly tasksPath: string;
+  private browserEvidenceProvider: BrowserTrackingProvider | null = null;
+  private verificationSkipRequested = false;
 
   constructor(store = new WorkbookStore()) {
     this.store = store;
@@ -88,12 +90,24 @@ export class AutomationEngine {
   }
 
   private provider(settings: AutomationSettings): TrackingProvider {
+    const verificationCallbacks: BrowserVerificationCallbacks = {
+      onRequired: (verification) => {
+        this.verificationSkipRequested = false;
+        if (this.currentRun) this.currentRun.verification = verification;
+      },
+      onResolved: () => {
+        if (this.currentRun) this.currentRun.verification = undefined;
+        this.verificationSkipRequested = false;
+      },
+      shouldSkip: () => this.verificationSkipRequested,
+    };
     const browser = settings.browserAutomationEnabled
-      ? new BrowserTrackingProvider(this.store.dataDirectory)
+      ? new BrowserTrackingProvider(this.store.dataDirectory, undefined, verificationCallbacks)
       : null;
+    this.browserEvidenceProvider = browser;
     const withBrowserFallback = (primary: TrackingProvider) => browser ? new FallbackTrackingProvider(primary, browser) : primary;
     const hmm = settings.browserAutomationEnabled
-      ? new HmmTrackingProvider(this.store.dataDirectory)
+      ? new HmmTrackingProvider(this.store.dataDirectory, undefined, verificationCallbacks)
       : new OfficialSiteProbeProvider();
     return new CarrierRoutingTrackingProvider(new Map<string, TrackingProvider>([
       ['OOCL', withBrowserFallback(new OoclTrackingProvider())],
@@ -105,6 +119,13 @@ export class AutomationEngine {
       ['YANGMING', withBrowserFallback(new YangmingTrackingProvider())],
       ['HMM', hmm],
     ]), withBrowserFallback(new OfficialSiteProbeProvider()));
+  }
+
+  skipVerification() {
+    if (!this.running || !this.currentRun?.verification) return false;
+    this.verificationSkipRequested = true;
+    this.currentRun.verification = undefined;
+    return true;
   }
 
   async listRuns(): Promise<RunSummary[]> {
@@ -328,6 +349,7 @@ export class AutomationEngine {
       currentBills: [],
       startedAt: startedAt.toISOString(),
     };
+    this.verificationSkipRequested = false;
     let backupPath: string | null = null;
     let provider: TrackingProvider | null = null;
     try {
@@ -337,10 +359,13 @@ export class AutomationEngine {
       const selectedCarrierCodes = selection?.carrierCodes?.length ? new Set(selection.carrierCodes.map((code) => code.toUpperCase())) : null;
       const selectedShipmentIds = selection?.shipmentIds?.length ? new Set(selection.shipmentIds) : null;
       const records = allRecords.filter((record) => {
-        if (!isQueryable(record)) return false;
         if (selectedShipmentIds) {
           const rowId = `XLSX-${record.rowNumber}`;
           if (!selectedShipmentIds.has(rowId) && !selectedShipmentIds.has(record.billNo)) return false;
+          // 显式点选更新时，不因“已到港已卸船”等历史状态跳过；仅保留已清关保护。
+          if (record.manualMark === '已清关') return false;
+        } else if (!isQueryable(record)) {
+          return false;
         }
         if (selectedCarrierCodes) {
           try {
@@ -412,7 +437,25 @@ export class AutomationEngine {
           this.currentRun?.currentBills.push(activeBill);
 
           try {
-            const { rule, result } = await trackRecord(record, rateLimitedProvider);
+            const { rule, result: primaryResult } = await trackRecord(record, rateLimitedProvider);
+            let result = primaryResult;
+            let evidenceWarning = '';
+            // 直连接口成功时仍补做一次浏览器页面采集，确保成功记录也有可复核截图和航线信息。
+            if (!result.evidencePath && this.browserEvidenceProvider) {
+              try {
+                const captured = await trackRecord(record, this.browserEvidenceProvider);
+                result = {
+                  ...result,
+                  evidencePath: captured.result.evidencePath || result.evidencePath,
+                  routeText: result.routeText || captured.result.routeText,
+                };
+                if (!result.evidencePath) evidenceWarning = '；成功页面未生成截图证据';
+              } catch (captureError) {
+                const captureFailure = classifyTrackingError(captureError);
+                evidenceWarning = `；成功页面截图采集失败（${captureFailure.category}）`;
+                console.warn(`[AutomationEngine] ${record.billNo} 成功证据采集失败：${captureFailure.reason}`);
+              }
+            }
             record.carrierHint = rule.name;
             record.arrivalTime = result.arrivalTimeText || result.arrivalTime;
             record.dischargeTime = result.dischargeTimeText || result.dischargeTime;
@@ -423,7 +466,7 @@ export class AutomationEngine {
                 : '未到港未卸船';
             record.lastUpdated = new Date();
             record.progress = '已完成';
-            record.note = `${result.arrivalKind ? `到港字段=${result.arrivalKind}；` : ''}${result.rawSummary}${result.routeText ? `；运行线路=${result.routeText}` : ''}；来源=${result.sourceUrl}${result.evidencePath ? `；成功证据=${result.evidencePath}` : ''}`;
+            record.note = `${result.arrivalKind ? `到港字段=${result.arrivalKind}；` : ''}${result.rawSummary}${result.routeText ? `；运行线路=${result.routeText}` : ''}${evidenceWarning}；来源=${result.sourceUrl}${result.evidencePath ? `；成功证据=${result.evidencePath}` : ''}`;
             success += 1;
             if (record.vesselState !== '已到港已卸船') unfinished += 1;
           } catch (error) {
@@ -492,6 +535,8 @@ export class AutomationEngine {
       } catch (error) {
         console.error('Browser provider close failed:', error instanceof Error ? error.message : error);
       }
+      this.browserEvidenceProvider = null;
+      this.verificationSkipRequested = false;
       this.running = false;
       this.currentRun = null;
     }

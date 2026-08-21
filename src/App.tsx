@@ -19,6 +19,7 @@ import {
   KeyRound,
   LayoutDashboard,
   LoaderCircle,
+  MapPin,
   Menu,
   MessageSquare,
   MoreHorizontal,
@@ -309,6 +310,29 @@ function LoginScreen({ onLogin }: { onLogin: (username: string, password: string
   return <main className="login-screen"><form className="login-card" onSubmit={submit}><div className="login-brand"><div className="avatar">A4</div><div><strong>Port Operations</strong><span>船期数据工作台</span></div></div><p className="eyebrow">SECURE ACCESS</p><h1>登录工作台</h1><p className="login-help">请输入账号密码后继续访问真实订单数据。</p><label className="setting-field"><span>用户名</span><input autoFocus value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" /></label><label className="setting-field"><span>密码</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" /></label>{error ? <div className="login-error"><CircleAlert size={15} />{error}</div> : null}<button className="primary-button login-submit" type="submit" disabled={submitting || !username.trim() || !password}>{submitting ? <LoaderCircle size={15} className="spin" /> : null}{submitting ? '登录中…' : '登录'}</button></form></main>;
 }
 
+function VerificationModal({ verification, onSkip, onContinue }: {
+  verification: NonNullable<AutomationStatus['currentRun']>['verification'];
+  onSkip: () => Promise<void>;
+  onContinue: () => void;
+}) {
+  if (!verification) return null;
+  return <div className="modal-backdrop verification-backdrop" role="presentation">
+    <section className="verification-modal" role="dialog" aria-modal="true" aria-labelledby="verification-title">
+      <div className="verification-modal-icon"><ShieldCheckIcon /></div>
+      <p className="eyebrow">HUMAN VERIFICATION REQUIRED</p>
+      <h2 id="verification-title">需要人工通过船司验证</h2>
+      <p className="verification-modal-copy">{verification.carrier} 的官网暂时要求验证。请在自动打开的 Chrome 窗口中完成验证，系统会自动检测通过状态并继续查询。</p>
+      <div className="verification-record"><strong>{verification.billNo}</strong><span>{verification.containerNo || '未提供柜号'} · {verification.carrierCode}</span></div>
+      <div className="verification-modal-actions"><button className="secondary-button" onClick={onContinue}>我已完成验证，继续等待</button><button className="danger-button" onClick={() => void onSkip()}>跳过当前记录</button></div>
+      <small>跳过后本条会记录为失败，不会写入未经核验的时间。</small>
+    </section>
+  </div>;
+}
+
+function ShieldCheckIcon() {
+  return <span className="verification-shield">✓</span>;
+}
+
 export default function App() {
   const [auth, setAuth] = useState<AuthSession | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -349,9 +373,21 @@ export default function App() {
   const [pageSize, setPageSize] = useState(20);
   const [pageNumber, setPageNumber] = useState(1);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [verificationDismissed, setVerificationDismissed] = useState('');
   const moreFilterRef = useRef<HTMLDivElement>(null);
   const uploadInput = useRef<HTMLInputElement>(null);
   const runRequestPending = useRef(false);
+
+  const verification = automation?.currentRun?.verification;
+  const verificationKey = verification ? `${verification.carrierCode}:${verification.billNo}:${verification.containerNo}` : '';
+
+  useEffect(() => {
+    if (!verificationKey) {
+      setVerificationDismissed('');
+    } else if (verificationDismissed && verificationDismissed !== verificationKey) {
+      setVerificationDismissed('');
+    }
+  }, [verificationKey, verificationDismissed]);
 
   async function refreshSession() {
     const response = await fetch('/api/auth/session', { credentials: 'include' });
@@ -373,6 +409,17 @@ export default function App() {
     await apiRequest('/api/auth/logout', { method: 'POST' }).catch(() => undefined);
     csrfToken = '';
     setAuth((previous) => previous ? { ...previous, authenticated: false, user: null, csrfToken: '' } : previous);
+  }
+
+  async function skipVerification() {
+    try {
+      const payload = await apiRequest<{ automation: AutomationStatus }>('/api/automation/verification/skip', { method: 'POST' });
+      setAutomation(payload.automation);
+      setVerificationDismissed('');
+      setToast('已跳过当前人工验证记录，任务将继续处理后续单号');
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : '跳过验证失败');
+    }
   }
 
   function navigate(page: PageId) {
@@ -882,8 +929,9 @@ export default function App() {
       </div>}
 
       {metricView && <MetricListModal metricKey={metricView} shipments={metricLists[metricView]} syncing={syncing} onClose={() => setMetricView(null)} onExport={handleListExport} onMark={handleManualMark} onSync={(ids) => handleSync({ shipmentIds: ids })} onDelete={handleDeleteShipments} onEdit={openManualEdit} onDetail={setDetail} />}
-      {detail && <div className="drawer-backdrop" onClick={() => setDetail(null)}><aside className="detail-drawer" onClick={(event) => event.stopPropagation()}><button className="drawer-close" onClick={() => setDetail(null)}><X size={19} /></button><p className="eyebrow">SHIPMENT DETAIL</p><h2>单号追踪详情</h2><div className="drawer-carrier"><CarrierMark code={detail.carrierCode} /><div><strong>{detail.carrier}</strong><span>{detail.billNo}</span></div></div><div className="detail-grid"><DetailItem label="提单号" value={detail.billNo} /><DetailItem label="官网查询号" value={detail.verificationNo || detail.billNo} /><DetailItem label="柜号" value={detail.containerNo || '—'} /><DetailItem label="查询进度" value={<ProgressBadge shipment={detail} />} /><DetailItem label="船只状态" value={<VesselStateBadge shipment={detail} />} /><DetailItem label="人工标记" value={<ManualMarkSelect value={detail.manualMark} onChange={(value) => handleManualMark(detail.id, value)} disabled={syncing} />} /></div><div className="timeline"><TimelineItem label="到港时间 ATA / ETA" value={formatDateTime(detail.eta)} active={Boolean(detail.eta)} /><TimelineItem label="卸船时间" value={formatDateTime(detail.dischargeTime)} active={Boolean(detail.dischargeTime)} last /></div>{detail.route && <div className="route-card"><Ship size={17} /><div><strong>官网运行线路</strong><span>{detail.route}</span></div></div>}{detail.note && <div className="detail-alert"><CircleAlert size={17} /><div><strong>查询备注</strong><span>{detail.note}</span></div></div>}<div className="verification-card"><div><Globe2 size={17} /><div><strong>官网真实性核验</strong><span>官网复核会复制船司实际接受的查询号；森罗会自动去除 SMLM 前缀。部分官网会要求重新查询或接受 Cookie。</span></div></div><VerificationActions shipment={detail} /></div><div className="drawer-actions"><button className="secondary-button" onClick={() => openManualEdit(detail)}><Pencil size={15} />人工修改时间与状态</button></div><div className="drawer-meta">数据更新于 {formatDateTime(detail.lastUpdated)}</div></aside></div>}
+      {detail && <div className="drawer-backdrop" onClick={() => setDetail(null)}><aside className="detail-drawer" onClick={(event) => event.stopPropagation()}><button className="drawer-close" onClick={() => setDetail(null)}><X size={19} /></button><p className="eyebrow">SHIPMENT DETAIL</p><h2>单号追踪详情</h2><div className="drawer-carrier"><CarrierMark code={detail.carrierCode} /><div><strong>{detail.carrier}</strong><span>{detail.billNo}</span></div></div><div className="detail-grid"><DetailItem label="提单号" value={detail.billNo} /><DetailItem label="官网查询号" value={detail.verificationNo || detail.billNo} /><DetailItem label="柜号" value={detail.containerNo || '—'} /><DetailItem label="查询进度" value={<ProgressBadge shipment={detail} />} /><DetailItem label="船只状态" value={<VesselStateBadge shipment={detail} />} /><DetailItem label="人工标记" value={<ManualMarkSelect value={detail.manualMark} onChange={(value) => handleManualMark(detail.id, value)} disabled={syncing} />} /></div><div className="timeline"><TimelineItem label="到港时间 ATA / ETA" value={formatDateTime(detail.eta)} active={Boolean(detail.eta)} /><TimelineItem label="卸船时间" value={formatDateTime(detail.dischargeTime)} active={Boolean(detail.dischargeTime)} last /></div>{detail.route && <RouteTimeline route={detail.route} />}{detail.note && <div className="detail-alert"><CircleAlert size={17} /><div><strong>查询备注</strong><span>{detail.note}</span></div></div>}<div className="verification-card"><div><Globe2 size={17} /><div><strong>官网真实性核验</strong><span>官网复核会复制船司实际接受的查询号；森罗会自动去除 SMLM 前缀。部分官网会要求重新查询或接受 Cookie。</span></div></div><VerificationActions shipment={detail} /></div><div className="drawer-actions"><button className="secondary-button" onClick={() => openManualEdit(detail)}><Pencil size={15} />人工修改时间与状态</button></div><div className="drawer-meta">数据更新于 {formatDateTime(detail.lastUpdated)}</div></aside></div>}
       {manualForm && <ManualFormModal form={manualForm} saving={manualSaving} onChange={setManualForm} onClose={() => !manualSaving && setManualForm(null)} onSave={saveManualForm} />}
+      {verification && verificationKey !== verificationDismissed && <VerificationModal verification={verification} onSkip={skipVerification} onContinue={() => setVerificationDismissed(verificationKey)} />}
       {toast && <div className="toast"><Check size={17} />{toast}</div>}
     </div>
   );
@@ -1358,7 +1406,15 @@ function ModulePage({ page, data, automation, authEnabled, currentUser, syncing,
 }
 
 function RunHistory({ runs, selected, onToggle, onDelete, onDeleteSelected }: { runs: RunView[]; selected: Set<string>; onToggle: (id: string) => void; onDelete: (id: string) => void; onDeleteSelected: () => Promise<void> }) {
-  return <section className="module-card"><div className="module-card-header"><div><strong>任务运行记录</strong><span>最近 {runs.length} 次 · 失败记录包含船司、提单号、柜号、官网原因和浏览器证据</span></div>{selected.size > 0 && <button className="danger-button" onClick={onDeleteSelected}><Trash2 size={13} />批量删除 ({selected.size})</button>}</div><div className="run-list">{runs.length ? runs.map((run) => <article className="run-entry" key={run.id}><div className="run-summary"><input type="checkbox" checked={selected.has(run.id)} onChange={() => onToggle(run.id)} /><span className={`run-state ${run.failed ? 'failed' : 'success'}`}>{run.failed ? <CircleAlert size={15} /> : <Check size={15} />}</span><div className="run-main"><strong>{run.reason === 'scheduled' ? '定时更新' : '手动更新'}</strong><span>{run.id} · {fullDate(run.finishedAt)}</span></div><div className="run-stats"><span>查询 <strong>{run.total}</strong></span><span>成功 <strong>{run.success}</strong></span><span>未完成 <strong>{run.unfinished}</strong></span><span className={run.failed ? 'danger-text' : ''}>失败 <strong>{run.failed}</strong></span></div><span className={`notify-state ${run.notification}`}>{run.notification === 'sent' ? '通知已发送' : run.notification === 'failed' ? '通知失败' : '未配置通知'}</span><button className="row-action danger-action" title="删除运行记录" onClick={() => onDelete(run.id)}><Trash2 size={14} /></button></div>{run.failedDetails?.length ? <div className="run-failures">{run.failedDetails.map((detail) => <div key={`${run.id}-${detail.billNo}-${detail.containerNo}`}><span className="failure-category">{detail.category}</span><strong>{detail.carrier} · {detail.billNo}</strong><span>柜号：{detail.containerNo || '未提供'}</span><p>{detail.reason}</p><a className="evidence-link" href={detail.sourceUrl} target="_blank" rel="noreferrer" onClick={() => navigator.clipboard?.writeText(detail.billNo).catch(() => undefined)}>打开官网重试<ExternalLink size={12} /></a>{detail.evidencePath ? <a className="evidence-link" href={detail.evidencePath} target="_blank" rel="noreferrer">查看浏览器失败截图<ExternalLink size={12} /></a> : null}</div>)}</div> : null}</article>) : <div className="empty-module">尚无运行记录。</div>}</div></section>;
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  function toggleExpanded(id: string) {
+    setExpanded((previous) => {
+      const next = new Set(previous);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+  return <section className="module-card"><div className="module-card-header"><div><strong>任务运行记录</strong><span>最近 {runs.length} 次 · 详细失败信息默认折叠，点击展开查看</span></div>{selected.size > 0 && <button className="danger-button" onClick={onDeleteSelected}><Trash2 size={13} />批量删除 ({selected.size})</button>}</div><div className="run-list">{runs.length ? runs.map((run) => { const isExpanded = expanded.has(run.id); return <article className="run-entry" key={run.id}><div className="run-summary"><input type="checkbox" checked={selected.has(run.id)} onChange={() => onToggle(run.id)} /><span className={`run-state ${run.failed ? 'failed' : 'success'}`}>{run.failed ? <CircleAlert size={15} /> : <Check size={15} />}</span><div className="run-main"><strong>{run.reason === 'scheduled' ? '定时更新' : '手动更新'}</strong><span>{run.id} · {fullDate(run.finishedAt)}</span></div><div className="run-stats"><span>查询 <strong>{run.total}</strong></span><span>成功 <strong>{run.success}</strong></span><span>未完成 <strong>{run.unfinished}</strong></span><span className={run.failed ? 'danger-text' : ''}>失败 <strong>{run.failed}</strong></span></div><span className={`notify-state ${run.notification}`}>{run.notification === 'sent' ? '通知已发送' : run.notification === 'failed' ? '通知失败' : '未配置通知'}</span><button className="run-expand" onClick={() => toggleExpanded(run.id)} aria-expanded={isExpanded}>{isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}{isExpanded ? '收起详情' : '展开详情'}</button><button className="row-action danger-action" title="删除运行记录" onClick={() => onDelete(run.id)}><Trash2 size={14} /></button></div>{isExpanded && <div className="run-failures">{run.failedDetails?.length ? run.failedDetails.map((detail) => <div key={`${run.id}-${detail.billNo}-${detail.containerNo}`}><span className="failure-category">{detail.category}</span><strong>{detail.carrier} · {detail.billNo}</strong><span>柜号：{detail.containerNo || '未提供'}</span><p>{detail.reason}</p><a className="evidence-link" href={detail.sourceUrl} target="_blank" rel="noreferrer" onClick={() => navigator.clipboard?.writeText(detail.billNo).catch(() => undefined)}>打开官网重试<ExternalLink size={12} /></a>{detail.evidencePath ? <a className="evidence-link" href={detail.evidencePath} target="_blank" rel="noreferrer">查看浏览器失败截图<ExternalLink size={12} /></a> : null}</div>) : <div className="run-detail-empty">本次运行没有详细失败信息。</div>}</div>}</article>; }) : <div className="empty-module">尚无运行记录。</div>}</div></section>;
 }
 
 function ManualMarkSelect({ value, onChange, disabled = false }: { value: ManualMark; onChange: (value: ManualMark) => void | Promise<void>; disabled?: boolean }) {
@@ -1506,4 +1562,9 @@ function DetailItem({ label, value }: { label: string; value: React.ReactNode })
 
 function TimelineItem({ label, value, active = false, last = false }: { label: string; value: React.ReactNode; active?: boolean; last?: boolean }) {
   return <div className={`timeline-item ${active ? 'active' : ''} ${last ? 'last' : ''}`}><span className="timeline-dot" /><div><span>{label}</span><strong>{value}</strong></div></div>;
+}
+
+function RouteTimeline({ route }: { route: string }) {
+  const stops = route.split(/\s*→\s*/).map((item) => item.trim()).filter(Boolean);
+  return <section className="route-timeline"><div className="route-timeline-heading"><MapPin size={17} /><div><strong>官网运行线路</strong><span>按船司官网轨迹整理</span></div></div><div className="route-stops">{stops.map((stop, index) => <div className={`route-stop ${index === stops.length - 1 ? 'last' : ''}`} key={`${stop}-${index}`}><span className="route-stop-dot"><MapPin size={11} /></span><div><strong>{stop}</strong>{index < stops.length - 1 && <span>下一站</span>}</div></div>)}</div></section>;
 }

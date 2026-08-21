@@ -98,6 +98,31 @@ test('automation run completes when every workbook record is skipped', async () 
   }
 });
 
+test('显式更新已完成记录时不会被历史状态过滤', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-explicit-refresh-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([{ billNo: 'HDUJGLA26BZ04040', containerNo: 'SEKU6633329' }]);
+    const opened = await store.open();
+    const [record] = store.readRecords(opened.sheet, opened.headerMap);
+    record.vesselState = '已到港已卸船';
+    record.progress = '已完成';
+    store.writeRecord(opened.sheet, opened.headerMap, record);
+    await store.save(opened.workbook);
+    const engine = new AutomationEngine(store);
+    Object.defineProperty(engine, 'provider', { value: () => ({
+      async query(input: { rule: { url: string } }) {
+        return { arrivalTime: new Date('2026-08-20T00:00:00.000Z'), arrivalKind: 'ATA' as const, arrived: true, dischargeTime: null, rawSummary: '显式更新结果', sourceUrl: input.rule.url };
+      },
+    }) });
+    const summary = await engine.run('manual', { shipmentIds: [`XLSX-${record.rowNumber}`] });
+    assert.equal(summary.total, 1);
+    assert.equal(summary.success, 1);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('自定义任务按船司范围运行并支持删除', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-task-'));
   try {

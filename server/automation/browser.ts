@@ -9,7 +9,8 @@ import { probeUrl } from './official-probe.js';
 import { parseZimTrackingText } from './zim.js';
 import { legacyStatePath, sourceEvidenceDirectory, sourceEvidenceUrl, sourceStatePath } from './source-storage.js';
 import type { TrackingProvider } from './tracker.js';
-import type { ArrivalKind, TrackingQuery, TrackingResult } from './types.js';
+import type { ArrivalKind, TrackingQuery, TrackingResult, RunProgress } from './types.js';
+import { parseCarrierRoute } from './routes/index.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const RESULT_TIMEOUT_MS = 20_000;
@@ -189,6 +190,20 @@ function findLabeledDateText(lines: string[], label: RegExp, excluded?: RegExp, 
   return null;
 }
 
+function routeFromRenderedLines(lines: string[]) {
+  const locations = lines
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter((line) => /^[A-Z][A-Z0-9 .,'-]{2,},\s*[A-Z][A-Z0-9 .,'-]{2,}$/.test(line) || /^(?:[\u4e00-\u9fff]{2,}[，,]){1,}[\u4e00-\u9fffA-Za-z0-9 .-]{2,}$/.test(line))
+    .filter((line, index, all) => all.indexOf(line) === index);
+  return locations.length >= 2 ? locations.join(' → ') : null;
+}
+
+export interface BrowserVerificationCallbacks {
+  onRequired?: (verification: NonNullable<RunProgress['verification']>) => void;
+  onResolved?: () => void;
+  shouldSkip?: () => boolean;
+}
+
 export function parseRenderedTrackingText(text: string, input: TrackingQuery): TrackingResult {
   const compactText = text.replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').trim();
   const queryValue = input.queryType === 'container' ? input.containerNo : input.queryBillNo;
@@ -208,6 +223,7 @@ export function parseRenderedTrackingText(text: string, input: TrackingQuery): T
   }
 
   const lines = compactText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const routeText = parseCarrierRoute({ carrierCode: input.rule.code, text: compactText, lines }) || routeFromRenderedLines(lines);
   const preferDestinationEvent = input.rule.code === 'COSCO';
   const actualArrival = findLabeledDate(lines, /\bATA\b|actual(?: time of)? arrival|actual arrival|实际到港|实际抵达/i, /estimated|expected|预计/i, preferDestinationEvent);
   const estimatedArrival = findLabeledDate(lines, /\bETA\b|estimated(?: time of)? arrival|expected arrival|预计到港|预计抵达/i, undefined, preferDestinationEvent);
@@ -236,7 +252,8 @@ export function parseRenderedTrackingText(text: string, input: TrackingQuery): T
     arrived: Boolean(actualArrival || discharge),
     dischargeTime: dischargeTimeText ? null : discharge,
     dischargeTimeText: dischargeTimeText ? `${dischargeTimeText}（官网当地时间）` : undefined,
-    rawSummary: `${input.rule.name}浏览器模拟查询成功；页面已核对${input.queryType === 'container' ? '柜号' : '提单号'}=${queryValue}${discharge ? '；已发现实际卸船字段' : ''}${preserveLocalTime ? '；官网时间按港口当地时间原样保留' : ''}`,
+    rawSummary: `${input.rule.name}浏览器模拟查询成功；页面已核对${input.queryType === 'container' ? '柜号' : '提单号'}=${queryValue}${discharge ? '；已发现实际卸船字段' : ''}${routeText ? `；已识别运行线路=${routeText}` : ''}${preserveLocalTime ? '；官网时间按港口当地时间原样保留' : ''}`,
+    routeText,
     sourceUrl: input.rule.url,
   };
 }
@@ -300,31 +317,42 @@ function humanVerificationTimeout() {
   return Number.isFinite(configured) && configured >= 10_000 ? configured : 180_000;
 }
 
-async function waitForManualVerification(page: Page, input: TrackingQuery) {
+async function waitForManualVerification(page: Page, input: TrackingQuery, callbacks?: BrowserVerificationCallbacks) {
   let text = await renderedPageText(page);
   if (!verificationText(text)) return false;
   if (!humanVerificationEnabled()) {
     throw trackingError('验证码或风控', `${input.rule.name}需要人工通过安全验证；请将 BROWSER_HEADLESS=false 后重试，打开的 Chrome 窗口完成验证后系统会复用本地会话`);
   }
+  callbacks?.onRequired?.({
+    carrier: input.rule.name,
+    carrierCode: input.rule.code,
+    billNo: input.originalBillNo,
+    containerNo: input.containerNo,
+    sourceUrl: page.url() || input.rule.url,
+  });
   const timeout = humanVerificationTimeout();
   console.log(`[BrowserTrackingProvider] ${input.rule.name}需要人工验证，请在打开的 Chrome 窗口完成验证；等待 ${Math.round(timeout / 1000)} 秒`);
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
+    if (callbacks?.shouldSkip?.()) {
+      throw trackingError('验证码或风控', `${input.rule.name}当前记录已按用户指令跳过人工验证`);
+    }
     await page.waitForTimeout(1_000);
     text = await renderedPageText(page);
     if (!verificationText(text)) {
       console.log(`[BrowserTrackingProvider] ${input.rule.name}人工验证已通过，继续解析官网结果`);
+      callbacks?.onResolved?.();
       return true;
     }
   }
   throw trackingError('验证码或风控', `${input.rule.name}人工验证等待超时；请完成验证后重新执行该船司查询`);
 }
 
-async function waitForCarrierReady(page: Page, input: TrackingQuery) {
+async function waitForCarrierReady(page: Page, input: TrackingQuery, callbacks?: BrowserVerificationCallbacks) {
   const timeout = input.rule.code === 'WANHAI' ? 30_000 : 5_000;
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    await waitForManualVerification(page, input).catch((error) => { throw error; });
+    await waitForManualVerification(page, input, callbacks).catch((error) => { throw error; });
     const text = await renderedPageText(page);
     if (text.trim() || await firstVisibleInput(page)) return;
     await page.waitForTimeout(500);
@@ -460,6 +488,7 @@ export class BrowserTrackingProvider implements TrackingProvider {
   constructor(
     private readonly dataDirectory: string,
     private readonly timeoutMs = DEFAULT_TIMEOUT_MS,
+    private readonly verificationCallbacks?: BrowserVerificationCallbacks,
   ) {}
 
   query(input: TrackingQuery): Promise<TrackingResult> {
@@ -570,7 +599,7 @@ export class BrowserTrackingProvider implements TrackingProvider {
         else throw error;
       }
       sourceUrl = page.url();
-      await waitForCarrierReady(page, input);
+      await waitForCarrierReady(page, input, this.verificationCallbacks);
       const cookies = await context.cookies(sourceUrl);
       let acceptedCookies = await dismissCookieDialog(page);
       await waitForRenderedOutcome(page, queryValue, input.rule.code === 'COSCO' ? 8_000 : 1_500);
@@ -597,7 +626,7 @@ export class BrowserTrackingProvider implements TrackingProvider {
           if (input.rule.code === 'ZIM') await preventZimMapScroll(page);
         }
       }
-      await waitForManualVerification(page, input);
+      await waitForManualVerification(page, input, this.verificationCallbacks);
       if (input.rule.code === 'HAPAG') await openHapagContainerDetails(page, input);
       await waitForRenderedOutcome(page, queryValue, Math.min(this.timeoutMs, RESULT_TIMEOUT_MS));
       sourceUrl = page.url();
@@ -610,7 +639,8 @@ export class BrowserTrackingProvider implements TrackingProvider {
             ? parseHapagTrackingText(renderedText, input)
             : parseRenderedTrackingText(renderedText, input);
       const evidencePath = await this.saveEvidence(page, input, 'success');
-      return { ...result, sourceUrl, evidencePath };
+      const finalRouteText = result.routeText || parseCarrierRoute({ carrierCode: input.rule.code, text: renderedText, lines: renderedText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) }) || undefined;
+      return { ...result, sourceUrl, evidencePath, routeText: finalRouteText };
     } catch (error) {
       const failure = classifyTrackingError(error);
       sourceUrl = page.url() || sourceUrl;

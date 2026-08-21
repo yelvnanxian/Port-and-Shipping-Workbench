@@ -214,6 +214,18 @@ app.get('/api/automation', async (_req, res, next) => {
   }
 });
 
+// 当前浏览器查询遇到人机验证时，允许登录用户跳过这条记录并继续后续队列。
+// 验证通过则无需调用该接口，服务会自动检测页面状态并清除前端提示。
+app.post('/api/automation/verification/skip', async (_req, res, next) => {
+  try {
+    const skipped = engine.skipVerification();
+    if (!skipped) throw new Error('当前没有等待人工验证的查询记录');
+    res.json({ ok: true, automation: await engine.status() });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/automation/settings', async (_req, res, next) => {
   try {
     res.json(publicSettings(await engine.settings()));

@@ -26,8 +26,8 @@ export class CarrierRoutingTrackingProvider implements TrackingProvider {
 }
 
 export function mergeTrackingResults(primary: TrackingResult, secondary: TrackingResult): TrackingResult {
-  if (primary.dischargeTime && !secondary.dischargeTime) return { ...primary, rawSummary: `${primary.rawSummary}；已合并柜号查询` };
-  if (secondary.dischargeTime && !primary.dischargeTime) return { ...secondary, rawSummary: `${secondary.rawSummary}；已合并提单号查询` };
+  if (primary.dischargeTime && !secondary.dischargeTime) return { ...primary, routeText: primary.routeText || secondary.routeText || null, rawSummary: `${primary.rawSummary}；已合并柜号查询` };
+  if (secondary.dischargeTime && !primary.dischargeTime) return { ...secondary, routeText: secondary.routeText || primary.routeText || null, rawSummary: `${secondary.rawSummary}；已合并提单号查询` };
   const moreRecentArrival = [primary, secondary]
     .filter((item) => item.arrivalTime)
     .sort((a, b) => b.arrivalTime!.getTime() - a.arrivalTime!.getTime())[0];
@@ -35,6 +35,7 @@ export function mergeTrackingResults(primary: TrackingResult, secondary: Trackin
     ...(moreRecentArrival || primary),
     dischargeTime: primary.dischargeTime || secondary.dischargeTime,
     arrived: primary.arrived || secondary.arrived,
+    routeText: primary.routeText || secondary.routeText || null,
     rawSummary: `${primary.rawSummary}；${secondary.rawSummary}；提单号与柜号结果已合并`,
   };
 }
