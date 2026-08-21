@@ -385,8 +385,9 @@ app.get('/api/backups', async (_req, res, next) => {
 
 app.get('/api/backups/:name', auth.requireRole('admin'), async (req, res, next) => {
   try {
-    const filePath = engine.store.backupPath(req.params.name);
-    res.download(filePath, req.params.name);
+    const name = String(req.params.name);
+    const filePath = engine.store.backupPath(name);
+    res.download(filePath, name);
   } catch (error) {
     next(error);
   }

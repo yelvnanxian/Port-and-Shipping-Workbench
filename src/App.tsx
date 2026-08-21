@@ -353,6 +353,8 @@ export default function App() {
     const payload = await apiRequest<AuthSession>('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, password }) });
     csrfToken = payload.csrfToken || '';
     setAuth(payload);
+    await Promise.all([load(), loadAutomation()]);
+    setLoading(false);
   }
 
   async function logout() {
@@ -392,9 +394,6 @@ export default function App() {
       return undefined;
     }).catch((error) => setToast(error.message)).finally(() => { setAuthLoading(false); setLoading(false); });
   }, []);
-
-  if (authLoading) return <main className="login-screen"><div className="login-card login-loading"><LoaderCircle size={24} className="spin" /><span>正在检查登录状态…</span></div></main>;
-  if (auth?.enabled && !auth.authenticated) return <LoginScreen onLogin={login} />;
 
   useEffect(() => {
     if (automation?.running) {
@@ -722,6 +721,9 @@ export default function App() {
   const allSelected = visibleRows.length > 0 && visibleRows.every((item) => selected.has(item.id));
   const carriers = Array.from(new Set(data?.shipments.map((item) => item.carrierCode) || []));
   const successfulSources = data?.sources.filter((source) => source.status === 'online').length || 0;
+
+  if (authLoading) return <main className="login-screen"><div className="login-card login-loading"><LoaderCircle size={24} className="spin" /><span>正在检查登录状态…</span></div></main>;
+  if (auth?.enabled && !auth.authenticated) return <LoginScreen onLogin={login} />;
 
   return (
     <div className="app-shell">
