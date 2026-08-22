@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseRenderedTrackingText } from './browser.js';
+import { parseRenderedTrackingText, verificationStability } from './browser.js';
 import { classifyTrackingError } from './errors.js';
 import type { TrackingQuery } from './types.js';
 
@@ -49,6 +49,20 @@ test('浏览器网关错误归类为官网接口异常', () => {
     captured = error;
   }
   assert.equal(classifyTrackingError(captured).category, '官网接口异常');
+});
+
+test('人工验证短暂消失后重新出现时必须重新累计稳定时间', () => {
+  let state = verificationStability(0, false, 1_000, 10_000);
+  assert.equal(state.resolved, false);
+  state = verificationStability(state.clearSince, false, 7_000, 10_000);
+  assert.equal(state.resolved, false);
+  state = verificationStability(state.clearSince, true, 8_000, 10_000);
+  assert.deepEqual(state, { clearSince: 0, resolved: false });
+  state = verificationStability(state.clearSince, false, 9_000, 10_000);
+  state = verificationStability(state.clearSince, false, 18_999, 10_000);
+  assert.equal(state.resolved, false);
+  state = verificationStability(state.clearSince, false, 19_000, 10_000);
+  assert.equal(state.resolved, true);
 });
 
 test('中远多港口轨迹取最后一个目的港到港时间', () => {

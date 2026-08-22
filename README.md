@@ -115,7 +115,8 @@ WECHAT_WEBHOOK_URL=
 BROWSER_EXECUTABLE_PATH=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
 BROWSER_HEADLESS=true
 BROWSER_HUMAN_VERIFY=true
-BROWSER_HUMAN_VERIFY_TIMEOUT_MS=600000
+BROWSER_HUMAN_VERIFY_TIMEOUT_MS=180000
+BROWSER_HUMAN_VERIFY_STABLE_MS=10000
 HMM_BROWSER_HEADLESS=false
 BROWSER_HUMAN_BEHAVIOR=true
 RATE_LIMIT_REQUESTS_PER_MINUTE=10
@@ -152,7 +153,7 @@ RATE_LIMIT_REQUESTS_PER_MINUTE=10
 - 如果 Chrome 安装在其他位置，请将 `BROWSER_EXECUTABLE_PATH` 改成实际可执行文件路径。
 - `BROWSER_HEADLESS=false` 可切换为有头模式，反检测效果更好但需要图形界面；服务器环境保持 `true`。
 - `BROWSER_HUMAN_VERIFY=true` 允许万海、以星、赫伯罗特、达飞、东方海外遇到官网人机验证时暂停等待人工操作；必须同时设置 `BROWSER_HEADLESS=false`，系统会打开 Chrome 窗口并在验证通过后继续解析。
-- 如果验证页出现，直接在打开的 Chrome 窗口按官网提示完成验证，不要关闭窗口；控制台会显示“人工验证已通过”后继续等待结果区域稳定，再写入 Excel。等待时间由 `BROWSER_HUMAN_VERIFY_TIMEOUT_MS` 控制，默认 600 秒（最多 30 分钟）。无界面模式遇到验证会明确失败并提示切换有头模式，不会写入猜测数据。
+- 如果验证页出现，直接在打开的 Chrome 窗口按官网提示完成验证，不要关闭窗口。等待时间由 `BROWSER_HUMAN_VERIFY_TIMEOUT_MS` 控制，默认 180 秒；验证内容消失后还会按 `BROWSER_HUMAN_VERIFY_STABLE_MS` 连续观察 10 秒，确认官网不再自动刷新回验证页后才继续查询。无界面模式遇到验证会明确失败并提示切换有头模式，不会写入猜测数据。
 - 验证通过后的 Cookie/localStorage 会按船司保存到 `data/sources/{船司代码}/browser-state/`，后续运行只复用同一船司会话；升级时仍会兼容读取旧的 `data/browser-state/` 文件，会话失效时系统再次提示人工验证。
 - 运行过程中如果浏览器再次触发人机验证，工作台会在当前工作台右下角显示非阻塞通知，不会抢占或覆盖用户正在使用的浏览器窗口；完成 Chrome 中的验证后会自动检测，东方海外和森罗会在验证通过后重新提交查询并等待结果稳定，无法处理时可选择“跳过当前记录”，该单号会以失败原因写入运行记录，不会写入猜测时间。
 - 每条成功的浏览器查询都会保存完整页面截图到按船司隔离的证据目录，并在追踪表和单号详情中提供“采集证据”入口。路线解析按船司独立规则执行，识别到的装货港、卸货港和后续交付节点会在详情页显示为线路图。

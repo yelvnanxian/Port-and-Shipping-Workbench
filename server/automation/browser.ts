@@ -313,8 +313,19 @@ function humanVerificationEnabled() {
 }
 
 function humanVerificationTimeout() {
-  const configured = Number(process.env.BROWSER_HUMAN_VERIFY_TIMEOUT_MS || 600_000);
-  return Number.isFinite(configured) && configured >= 30_000 ? Math.min(configured, 30 * 60_000) : 600_000;
+  const configured = Number(process.env.BROWSER_HUMAN_VERIFY_TIMEOUT_MS || 180_000);
+  return Number.isFinite(configured) && configured >= 30_000 ? Math.min(configured, 30 * 60_000) : 180_000;
+}
+
+function humanVerificationStableMs() {
+  const configured = Number(process.env.BROWSER_HUMAN_VERIFY_STABLE_MS || 10_000);
+  return Number.isFinite(configured) && configured >= 3_000 ? Math.min(configured, 30_000) : 10_000;
+}
+
+export function verificationStability(clearSince: number, challengeVisible: boolean, now: number, stableMs: number) {
+  if (challengeVisible) return { clearSince: 0, resolved: false };
+  const nextClearSince = clearSince || now;
+  return { clearSince: nextClearSince, resolved: now - nextClearSince >= stableMs };
 }
 
 async function waitForManualVerification(page: Page, input: TrackingQuery, callbacks?: BrowserVerificationCallbacks) {
@@ -331,8 +342,10 @@ async function waitForManualVerification(page: Page, input: TrackingQuery, callb
     sourceUrl: page.url() || input.rule.url,
   });
   const timeout = humanVerificationTimeout();
+  const stableMs = humanVerificationStableMs();
   console.log(`[BrowserTrackingProvider] ${input.rule.name}需要人工验证，请在打开的 Chrome 窗口完成验证；等待 ${Math.round(timeout / 1000)} 秒`);
   const deadline = Date.now() + timeout;
+  let clearSince = 0;
   while (Date.now() < deadline) {
     if (page.isClosed()) throw trackingError('查询超时', `${input.rule.name}验证页面已关闭，无法继续查询`);
     if (callbacks?.shouldSkip?.()) {
@@ -340,9 +353,10 @@ async function waitForManualVerification(page: Page, input: TrackingQuery, callb
     }
     await page.waitForTimeout(1_000);
     text = await renderedPageText(page);
-    if (!verificationText(text)) {
-      console.log(`[BrowserTrackingProvider] ${input.rule.name}人工验证已通过，继续解析官网结果`);
-      callbacks?.onResolved?.();
+    const stability = verificationStability(clearSince, verificationText(text), Date.now(), stableMs);
+    clearSince = stability.clearSince;
+    if (stability.resolved) {
+      console.log(`[BrowserTrackingProvider] ${input.rule.name}验证页面已连续稳定 ${Math.round(stableMs / 1000)} 秒，继续等待查询结果`);
       return true;
     }
   }
@@ -491,10 +505,11 @@ async function waitForStableOutcome(page: Page, queryValue: string, timeout = RE
       continue;
     }
     const normalized = normalizedReference(text);
-    if (/no result|not found|no shipment|invalid (?:booking|bill|cargo|tracking)|未找到|查无|无记录|不存在/i.test(text)) return;
-    if (normalized.includes(normalizedQuery) && /\bATA\b|\bETA\b|current ETA|arrival in|actual(?: time of)? arrival|estimated(?: time of)? arrival|expected arrival|实际到港|预计到港|实际抵达|预计抵达|discharg|卸船|卸载完成|details/i.test(text)) return;
+    if (/no result|not found|no shipment|invalid (?:booking|bill|cargo|tracking)|未找到|查无|无记录|不存在/i.test(text)) return true;
+    if (normalized.includes(normalizedQuery) && /\bATA\b|\bETA\b|current ETA|arrival in|actual(?: time of)? arrival|estimated(?: time of)? arrival|expected arrival|实际到港|预计到港|实际抵达|预计抵达|discharg|卸船|卸载完成|details/i.test(text)) return true;
     await page.waitForTimeout(350);
   }
+  return false;
 }
 
 export class BrowserTrackingProvider implements TrackingProvider {
@@ -649,14 +664,16 @@ export class BrowserTrackingProvider implements TrackingProvider {
         }
       }
       const verificationResolved = await waitForManualVerification(page, input, this.verificationCallbacks);
-      // 东方海外、森罗的验证通过后页面经常只恢复空表单，需要重新提交一次查询。
+      // 东方海外、森罗验证通过后先等待官网返回结果；只有稳定等待后仍停留在空表单才补交一次。
       if (verificationResolved && (input.rule.code === 'OOCL' || input.rule.code === 'SMLINE')) {
+        const outcomeReady = await waitForStableOutcome(page, queryValue, 30_000);
         const afterVerification = await renderedPageText(page);
-        if (!normalizedReference(afterVerification).includes(normalizedReference(queryValue)) || !/\bATA\b|\bETA\b|arrival|到港|卸船|discharg/i.test(afterVerification)) {
+        if (!outcomeReady && !verificationText(afterVerification)) {
           const inputElement = await firstVisibleInput(page);
           if (inputElement) {
             await humanType(inputElement, queryValue);
             await submitTrackingQuery(inputElement);
+            await waitForManualVerification(page, input, this.verificationCallbacks);
           }
         }
       }
@@ -685,6 +702,8 @@ export class BrowserTrackingProvider implements TrackingProvider {
     } finally {
       await this.saveState(context, input).catch(() => undefined);
       await page.close().catch(() => undefined);
+      // 验证提示保持到本条查询已取得结果或明确结束，避免官网短暂重绘时提示反复出现。
+      this.verificationCallbacks?.onResolved?.();
     }
   }
 
