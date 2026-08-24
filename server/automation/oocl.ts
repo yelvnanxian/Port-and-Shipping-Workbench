@@ -106,6 +106,7 @@ function parseOoclControlTowerDate(value: string) {
 
 function ooclEventDefinition(label: string): { eventType: TrackingEventType; cargoState: TrackingCargoState } {
   if (/卸货|discharg|unload/i.test(label)) return { eventType: 'discharge', cargoState: 'laden' };
+  if (/^预计到达$|^预计抵达$|estimated\s+(?:vessel\s+)?arrival|expected\s+arrival|\bETA\b/i.test(label)) return { eventType: 'arrival', cargoState: 'laden' };
   if (/^到达$|arrival|arrived/i.test(label)) return { eventType: 'arrival', cargoState: 'laden' };
   if (/^离港$|departure|departed/i.test(label)) return { eventType: 'departure', cargoState: 'laden' };
   if (/^装船$|loaded on vessel|load of laden/i.test(label)) return { eventType: 'departure', cargoState: 'laden' };
@@ -117,7 +118,7 @@ function ooclEventDefinition(label: string): { eventType: TrackingEventType; car
 }
 
 function ooclTimelineEvents(lines: string[]) {
-  const eventNameSource = '目的港卸货|卸货|到达|离港|装船|重箱进场|提空箱|还空箱|提货|Discharge|Arrival|Departure|Loaded on Vessel|Gate In|Gate Out';
+  const eventNameSource = '目的港预计卸货|预计卸货|目的港预计到达|预计船舶到达|预计到达|预计抵达|ETA|目的港卸货|卸货|到达|离港|装船|重箱进场|提空箱|还空箱|提货|Estimated Discharge|Estimated Vessel Arrival|Estimated Arrival|Discharge|Arrival|Departure|Loaded on Vessel|Gate In|Gate Out';
   const eventLabel = new RegExp(`^(?:${eventNameSource})$`, 'i');
   const inlineEvent = new RegExp(`^(${eventNameSource})\\s+(\\d{1,2}\\s+[A-Za-z]{3,9}\\s+\\d{4}\\s+\\d{1,2}:\\d{2}\\s+[A-Z]{2,5})(?:\\s+(.+))?$`, 'i');
   const header = lines.findIndex((line, index) => /^动态$/i.test(line) && lines.slice(index, index + 6).some((item) => /^时间$/i.test(item)));
@@ -153,7 +154,7 @@ function ooclTimelineEvents(lines: string[]) {
       facility: facility && facility !== location ? facility : null,
       time: parsed?.toISOString() || null,
       timeText: `${rawTime}（官网当地时间）`,
-      actual: true,
+      actual: !/预计|预估|estimated|expected|planned|\bETA\b/i.test(label),
       cargoState: definition.cargoState,
       transportMode: rawCandidates.some((candidate) => /^Truck$/i.test(candidate))
         ? 'truck'
@@ -223,8 +224,9 @@ export function parseOoclControlTowerText(pageText: string, input: TrackingQuery
   }
   const events = ooclTimelineEvents(lines);
   const arrival = [...events].reverse().find((event) => event.eventType === 'arrival' && event.actual);
+  const estimatedArrival = [...events].reverse().find((event) => event.eventType === 'arrival' && !event.actual);
   const discharge = [...events].reverse().find((event) => event.eventType === 'discharge' && event.actual);
-  if (!arrival && !discharge) throw trackingError('解析失败', '东方海外结果页没有可核验的实际到港或卸货事件');
+  if (!arrival && !estimatedArrival && !discharge) throw trackingError('解析失败', '东方海外结果页没有可核验的实际到港、预计到达或卸货事件');
   const routeStops = ooclRouteStops(events);
   const vesselVoyage = lines.find((line) => /^[A-Z][A-Z0-9 .'-]{2,}\s*\/\s*[A-Z0-9-]{2,}$/i.test(line)) || '';
   const facts = [
@@ -241,9 +243,9 @@ export function parseOoclControlTowerText(pageText: string, input: TrackingQuery
   ].flatMap(([label, value]) => value ? [{ label, value }] : []);
   const routeText = routeStops.map((stop) => stop.name).join(' → ');
   return {
-    arrivalTime: arrival?.time ? new Date(arrival.time) : null,
-    arrivalTimeText: arrival?.timeText || null,
-    arrivalKind: arrival ? 'ATA' : null,
+    arrivalTime: (arrival || estimatedArrival)?.time ? new Date((arrival || estimatedArrival)!.time!) : null,
+    arrivalTimeText: arrival?.timeText || estimatedArrival?.timeText || null,
+    arrivalKind: arrival ? 'ATA' : estimatedArrival ? 'ETA' : null,
     arrived: Boolean(arrival || discharge),
     discharged: Boolean(discharge),
     dischargeTime: discharge?.time ? new Date(discharge.time) : null,

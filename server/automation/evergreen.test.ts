@@ -26,6 +26,34 @@ const movementHtml = `
   </table>
 `;
 
+const etaBillHtml = billHtml.replace(
+  '</table>',
+  '<tr><td colspan="4">预计抵达目的地时间 : <font color="#9E0B0E">AUG-27-2026</font></td></tr></table>',
+).replace('NEW YORK, NY (US)', 'LOS ANGELES, CA (US)');
+const etaMovementHtml = `
+  <table>
+    <tr><td>AUG-04-2026</td><td>Loaded (FCL) on vessel</td><td>SHANGHAI, CN</td><td>EVER FAST 1272-030E</td></tr>
+  </table>
+`;
+
+test('长荣从提单摘要读取预计到港时间并标记 ETA', () => {
+  const result = parseEvergreenTrackingHtml(
+    etaBillHtml,
+    etaMovementHtml,
+    '146600523956',
+    'DFSU7042655',
+  );
+  assert.equal(result.arrivalKind, 'ETA');
+  assert.equal(result.arrivalTime, null);
+  assert.equal(result.arrivalTimeText, '2026-08-27（官网仅提供日期）');
+  assert.equal(result.arrived, false);
+  assert.equal(result.discharged, false);
+  assert.equal(result.trackingDetail?.events.at(-1)?.actual, false);
+  assert.equal(result.trackingDetail?.events.at(-1)?.timeText, '2026-08-27（官网仅提供日期）');
+  assert.match(result.routeText || '', /LOS ANGELES, CA/);
+  assert.match(result.rawSummary, /预计到港=2026-08-27（官网仅提供日期）/);
+});
+
 test('长荣保留官网仅提供日期的卸船精度', () => {
   const result = parseEvergreenTrackingHtml(billHtml, movementHtml, '146600523956', 'DFSU7042655');
   assert.equal(result.dischargeTime, null);

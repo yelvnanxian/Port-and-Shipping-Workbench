@@ -210,3 +210,34 @@ test('OOCL Control Tower 响应式布局把事件压在同一行时仍可解析'
   assert.equal(result.dischargeTimeText, '21 Aug 2026 10:47 PDT（官网当地时间）');
   assert.equal(result.trackingDetail?.events.length, 3);
 });
+
+test('OOCL Control Tower 只有预计到达时仍返回 ETA，不误报解析失败', () => {
+  const rule = resolveCarrierRule({ billNo: 'OOLU2171963250', carrierHint: '东方海外' });
+  const result = parseOoclControlTowerText(`
+货物跟踪 : 订舱 2171963250
+集装箱号 : OOCU7496887
+动态
+时间
+位置
+阶段
+运输方式
+预计到达
+27 Aug 2026 10:00 PDT
+Everport Terminal Services - Los Angeles
+Los Angeles
+Ocean
+Vessel
+提单信息
+`, {
+    rule,
+    originalBillNo: 'OOLU2171963250',
+    queryBillNo: 'OOLU2171963250',
+    containerNo: 'OOCU7496887',
+    queryType: 'bill',
+  });
+
+  assert.equal(result.arrivalKind, 'ETA');
+  assert.equal(result.arrived, false);
+  assert.equal(result.arrivalTimeText, '27 Aug 2026 10:00 PDT（官网当地时间）');
+  assert.equal(result.trackingDetail?.events.at(-1)?.actual, false);
+});
