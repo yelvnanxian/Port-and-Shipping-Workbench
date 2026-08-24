@@ -10,6 +10,8 @@ export interface AuthUser { id: string; username: string; role: UserRole }
 export interface AuthUserView extends AuthUser { enabled: boolean; createdAt: string; updatedAt: string }
 interface StoredUser extends AuthUserView { salt: string; passwordHash: string }
 interface Session { token: string; csrfToken: string; user: AuthUser; expiresAt: number }
+type SessionRevocationReason = 'replaced' | 'revoked';
+interface RevokedSession { reason: SessionRevocationReason; expiresAt: number }
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const SESSION_COOKIE = 'port_ops_session';
@@ -58,6 +60,7 @@ declare global {
 export class AuthService {
   private users: StoredUser[] | null = null;
   private readonly sessions = new Map<string, Session>();
+  private readonly revokedSessions = new Map<string, RevokedSession>();
   private readonly failedLogins = new Map<string, { count: number; resetAt: number }>();
   readonly enabled = authEnabled();
   readonly usersPath: string;
@@ -142,8 +145,11 @@ export class AuthService {
     const token = crypto.randomBytes(32).toString('base64url');
     const csrfToken = crypto.randomBytes(24).toString('base64url');
     const sessionUser = toAuthUser(user);
+    // 同一账号只保留一个活动 Session。不同设备共用同一账号会共同操作同一个
+    // Excel 和自动化队列，因此新登录必须明确替换旧登录，避免多地并发写入。
+    const replacedSessions = this.revokeUserSessions(sessionUser.id, 'replaced');
     this.sessions.set(token, { token, csrfToken, user: sessionUser, expiresAt: Date.now() + SESSION_TTL_MS });
-    await auditLog(path.dirname(this.usersPath), 'auth.login.success', { userId: sessionUser.id, username: sessionUser.username, clientKey });
+    await auditLog(path.dirname(this.usersPath), 'auth.login.success', { userId: sessionUser.id, username: sessionUser.username, clientKey, replacedSessions });
     return { user: sessionUser, csrfToken, token };
   }
 
@@ -159,6 +165,19 @@ export class AuthService {
     return { user: session.user, csrfToken: session.csrfToken };
   }
 
+  sessionIssueFromRequest(req: Request) {
+    if (!this.enabled) return null;
+    const token = cookieValue(req, SESSION_COOKIE);
+    if (!token) return null;
+    const revoked = this.revokedSessions.get(token);
+    if (!revoked) return null;
+    if (revoked.expiresAt <= Date.now()) {
+      this.revokedSessions.delete(token);
+      return null;
+    }
+    return revoked.reason;
+  }
+
   setSessionCookie(res: Response, token: string) {
     const options = this.cookieOptions();
     const parts = [`${SESSION_COOKIE}=${encodeURIComponent(token)}`, `Max-Age=${Math.floor(options.maxAge / 1000)}`, 'Path=/', 'HttpOnly', 'SameSite=Strict'];
@@ -170,7 +189,10 @@ export class AuthService {
   }
   logout(req: Request) {
     const token = cookieValue(req, SESSION_COOKIE);
-    if (token) this.sessions.delete(token);
+    if (token) {
+      this.sessions.delete(token);
+      this.revokedSessions.delete(token);
+    }
   }
 
   async listUsers(): Promise<AuthUserView[]> {
@@ -207,7 +229,7 @@ export class AuthService {
     user.enabled = nextEnabled;
     user.updatedAt = new Date().toISOString();
     await this.saveUsers();
-    if (!nextEnabled || roleChanged) this.revokeUserSessions(id);
+    if (!nextEnabled || roleChanged) this.revokeUserSessions(id, 'revoked');
     await auditLog(path.dirname(this.usersPath), 'auth.user.update', { actorId, userId: id, role: nextRole, enabled: nextEnabled });
     return publicUserView(user);
   }
@@ -221,7 +243,7 @@ export class AuthService {
     user.passwordHash = passwordData.passwordHash;
     user.updatedAt = new Date().toISOString();
     await this.saveUsers();
-    if (id !== actorId) this.revokeUserSessions(id);
+    if (id !== actorId) this.revokeUserSessions(id, 'revoked');
     await auditLog(path.dirname(this.usersPath), 'auth.user.password_reset', { actorId, userId: id });
     return publicUserView(user);
   }
@@ -235,19 +257,33 @@ export class AuthService {
     if (user.role === 'admin' && user.enabled && users.filter((item) => item.role === 'admin' && item.enabled).length <= 1) throw new Error('至少需要保留一个启用的管理员账号');
     users.splice(index, 1);
     await this.saveUsers();
-    this.revokeUserSessions(id);
+    this.revokeUserSessions(id, 'revoked');
     await auditLog(path.dirname(this.usersPath), 'auth.user.delete', { actorId, userId: id, username: user.username });
     return this.listUsers();
   }
 
-  private revokeUserSessions(userId: string) {
-    for (const [token, session] of this.sessions) if (session.user.id === userId) this.sessions.delete(token);
+  private revokeUserSessions(userId: string, reason: SessionRevocationReason) {
+    const now = Date.now();
+    let revokedCount = 0;
+    for (const [token, revoked] of this.revokedSessions) if (revoked.expiresAt <= now) this.revokedSessions.delete(token);
+    for (const [token, session] of this.sessions) {
+      if (session.user.id !== userId) continue;
+      this.sessions.delete(token);
+      this.revokedSessions.set(token, { reason, expiresAt: session.expiresAt });
+      revokedCount += 1;
+    }
+    return revokedCount;
   }
 
   requireSession = (req: Request, res: Response, next: NextFunction) => {
     const current = this.sessionFromRequest(req);
     if (!current) {
       const hasSessionCookie = Boolean(cookieValue(req, SESSION_COOKIE));
+      const issue = this.sessionIssueFromRequest(req);
+      if (issue === 'replaced') {
+        res.status(401).json({ message: '该账号已在其他设备登录，本设备已退出', code: 'AUTH_SESSION_REPLACED' });
+        return;
+      }
       res.status(401).json({ message: hasSessionCookie ? '登录状态已失效，请重新登录' : '请先登录', code: 'AUTH_REQUIRED' });
       return;
     }

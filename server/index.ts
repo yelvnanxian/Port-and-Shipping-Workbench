@@ -19,6 +19,8 @@ import { WorkbookStore } from './automation/workbook.js';
 import { shutdownBrowserAutomation } from './automation/browser-lifecycle.js';
 import { ManualCollectionRegistry, isManualCollectionCarrier, manualCollectionHostAllowed, manualCollectionUserId } from './automation/manual-collection.js';
 import { HAPAG_CONTAINER_SOURCE } from './automation/hapag.js';
+import { SerialExecutionCoordinator } from './automation/concurrency.js';
+import { WorkspaceRegistry } from './workspace-registry.js';
 import type { CarrierSource, Shipment } from './types.js';
 
 const app = express();
@@ -26,7 +28,8 @@ const port = Number(process.env.PORT || 8787);
 const host = process.env.APP_HOST || '127.0.0.1';
 const database = createAppDatabase();
 await database.migrate();
-const engine = new AutomationEngine(new WorkbookStore(), database);
+const globalRunCoordinator = new SerialExecutionCoordinator();
+const engine = new AutomationEngine(new WorkbookStore(), database, { runCoordinator: globalRunCoordinator });
 await engine.store.initialize();
 await engine.cleanupClearanceHistory();
 await engine.migrateClearedRecordsToHistory();
@@ -42,30 +45,29 @@ if (!auth.enabled && (host !== '127.0.0.1' && host !== '::1' && host !== 'localh
   throw new Error('公网或反向代理访问必须启用 AUTH_ENABLED=true，不能以无登录模式启动');
 }
 // 管理员使用主工作区；普通账号按账号 ID 使用独立工作区，避免读取或修改管理员的 Excel、任务、备份和证据。
-const workspaceEngines = new Map<string, AutomationEngine>();
 const workspaceRoot = path.join(engine.store.dataDirectory, 'workspaces');
-async function workspaceEngine(safeUserId: string) {
-  const existing = workspaceEngines.get(safeUserId);
-  if (existing) return existing;
+const workspaceEngines = new WorkspaceRegistry<AutomationEngine>(async (safeUserId) => {
   const workspaceDirectory = path.join(engine.store.dataDirectory, 'workspaces', safeUserId);
-  const workspace = new AutomationEngine(new WorkbookStore(process.cwd(), workspaceDirectory), undefined, { defaultWechatWebhookUrl: '' });
+  const workspace = new AutomationEngine(new WorkbookStore(process.cwd(), workspaceDirectory), undefined, {
+    defaultWechatWebhookUrl: '',
+    runCoordinator: globalRunCoordinator,
+  });
   await workspace.store.initialize();
   await workspace.cleanupClearanceHistory();
   await workspace.migrateClearedRecordsToHistory();
   await workspace.syncDatabaseFromWorkbook();
-  workspaceEngines.set(safeUserId, workspace);
   return workspace;
-}
+});
 async function activeEngine(req: express.Request) {
   const user = req.authUser;
   if (!user || user.role === 'admin') return engine;
-  return workspaceEngine(user.id.replace(/[^A-Za-z0-9_-]/g, '_'));
+  return workspaceEngines.get(user.id.replace(/[^A-Za-z0-9_-]/g, '_'));
 }
 // 服务重启后恢复已有普通用户工作区，使其自定义定时任务无需先登录一次才会执行。
 try {
   const entries = await fs.readdir(workspaceRoot, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.isDirectory() && /^user-[A-Za-z0-9_-]+$/.test(entry.name)) await workspaceEngine(entry.name);
+    if (entry.isDirectory() && /^user-[A-Za-z0-9_-]+$/.test(entry.name)) await workspaceEngines.get(entry.name);
   }
 } catch {
   // 尚未创建普通用户工作区时无需处理。
@@ -113,7 +115,15 @@ let lastSync = new Date().toISOString();
 
 app.get('/api/auth/session', (req, res) => {
   const current = auth.sessionFromRequest(req);
-  res.json({ enabled: auth.enabled, authenticated: Boolean(current), user: current?.user || null, csrfToken: current?.csrfToken || '' });
+  const issue = current ? null : auth.sessionIssueFromRequest(req);
+  res.json({
+    enabled: auth.enabled,
+    authenticated: Boolean(current),
+    user: current?.user || null,
+    csrfToken: current?.csrfToken || '',
+    code: issue === 'replaced' ? 'AUTH_SESSION_REPLACED' : undefined,
+    message: issue === 'replaced' ? '该账号已在其他设备登录，本设备已退出' : undefined,
+  });
 });
 
 app.post('/api/auth/login', async (req, res, next) => {

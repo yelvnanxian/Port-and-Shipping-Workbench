@@ -22,6 +22,21 @@ test('登录生成 Session、CSRF token 并可读取用户角色', async () => {
   await fs.rm(dataDirectory, { recursive: true, force: true });
 });
 
+test('同一账号在新设备登录后会替换旧 Session', async () => {
+  const dataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'port-ops-auth-'));
+  const auth = new AuthService(dataDirectory);
+  const first = await auth.login('admin-test', 'test-admin-password-123', 'device-a');
+  const firstRequest = { headers: { cookie: `port_ops_session=${encodeURIComponent(first.token)}` }, method: 'GET' } as never;
+  assert.equal(auth.sessionFromRequest(firstRequest)?.user.id, first.user.id);
+
+  const second = await auth.login('admin-test', 'test-admin-password-123', 'device-b');
+  const secondRequest = { headers: { cookie: `port_ops_session=${encodeURIComponent(second.token)}` }, method: 'GET' } as never;
+  assert.equal(auth.sessionFromRequest(firstRequest), null);
+  assert.equal(auth.sessionIssueFromRequest(firstRequest), 'replaced');
+  assert.equal(auth.sessionFromRequest(secondRequest)?.user.id, second.user.id);
+  await fs.rm(dataDirectory, { recursive: true, force: true });
+});
+
 test('错误密码会被限流', async () => {
   const dataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'port-ops-auth-'));
   const auth = new AuthService(dataDirectory);

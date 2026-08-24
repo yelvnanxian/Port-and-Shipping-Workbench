@@ -59,6 +59,8 @@ interface AuthSession {
   authenticated: boolean;
   csrfToken: string;
   user: { id: string; username: string; role: AuthRole } | null;
+  code?: string;
+  message?: string;
 }
 
 interface AuthManagedUser {
@@ -94,6 +96,12 @@ const emptyDashboard: DashboardData = { shipments: [], sources: [], generatedAt:
 
 let csrfToken = '';
 let authExpiryDispatched = false;
+
+function dispatchAuthFailure(message: string) {
+  if (authExpiryDispatched) return;
+  authExpiryDispatched = true;
+  window.dispatchEvent(new CustomEvent('port-ops-auth-expired', { detail: message }));
+}
 
 type RunSelection = { carrierCodes?: string[]; shipmentIds?: string[]; skipCompleted?: boolean };
 type MetricKey = 'tracking' | 'arriving' | 'working' | 'completed' | 'changed';
@@ -234,13 +242,13 @@ async function downloadShipmentList(shipments: Shipment[]) {
     body: JSON.stringify({ ids: shipments.map((item) => item.id) }),
   });
   if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { message?: string } | null;
+    const payload = await response.json().catch(() => null) as { message?: string; code?: string } | null;
     if (response.status === 401) {
-      if (!authExpiryDispatched) {
-        authExpiryDispatched = true;
-        window.dispatchEvent(new Event('port-ops-auth-expired'));
-      }
-      throw new Error('登录状态已失效，请重新登录');
+      const message = payload?.code === 'AUTH_SESSION_REPLACED'
+        ? '该账号已在其他设备登录，本设备已退出'
+        : '登录状态已失效，请重新登录';
+      dispatchAuthFailure(message);
+      throw new Error(message);
     }
     throw new Error(payload?.message || `导出失败（HTTP ${response.status}）`);
   }
@@ -268,12 +276,12 @@ async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
   }
   if (!response.ok) {
     const code = typeof payload === 'object' && payload && 'code' in payload ? String(payload.code) : '';
-    if (response.status === 401 && code === 'AUTH_REQUIRED') {
-      if (!authExpiryDispatched) {
-        authExpiryDispatched = true;
-        window.dispatchEvent(new Event('port-ops-auth-expired'));
-      }
-      throw new Error('登录状态已失效，请重新登录');
+    if (response.status === 401 && (code === 'AUTH_REQUIRED' || code === 'AUTH_SESSION_REPLACED')) {
+      const message = code === 'AUTH_SESSION_REPLACED'
+        ? '该账号已在其他设备登录，本设备已退出'
+        : '登录状态已失效，请重新登录';
+      dispatchAuthFailure(message);
+      throw new Error(message);
     }
     const message = typeof payload === 'object' && payload && 'message' in payload ? String(payload.message) : `请求失败（HTTP ${response.status}）`;
     throw new Error(message);
@@ -465,16 +473,33 @@ export default function App() {
     }
   }, [verificationKey, verificationDismissed]);
 
+  function clearWorkspaceState() {
+    coreRefreshSeq.current += 1;
+    setData(null);
+    setAutomation(null);
+    setDetail(null);
+    setSelected(new Set());
+    setSyncing(false);
+    setPollingRun(false);
+    setManualCollectionSession(null);
+    setVerificationDismissed('');
+  }
+
   async function refreshSession() {
     const response = await fetch('/api/auth/session', { credentials: 'include' });
     const payload = await response.json() as AuthSession;
     csrfToken = payload.csrfToken || '';
     if (payload.authenticated) authExpiryDispatched = false;
     setAuth(payload);
+    if (!payload.authenticated && payload.code === 'AUTH_SESSION_REPLACED') {
+      dispatchAuthFailure(payload.message || '该账号已在其他设备登录，本设备已退出');
+    }
     return payload;
   }
 
   async function login(username: string, password: string) {
+    clearWorkspaceState();
+    setLoading(true);
     const payload = await apiRequest<AuthSession>('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, password }) });
     csrfToken = payload.csrfToken || '';
     authExpiryDispatched = false;
@@ -488,6 +513,7 @@ export default function App() {
     await apiRequest('/api/auth/logout', { method: 'POST' }).catch(() => undefined);
     csrfToken = '';
     authExpiryDispatched = false;
+    clearWorkspaceState();
     setAuth((previous) => previous ? { ...previous, authenticated: false, user: null, csrfToken: '' } : previous);
   }
 
@@ -556,17 +582,46 @@ export default function App() {
   }
 
   useEffect(() => {
-    const onAuthExpired = () => {
+    const onAuthExpired = (event: Event) => {
       csrfToken = '';
+      clearWorkspaceState();
       setAuth((previous) => previous ? { ...previous, authenticated: false, user: null, csrfToken: '' } : previous);
-      setData(null);
-      setAutomation(null);
       setLoading(false);
-      setToast('登录状态已失效，请重新登录');
+      setToast((event as CustomEvent<string>).detail || '登录状态已失效，请重新登录');
     };
     window.addEventListener('port-ops-auth-expired', onAuthExpired);
     return () => window.removeEventListener('port-ops-auth-expired', onAuthExpired);
   }, []);
+
+  useEffect(() => {
+    if (!auth?.authenticated || !auth.user) return;
+    const currentUserId = auth.user.id;
+    let checking = false;
+    const reconcileBrowserSession = async () => {
+      if (checking || document.visibilityState === 'hidden') return;
+      checking = true;
+      try {
+        const session = await refreshSession();
+        if (session.authenticated && session.user && session.user.id !== currentUserId) {
+          clearWorkspaceState();
+          navigate('overview');
+          await refreshCoreData();
+          setToast(`当前浏览器已切换为账号 ${session.user.username}`);
+        }
+      } catch {
+        // 普通网络波动不主动退出；业务接口仍会对失效 Session 做强制处理。
+      } finally {
+        checking = false;
+      }
+    };
+    const onVisibilityChange = () => { if (document.visibilityState === 'visible') void reconcileBrowserSession(); };
+    window.addEventListener('focus', reconcileBrowserSession);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('focus', reconcileBrowserSession);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [auth?.authenticated, auth?.user?.id]);
 
   useEffect(() => {
     const onHashChange = () => {

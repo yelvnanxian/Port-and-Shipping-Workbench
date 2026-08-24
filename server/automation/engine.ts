@@ -27,6 +27,7 @@ import type { AutomationSettings, AutomationTask, AutomationTaskScope, FailedTra
 import { WorkbookStore } from './workbook.js';
 import type { AppDatabase } from '../database.js';
 import { safeSourceCode, sourceEvidenceDirectory, sourceEvidenceUrl, sourceTrackingDetailKey, sourceTrackingDetailPath, sourceTrackingDetailUrl } from './source-storage.js';
+import { SerialExecutionCoordinator } from './concurrency.js';
 
 function isQueryable(record: WorkbookRecord) {
   return record.manualMark !== '已清关'
@@ -151,11 +152,14 @@ export class AutomationEngine {
   private verificationSkipRequested = false;
   private readonly database?: AppDatabase;
   private readonly defaultWechatWebhookUrl?: string;
+  private readonly runCoordinator: SerialExecutionCoordinator;
+  private waitingForRunCoordinator = false;
 
-  constructor(store = new WorkbookStore(), database?: AppDatabase, options?: { defaultWechatWebhookUrl?: string }) {
+  constructor(store = new WorkbookStore(), database?: AppDatabase, options?: { defaultWechatWebhookUrl?: string; runCoordinator?: SerialExecutionCoordinator }) {
     this.store = store;
     this.database = database?.enabled ? database : undefined;
     this.defaultWechatWebhookUrl = options?.defaultWechatWebhookUrl;
+    this.runCoordinator = options?.runCoordinator || new SerialExecutionCoordinator();
     this.runLogPath = path.join(store.dataDirectory, 'runs.json');
     this.settingsPath = path.join(store.dataDirectory, 'settings.json');
     this.tasksPath = path.join(store.dataDirectory, 'tasks.json');
@@ -167,7 +171,7 @@ export class AutomationEngine {
   }
 
   get queuedRuns() {
-    return this.runQueue.length;
+    return this.runQueue.length + (this.waitingForRunCoordinator ? 1 : 0);
   }
 
   private provider(settings: AutomationSettings): TrackingProvider {
@@ -1060,9 +1064,15 @@ export class AutomationEngine {
       while (this.runQueue.length) {
         const next = this.runQueue.shift()!;
         try {
-          next.resolve(await this.executeRun(next.reason, next.selection));
+          this.waitingForRunCoordinator = true;
+          next.resolve(await this.runCoordinator.run(async () => {
+            this.waitingForRunCoordinator = false;
+            return this.executeRun(next.reason, next.selection);
+          }));
         } catch (error) {
           next.reject(error);
+        } finally {
+          this.waitingForRunCoordinator = false;
         }
       }
     } finally {
