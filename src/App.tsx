@@ -11,6 +11,7 @@ import {
   Clock3,
   Database,
   Download,
+  Eraser,
   ExternalLink,
   FileSpreadsheet,
   FileCheck2,
@@ -41,7 +42,7 @@ import {
 } from 'lucide-react';
 import type { AutomationStatus, AutomationTask, CarrierSource, DashboardData, ManualMark, Shipment, ShipmentStatus } from './types';
 
-type PageId = 'overview' | 'tracking' | 'sources' | 'automation' | 'exports' | 'settings';
+type PageId = 'overview' | 'tracking' | 'history' | 'sources' | 'automation' | 'exports' | 'settings';
 
 interface SettingsView {
   enabled: boolean;
@@ -69,9 +70,32 @@ interface AuthManagedUser {
   updatedAt: string;
 }
 
-let csrfToken = '';
+interface ManualCollectionSessionView {
+  id: string;
+  token: string;
+  carrierCode: 'CMA' | 'HAPAG';
+  carrierName: string;
+  shipmentId: string;
+  billNo: string;
+  queryBillNo: string;
+  containerNo: string;
+  queryType: 'bill' | 'container';
+  sourceUrl: string;
+  createdAt: string;
+  expiresAt: string;
+  status: 'pending' | 'success' | 'failed';
+  attempts: number;
+  lastError?: string;
+  completedAt?: string;
+  result?: { arrivalKind: 'ATA' | 'ETA' | null; arrived: boolean; discharged: boolean; evidencePath?: string };
+}
 
-type RunSelection = { carrierCodes?: string[]; shipmentIds?: string[] };
+const emptyDashboard: DashboardData = { shipments: [], sources: [], generatedAt: new Date(0).toISOString() };
+
+let csrfToken = '';
+let authExpiryDispatched = false;
+
+type RunSelection = { carrierCodes?: string[]; shipmentIds?: string[]; skipCompleted?: boolean };
 type MetricKey = 'tracking' | 'arriving' | 'working' | 'completed' | 'changed';
 type ShipmentDateField = 'eta' | 'dischargeTime' | 'lastUpdated';
 type ShipmentSort = 'default' | 'asc' | 'desc';
@@ -99,13 +123,14 @@ function manualInputTime(value: string | null) {
 const navItems: Array<{ id: PageId; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'overview', label: '运营总览', icon: LayoutDashboard },
   { id: 'tracking', label: '船期追踪', icon: Ship },
+  { id: 'history', label: '清关历史', icon: Archive },
   { id: 'sources', label: '数据源管理', icon: Database },
   { id: 'automation', label: '自动化任务', icon: Timer },
   { id: 'exports', label: '导出与备份', icon: FileSpreadsheet },
 ];
 
 const pageTitles: Record<PageId, string> = {
-  overview: '运营总览', tracking: '船期追踪', sources: '数据源管理', automation: '自动化任务', exports: '导出与备份', settings: '系统设置',
+  overview: '运营总览', tracking: '船期追踪', history: '清关历史', sources: '数据源管理', automation: '自动化任务', exports: '导出与备份', settings: '系统设置',
 };
 
 const statusOptions: Array<'全部状态' | ShipmentStatus> = ['全部状态', '待靠泊', '作业中', '已卸船', '计划变更'];
@@ -141,6 +166,7 @@ function summarizeNote(note?: string) {
   const reason = note.match(/(?:^|；)原因=([^；]+)/)?.[1];
   if (category || reason) return concise(`${category || '查询失败'}：${reason || '官网未返回可核验数据'}`);
   if (/人工补录|人工修改/.test(note)) return concise(note.split('；')[0]);
+  if (/确认已卸船，但未提供精确卸船时刻/.test(note)) return '已确认卸船完成，官网未提供精确卸船时间';
   const arrivalKind = note.match(/(?:^|；)到港字段=(ATA|ETA)/)?.[1];
   if (/已发现实际卸船事件|已发现卸船事件/.test(note)) return `已获取${arrivalKind ? ` ${arrivalKind}` : '到港时间'}和实际卸船时间`;
   if (arrivalKind) return `已获取 ${arrivalKind}，尚未发现实际卸船时间`;
@@ -209,6 +235,13 @@ async function downloadShipmentList(shipments: Shipment[]) {
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null) as { message?: string } | null;
+    if (response.status === 401) {
+      if (!authExpiryDispatched) {
+        authExpiryDispatched = true;
+        window.dispatchEvent(new Event('port-ops-auth-expired'));
+      }
+      throw new Error('登录状态已失效，请重新登录');
+    }
     throw new Error(payload?.message || `导出失败（HTTP ${response.status}）`);
   }
   const url = URL.createObjectURL(await response.blob());
@@ -234,6 +267,14 @@ async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
     throw new Error(detail ? `服务返回了非 JSON 内容：${detail}` : `服务返回了非 JSON 内容（HTTP ${response.status}）`);
   }
   if (!response.ok) {
+    const code = typeof payload === 'object' && payload && 'code' in payload ? String(payload.code) : '';
+    if (response.status === 401 && code === 'AUTH_REQUIRED') {
+      if (!authExpiryDispatched) {
+        authExpiryDispatched = true;
+        window.dispatchEvent(new Event('port-ops-auth-expired'));
+      }
+      throw new Error('登录状态已失效，请重新登录');
+    }
     const message = typeof payload === 'object' && payload && 'message' in payload ? String(payload.message) : `请求失败（HTTP ${response.status}）`;
     throw new Error(message);
   }
@@ -274,7 +315,7 @@ function CarrierMark({ code }: { code: string }) {
 }
 
 function VerificationActions({ shipment, compact = false }: { shipment: Shipment; compact?: boolean }) {
-  if (!shipment.sourceUrl && !shipment.evidencePath) return <span className="empty-value">暂无来源</span>;
+  if (!shipment.sourceUrl && !shipment.evidencePath && !shipment.failureEvidencePath) return <span className="empty-value">暂无来源</span>;
   const verificationNo = shipment.verificationNo || shipment.billNo;
   return <div className={compact ? 'verification-actions compact' : 'verification-actions'}>
     {shipment.evidencePath ? <a
@@ -282,9 +323,18 @@ function VerificationActions({ shipment, compact = false }: { shipment: Shipment
       href={shipment.evidencePath}
       target="_blank"
       rel="noreferrer"
-      title="查看本次自动查询成功后保存的页面截图"
+      title="查看本次自动查询保存的网页截图或官方接口采集凭证"
     >
       {compact ? '采集证据' : '查看本次采集证据'}<ExternalLink size={compact ? 12 : 14} />
+    </a> : null}
+    {shipment.failureEvidencePath ? <a
+      className={compact ? 'verification-link compact evidence' : 'verification-link evidence'}
+      href={shipment.failureEvidencePath}
+      target="_blank"
+      rel="noreferrer"
+      title="查看本次失败查询保留的浏览器截图"
+    >
+      {compact ? '失败截图' : '查看本次失败截图'}<ExternalLink size={compact ? 12 : 14} />
     </a> : null}
     {shipment.sourceUrl ? <a
       className={compact ? 'verification-link compact' : 'verification-link'}
@@ -337,6 +387,23 @@ function ShieldCheckIcon() {
   return <span className="verification-shield">✓</span>;
 }
 
+function ManualCollectionModal({ session, onClose, onCopy, onCopyQuery }: { session: ManualCollectionSessionView; onClose: () => void; onCopy: () => void; onCopyQuery: () => void }) {
+  const queryValue = session.queryType === 'container' ? session.containerNo : session.queryBillNo;
+  const expiresAt = new Date(session.expiresAt);
+  const validUntil = Number.isNaN(expiresAt.getTime()) ? session.expiresAt : expiresAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  return <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+    <section className="manual-collection-modal" role="dialog" aria-modal="true" aria-labelledby="manual-collection-title" onMouseDown={(event) => event.stopPropagation()}>
+      <div className="modal-heading"><div><p className="eyebrow">NORMAL BROWSER COLLECTION</p><h2 id="manual-collection-title">{session.carrierName}普通浏览器采集</h2><p>不会启动自动化 Chrome；请在日常浏览器中完成验证和查询。</p></div><button className="drawer-close" onClick={onClose}><X size={19} /></button></div>
+      <div className="manual-collection-target"><div><strong>{queryValue}</strong><span>{session.queryType === 'bill' ? '提单号查询' : '完整柜号查询'} · {session.containerNo || '未提供柜号'}</span></div><button className="secondary-button compact-button" onClick={onCopyQuery}>复制{session.queryType === 'bill' ? '提单号' : '柜号'}</button></div>
+      <ol className="manual-collection-steps"><li>复制下面的一次性令牌。</li><li>点击“打开官网”，用普通 Chrome/Edge 完成安全验证和查询；赫伯罗特请进入 Details 页面。</li><li>打开“港航工作台船期采集器”扩展，粘贴令牌并点击“采集当前页面”。</li></ol>
+      <div className="manual-token-row"><code>{session.token}</code><button className="secondary-button compact-button" onClick={onCopy}>复制令牌</button></div>
+      <div className={`manual-collection-status ${session.status}`}><strong>{session.status === 'pending' ? '等待浏览器采集' : session.status === 'success' ? '采集成功，已写入 Excel' : '本次采集失败'}</strong><span>{session.status === 'pending' ? `令牌有效至 ${validUntil}；当前尝试 ${session.attempts} 次` : session.lastError || '工作台已完成解析。'}</span></div>
+      <div className="manual-collection-links"><a className="secondary-button" href={session.sourceUrl} target="_blank" rel="noreferrer"><ExternalLink size={14} />打开官网查询页</a><span>扩展目录：<code>browser-extension</code></span></div>
+      <div className="modal-actions"><button className="primary-button" onClick={onClose}>{session.status === 'pending' ? '后台等待，关闭窗口' : '完成'}</button></div>
+    </section>
+  </div>;
+}
+
 export default function App() {
   const [auth, setAuth] = useState<AuthSession | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -377,7 +444,11 @@ export default function App() {
   const [pageSize, setPageSize] = useState(20);
   const [pageNumber, setPageNumber] = useState(1);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [sourceDetailsOpen, setSourceDetailsOpen] = useState(false);
+  const [skipCompletedRecords, setSkipCompletedRecords] = useState(true);
   const [verificationDismissed, setVerificationDismissed] = useState('');
+  const [manualCollectionSession, setManualCollectionSession] = useState<ManualCollectionSessionView | null>(null);
+  const [manualCollectionOpening, setManualCollectionOpening] = useState(false);
   const moreFilterRef = useRef<HTMLDivElement>(null);
   const uploadInput = useRef<HTMLInputElement>(null);
   const runRequestPending = useRef(false);
@@ -398,6 +469,7 @@ export default function App() {
     const response = await fetch('/api/auth/session', { credentials: 'include' });
     const payload = await response.json() as AuthSession;
     csrfToken = payload.csrfToken || '';
+    if (payload.authenticated) authExpiryDispatched = false;
     setAuth(payload);
     return payload;
   }
@@ -405,7 +477,9 @@ export default function App() {
   async function login(username: string, password: string) {
     const payload = await apiRequest<AuthSession>('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, password }) });
     csrfToken = payload.csrfToken || '';
+    authExpiryDispatched = false;
     setAuth(payload);
+    navigate('overview');
     await refreshCoreData();
     setLoading(false);
   }
@@ -413,6 +487,7 @@ export default function App() {
   async function logout() {
     await apiRequest('/api/auth/logout', { method: 'POST' }).catch(() => undefined);
     csrfToken = '';
+    authExpiryDispatched = false;
     setAuth((previous) => previous ? { ...previous, authenticated: false, user: null, csrfToken: '' } : previous);
   }
 
@@ -427,12 +502,71 @@ export default function App() {
     }
   }
 
+  async function startManualCollection(shipment: Shipment, queryType: 'bill' | 'container' = 'bill') {
+    if (shipment.carrierCode !== 'CMA' && shipment.carrierCode !== 'HAPAG') {
+      setToast('普通浏览器采集目前仅支持达飞和赫伯罗特');
+      return;
+    }
+    const effectiveQueryType = shipment.carrierCode === 'HAPAG' ? 'container' : queryType;
+    if (effectiveQueryType === 'container' && !shipment.containerNo) {
+      setToast('该记录没有柜号，无法发起柜号采集');
+      return;
+    }
+    setManualCollectionOpening(true);
+    try {
+      const payload = await apiRequest<{ session: ManualCollectionSessionView }>('/api/manual-collection/sessions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ shipmentId: shipment.id, queryType: effectiveQueryType }),
+      });
+      setManualCollectionSession(payload.session);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : '无法创建普通浏览器采集会话');
+    } finally {
+      setManualCollectionOpening(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!manualCollectionSession || manualCollectionSession.status !== 'pending') return;
+    let disposed = false;
+    const poll = async () => {
+      try {
+        const payload = await apiRequest<{ session: ManualCollectionSessionView }>(`/api/manual-collection/sessions/${encodeURIComponent(manualCollectionSession.id)}`);
+        if (disposed) return;
+        setManualCollectionSession(payload.session);
+        if (payload.session.status === 'success') {
+          await refreshCoreData().catch(() => undefined);
+          setToast(`${payload.session.carrierName}普通浏览器采集成功，已写入 Excel`);
+        }
+      } catch {
+        // 会话短暂不可读时保留弹窗，下一轮继续检查。
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 1500);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [manualCollectionSession?.id, manualCollectionSession?.status]);
+
   function navigate(page: PageId) {
     setActivePage(page);
     window.location.hash = page;
     setMobileNav(false);
     setProfileMenuOpen(false);
   }
+
+  useEffect(() => {
+    const onAuthExpired = () => {
+      csrfToken = '';
+      setAuth((previous) => previous ? { ...previous, authenticated: false, user: null, csrfToken: '' } : previous);
+      setData(null);
+      setAutomation(null);
+      setLoading(false);
+      setToast('登录状态已失效，请重新登录');
+    };
+    window.addEventListener('port-ops-auth-expired', onAuthExpired);
+    return () => window.removeEventListener('port-ops-auth-expired', onAuthExpired);
+  }, []);
 
   useEffect(() => {
     const onHashChange = () => {
@@ -442,6 +576,13 @@ export default function App() {
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
+
+  useEffect(() => {
+    if (auth?.authenticated && auth.user?.role !== 'admin' && activePage === 'settings') {
+      setActivePage('overview');
+      window.location.hash = 'overview';
+    }
+  }, [auth?.authenticated, auth?.user?.role, activePage]);
 
   async function load(endpoint = '/api/dashboard') {
     const payload = await apiRequest<DashboardData>(endpoint, { method: endpoint.includes('sync') ? 'POST' : 'GET' });
@@ -468,8 +609,9 @@ export default function App() {
 
   useEffect(() => {
     refreshSession().then((session) => {
-      if (!session.enabled || session.authenticated) return refreshCoreData();
-      return undefined;
+      if (!session.enabled || !session.authenticated) return undefined;
+      navigate('overview');
+      return refreshCoreData();
     }).catch((error) => setToast(error.message)).finally(() => { setAuthLoading(false); setLoading(false); });
   }, []);
 
@@ -565,6 +707,14 @@ export default function App() {
   };
 
   async function handleSync(selection?: RunSelection) {
+    if (selection?.shipmentIds?.length === 1) {
+      const target = data?.shipments.find((shipment) => shipment.id === selection.shipmentIds?.[0]);
+      if (target && (target.carrierCode === 'CMA' || target.carrierCode === 'HAPAG')) {
+        setDetail(target);
+        await startManualCollection(target, target.carrierCode === 'HAPAG' ? 'container' : 'bill');
+        return;
+      }
+    }
     if (runRequestPending.current) {
       setToast('已有同步任务正在执行或排队，请等待当前任务完成');
       return;
@@ -577,7 +727,7 @@ export default function App() {
       const payload = await apiRequest<{ run: { total: number; success: number; failed: number; skipped: number }; dashboard: DashboardData; automation: AutomationStatus }>('/api/automation/run', {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-idempotency-key': idempotencyKey('sync') },
-        body: JSON.stringify(selection || {}),
+        body: JSON.stringify(selection || { skipCompleted: skipCompletedRecords }),
       });
       setData(payload.dashboard);
       setAutomation(payload.automation);
@@ -601,15 +751,18 @@ export default function App() {
 
   async function handleManualMark(id: string, manualMark: ManualMark) {
     try {
+      const target = data?.shipments.find((shipment) => shipment.id === id);
+      if (!target) throw new Error('船期记录已变化，请刷新页面后重试');
       const payload = await apiRequest<{ dashboard: DashboardData; automation: AutomationStatus }>(`/api/shipments/${encodeURIComponent(id)}/mark`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ manualMark }),
+        body: JSON.stringify({ manualMark, billNo: target.billNo, containerNo: target.containerNo }),
       });
       setData(payload.dashboard);
       setAutomation(payload.automation);
+      if (manualMark === '已清关') setSelected((previous) => { const next = new Set(previous); next.delete(id); return next; });
       setDetail((current) => current?.id === id ? payload.dashboard.shipments.find((item) => item.id === id) || null : current);
-      setToast(manualMark === '已清关' ? '已标记清关，后续自动任务将跳过该柜' : manualMark ? `已标记为${manualMark}` : '已清除人工标记');
+      setToast(manualMark === '已清关' ? '已移出在途追踪，可在“清关历史”中查看或恢复' : manualMark ? `已标记为${manualMark}` : '已清除人工标记');
     } catch (error) {
       setToast(error instanceof Error ? error.message : '人工标记保存失败');
     }
@@ -811,24 +964,26 @@ export default function App() {
   if (authLoading) return <main className="login-screen"><div className="login-card login-loading"><LoaderCircle size={24} className="spin" /><span>正在检查登录状态…</span></div></main>;
   if (auth?.enabled && !auth.authenticated) return <LoginScreen onLogin={login} />;
 
+  const isAdmin = !auth?.enabled || auth.user?.role === 'admin';
+  const visibleNavItems = isAdmin ? navItems : navItems.filter((item) => item.id !== 'settings');
+
   return (
     <div className="app-shell">
       <aside className={`sidebar ${mobileNav ? 'mobile-open' : ''}`}>
         <div className="brand"><div className="brand-icon"><Anchor size={22} /></div><div><strong>港航工作台</strong><span>PORT OPS</span></div></div>
         <nav>
           <span className="nav-caption">工作台</span>
-          {navItems.map(({ id, label, icon: Icon }) => (
+          {visibleNavItems.map(({ id, label, icon: Icon }) => (
             <button key={id} className={activePage === id ? 'active' : ''} onClick={() => navigate(id)}><Icon size={18} /><span>{label}</span>{activePage === id && <span className="nav-dot" />}</button>
           ))}
-          <span className="nav-caption lower">管理</span>
-          <button className={activePage === 'settings' ? 'active' : ''} onClick={() => navigate('settings')}><Settings size={18} /><span>系统设置</span>{activePage === 'settings' && <span className="nav-dot" />}</button>
+          {isAdmin && <><span className="nav-caption lower">管理</span><button className={activePage === 'settings' ? 'active' : ''} onClick={() => navigate('settings')}><Settings size={18} /><span>系统设置</span>{activePage === 'settings' && <span className="nav-dot" />}</button></>}
         </nav>
         <div className="sidebar-foot">
-          <div className="system-health"><span className="health-dot" /><div><strong>采集服务正常</strong><span>{data ? `${data.sources.length} 个数据源在线` : '正在连接服务'}</span></div></div>
+          <div className="system-health"><span className="health-dot" /><div><strong>{isAdmin ? '采集服务正常' : '账号已登录'}</strong><span>{isAdmin ? (data ? `${data.sources.length} 个数据源在线` : '正在连接服务') : '当前账号尚未分配工作区'}</span></div></div>
           <div className="user-card-wrap">
-            <button className="user-card" onClick={() => navigate('settings')}><div className="avatar">A4</div><div><strong>{auth?.user?.username || 'A4专用版'}</strong><span>{auth?.user?.role === 'user' ? '普通用户' : '工作台管理员'} · 打开系统设置</span></div></button>
+          <button className="user-card" onClick={() => isAdmin ? navigate('settings') : setProfileMenuOpen((value) => !value)}><div className="avatar">A4</div><div><strong>{auth?.user?.username || 'A4专用版'}</strong><span>{auth?.user?.role === 'user' ? '普通用户' : '工作台管理员'}{isAdmin ? ' · 打开系统设置' : ''}</span></div></button>
             <button className="user-menu-button" aria-label="打开工作台菜单" title="工作台菜单" onClick={() => setProfileMenuOpen((value) => !value)}><MoreHorizontal size={17} /></button>
-            {profileMenuOpen && <div className="user-menu"><button onClick={() => navigate('settings')}><Settings size={14} />系统设置</button><button onClick={() => { setProfileMenuOpen(false); window.location.reload(); }}><RefreshCw size={14} />重新加载</button>{auth?.enabled ? <button onClick={() => { setProfileMenuOpen(false); void logout(); }}><X size={14} />退出登录</button> : null}</div>}
+            {profileMenuOpen && <div className="user-menu">{isAdmin && <button onClick={() => navigate('settings')}><Settings size={14} />系统设置</button>}<button onClick={() => { setProfileMenuOpen(false); window.location.reload(); }}><RefreshCw size={14} />重新加载</button>{auth?.enabled ? <button onClick={() => { setProfileMenuOpen(false); void logout(); }}><X size={14} />退出登录</button> : null}</div>}
           </div>
         </div>
       </aside>
@@ -844,20 +999,21 @@ export default function App() {
 
         <div className="content">
           {(syncing || automation?.running) && automation?.currentRun && <SyncProgress progress={automation.currentRun} queuedRuns={automation.queuedRuns || 0} />}
+          {!isAdmin && !(data?.shipments.length) && activePage === 'overview' && <section className="module-card user-workspace-empty"><div className="empty-state"><Users size={25} /><strong>当前账号暂无工作区数据</strong><span>这是独立工作区，可以直接导入 Excel 或新增单号；管理员工作区数据不会显示在这里。</span></div></section>}
           <div className={activePage === 'overview' ? '' : 'hidden-page'}>
           <section className="page-heading">
             <div><p className="eyebrow">OPERATIONS OVERVIEW</p><h1>运营总览</h1><p>集中追踪船期、靠泊与卸船动态，及时掌握异常变化。</p></div>
-            <div className="heading-actions"><button className="secondary-button add-record-button" onClick={() => setIntakeOpen(true)}><Ship size={17} />新增单号</button><button className="secondary-button" onClick={openManualNew}><Pencil size={16} />人工补录</button>{selected.size > 0 && <><button className="secondary-button" onClick={handleSelectedSync} disabled={syncing}><RefreshCw size={17} className={syncing ? 'spin' : ''} />更新已选 ({selected.size})</button><button className="danger-button" onClick={() => handleDeleteShipments([...selected])} disabled={syncing}><Trash2 size={15} />删除已选</button></>}<button className="secondary-button" onClick={handleExport}><Download size={17} />导出 Excel</button><button className="primary-button" onClick={() => handleSync()} disabled={syncing}><RefreshCw size={17} className={syncing ? 'spin' : ''} />{syncing ? '同步中…' : '同步最新数据'}</button></div>
+            <div className="heading-actions"><button className="secondary-button add-record-button" onClick={() => setIntakeOpen(true)}><Ship size={17} />新增单号</button><button className="secondary-button" onClick={openManualNew}><Pencil size={16} />人工补录</button>{selected.size > 0 && <><button className="secondary-button" onClick={handleSelectedSync} disabled={syncing}><RefreshCw size={17} className={syncing ? 'spin' : ''} />更新已选 ({selected.size})</button><button className="danger-button" onClick={() => handleDeleteShipments([...selected])} disabled={syncing}><Trash2 size={15} />删除已选</button></>}<button className="secondary-button" onClick={handleExport}><Download size={17} />导出 Excel</button><label className="sync-option" title="关闭后会连同已完成卸船的记录一起重新查询"><input type="checkbox" checked={skipCompletedRecords} onChange={(event) => setSkipCompletedRecords(event.target.checked)} />跳过已完成卸船</label><button className="primary-button" onClick={() => handleSync({ skipCompleted: skipCompletedRecords })} disabled={syncing}><RefreshCw size={17} className={syncing ? 'spin' : ''} />{syncing ? '同步中…' : '同步最新数据'}</button></div>
           </section>
 
           <section className="automation-panel">
             <div className="automation-main">
               <div className="automation-symbol"><Timer size={20} /></div>
-              <div><div className="automation-heading"><strong>定时自动更新</strong><span className="mode-tag live">真实官网数据</span></div><p>每天 09:00、11:00、17:30 自动查询未完成记录</p></div>
+            <div><div className="automation-heading"><strong>自动化查询</strong><span className="mode-tag live">真实官网数据</span></div><p>支持手动同步，也可在自动化任务中创建自定义执行计划</p></div>
             </div>
             <div className="automation-facts">
               <div><FileCheck2 size={16} /><span>Excel 文件</span><strong>{automation?.workbook ? `${automation.workbook.records} 条记录` : '尚未导入'}</strong></div>
-              <div><Timer size={16} /><span>下次计划</span><strong>{automation?.schedule.map((item) => item.time).join(' · ') || '读取中'}</strong></div>
+              <div><Timer size={16} /><span>执行计划</span><strong>按自定义任务配置</strong></div>
               <div><MessageSquare size={16} /><span>企业微信</span><strong>{automation?.notificationConfigured ? '已配置' : '前往系统设置配置'}</strong></div>
             </div>
             <div className="automation-actions">
@@ -873,15 +1029,22 @@ export default function App() {
             <MetricCard title="未来 48h 到港" value={metrics.arriving} suffix="票" trend="需要持续关注" icon={<Clock3 size={20} />} tone="teal" onClick={() => setMetricView('arriving')} />
             <MetricCard title="正在码头作业" value={metrics.working} suffix="票" trend="卸船作业进行中" icon={<Anchor size={20} />} tone="blue" onClick={() => setMetricView('working')} />
             <MetricCard title="已完成卸船" value={metrics.completed} suffix="票" trend="后续不再重复查询" icon={<Check size={20} />} tone="green" onClick={() => setMetricView('completed')} />
-            <MetricCard title="计划有变更" value={metrics.changed} suffix="票" trend="建议优先处理" icon={<CircleAlert size={20} />} tone="orange" alert onClick={() => setMetricView('changed')} />
+            <MetricCard title="数据有异常" value={metrics.changed} suffix="票" trend="建议优先处理" icon={<CircleAlert size={20} />} tone="orange" alert onClick={() => setMetricView('changed')} />
           </section>
 
-          <section className="source-strip">
-            <div className="source-title"><div className="source-icon"><Database size={19} /></div><div><strong>数据源状态</strong><span>当前 Excel 累计 {successfulSources} 家成功{automation?.lastRun ? ` · 最近一次：查询 ${automation.lastRun.total} 条，成功 ${automation.lastRun.success}、失败 ${automation.lastRun.failed}、跳过 ${automation.lastRun.skipped}` : ''}</span></div></div>
-            <div className="source-list">
-              {(data?.sources || []).map((source) => <SourcePill key={source.id} source={source} />)}
+          <section className={`source-strip ${sourceDetailsOpen ? 'expanded' : 'collapsed'}`}>
+            <div className="source-summary">
+              <div className="source-title"><div className="source-icon"><Database size={19} /></div><div><strong>数据源状态</strong><span>当前 Excel 累计 {successfulSources} 家成功{automation?.lastRun ? ` · 最近一次：查询 ${automation.lastRun.total} 条，成功 ${automation.lastRun.success}、失败 ${automation.lastRun.failed}、跳过 ${automation.lastRun.skipped}` : ''}</span></div></div>
+              <div className="source-summary-actions">
+                <button className="source-expand-button" type="button" aria-expanded={sourceDetailsOpen} aria-controls="source-status-details" onClick={() => setSourceDetailsOpen((value) => !value)}>{sourceDetailsOpen ? '收起详情' : '展开详情'}<ChevronDown size={15} /></button>
+                <button className="manage-link" onClick={() => navigate('sources')}>管理数据源<ChevronRight size={15} /></button>
+              </div>
             </div>
-            <button className="manage-link" onClick={() => navigate('sources')}>管理数据源<ChevronRight size={15} /></button>
+            {sourceDetailsOpen && <div className="source-details" id="source-status-details">
+              <div className="source-list">
+                {(data?.sources || []).map((source) => <SourcePill key={source.id} source={source} />)}
+              </div>
+            </div>}
           </section>
 
           <section className={`table-card ${denseTable ? 'compact-table' : ''}`}>
@@ -893,7 +1056,7 @@ export default function App() {
               <label className="search-box"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索提单号、柜号或船司" />{query && <button onClick={() => setQuery('')}><X size={14} /></button>}</label>
               <div className="select-wrap"><select value={carrier} onChange={(event) => setCarrier(event.target.value)}><option value="全部船司">全部船司</option>{carriers.map((item) => <option key={item} value={item}>{carrierLabel(item)}</option>)}</select><ChevronDown size={15} /></div>
               <div className="select-wrap"><select value={status} onChange={(event) => setStatus(event.target.value as typeof status)}>{statusOptions.map((item) => <option key={item}>{item}</option>)}</select><ChevronDown size={15} /></div>
-              <div className="more-filter-wrap" ref={moreFilterRef}><button className={`filter-button ${onlyIncomplete || onlyException || manualMarkFilter !== '全部标记' || dateFrom || dateTo || timeSort !== 'default' ? 'filter-active' : ''}`} onClick={(event) => { event.stopPropagation(); setMoreFilterOpen((value) => !value); }}><Filter size={16} />更多筛选</button>{moreFilterOpen && <div className="more-filter-menu advanced-filter-menu" onClick={(event) => event.stopPropagation()}><strong>高级筛选与排序</strong><label><input type="checkbox" checked={onlyIncomplete} onChange={(event) => setOnlyIncomplete(event.target.checked)} />只看未完成记录</label><label><input type="checkbox" checked={onlyException} onChange={(event) => setOnlyException(event.target.checked)} />只看失败或异常</label><span className="filter-field-label">人工标记</span><select value={manualMarkFilter} onChange={(event) => setManualMarkFilter(event.target.value as typeof manualMarkFilter)}><option value="全部标记">全部标记</option>{manualMarkOptions.map((option) => <option key={option.label} value={option.value}>{option.label}</option>)}</select><span className="filter-field-label">日期字段</span><select value={dateField} onChange={(event) => setDateField(event.target.value as ShipmentDateField)}><option value="eta">到港时间</option><option value="dischargeTime">卸船时间</option><option value="lastUpdated">最后更新时间</option></select><div className="date-filter-grid"><label><span>开始日期</span><input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} /></label><label><span>结束日期</span><input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} /></label></div><span className="filter-field-label">时间排序</span><select value={timeSort} onChange={(event) => setTimeSort(event.target.value as ShipmentSort)}><option value="default">默认顺序</option><option value="asc">时间从早到晚</option><option value="desc">时间从晚到早</option></select><button onClick={() => { setOnlyIncomplete(false); setOnlyException(false); setManualMarkFilter('全部标记'); setDateFrom(''); setDateTo(''); setTimeSort('default'); setMoreFilterOpen(false); }}>重置高级筛选</button></div>}</div>
+              <div className="more-filter-wrap" ref={moreFilterRef}><button className={`filter-button ${onlyIncomplete || onlyException || manualMarkFilter !== '全部标记' || dateFrom || dateTo || timeSort !== 'default' ? 'filter-active' : ''}`} onClick={(event) => { event.stopPropagation(); setMoreFilterOpen((value) => !value); }}><Filter size={16} />更多筛选</button>{moreFilterOpen && <div className="more-filter-menu advanced-filter-menu" onClick={(event) => event.stopPropagation()}><strong>高级筛选与排序</strong><label><input type="checkbox" checked={onlyIncomplete} onChange={(event) => setOnlyIncomplete(event.target.checked)} />只看未完成记录</label><label><input type="checkbox" checked={onlyException} onChange={(event) => setOnlyException(event.target.checked)} />只看失败或异常</label><span className="filter-field-label">人工标记</span><select value={manualMarkFilter} onChange={(event) => setManualMarkFilter(event.target.value as typeof manualMarkFilter)}><option value="全部标记">全部标记</option>{manualMarkOptions.filter((option) => option.value !== '已清关').map((option) => <option key={option.label} value={option.value}>{option.label}</option>)}</select><span className="filter-field-label">日期字段</span><select value={dateField} onChange={(event) => setDateField(event.target.value as ShipmentDateField)}><option value="eta">到港时间</option><option value="dischargeTime">卸船时间</option><option value="lastUpdated">最后更新时间</option></select><div className="date-filter-grid"><label><span>开始日期</span><input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} /></label><label><span>结束日期</span><input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} /></label></div><span className="filter-field-label">时间排序</span><select value={timeSort} onChange={(event) => setTimeSort(event.target.value as ShipmentSort)}><option value="default">默认顺序</option><option value="asc">时间从早到晚</option><option value="desc">时间从晚到早</option></select><button onClick={() => { setOnlyIncomplete(false); setOnlyException(false); setManualMarkFilter('全部标记'); setDateFrom(''); setDateTo(''); setTimeSort('default'); setMoreFilterOpen(false); }}>重置高级筛选</button></div>}</div>
               {(query || carrier !== '全部船司' || status !== '全部状态' || onlyIncomplete || onlyException || manualMarkFilter !== '全部标记' || dateFrom || dateTo || timeSort !== 'default') && <button className="clear-filter" onClick={() => { setQuery(''); setCarrier('全部船司'); setStatus('全部状态'); setOnlyIncomplete(false); setOnlyException(false); setManualMarkFilter('全部标记'); setDateFrom(''); setDateTo(''); setTimeSort('default'); }}>清除筛选</button>}
             </div>
 
@@ -927,7 +1090,8 @@ export default function App() {
           </section>
           <p className="legal-note">数据仅用于运营辅助，最终船期以船司及码头官方信息为准。</p>
           </div>
-          {activePage !== 'overview' && <ModulePage page={activePage} data={data} automation={automation} authEnabled={Boolean(auth?.enabled)} currentUser={auth?.user || null} syncing={syncing} onSync={handleSync} onMark={handleManualMark} onDelete={handleDeleteShipments} onToggleAutomation={handleToggleAutomation} onCreateBackup={handleCreateBackup} onRestoreBackup={handleRestoreBackup} onAutomationUpdated={setAutomation} onUpload={() => uploadInput.current?.click()} onToast={setToast} onOpenDetail={setDetail} onOpenEdit={openManualEdit} onOpenManual={openManualNew} />}
+          {activePage === 'history' && <ClearanceHistoryPage onDashboardUpdated={setData} onAutomationUpdated={setAutomation} onToast={setToast} />}
+          {activePage !== 'overview' && activePage !== 'history' && (isAdmin || activePage !== 'settings') && <ModulePage page={activePage} data={data} automation={automation} authEnabled={Boolean(auth?.enabled)} currentUser={auth?.user || null} syncing={syncing} onSync={handleSync} onMark={handleManualMark} onDelete={handleDeleteShipments} onToggleAutomation={handleToggleAutomation} onCreateBackup={handleCreateBackup} onRestoreBackup={handleRestoreBackup} onAutomationUpdated={setAutomation} onUpload={() => uploadInput.current?.click()} onToast={setToast} onOpenDetail={setDetail} onOpenEdit={openManualEdit} onOpenManual={openManualNew} />}
         </div>
       </main>
 
@@ -956,8 +1120,9 @@ export default function App() {
       </div>}
 
       {metricView && <MetricListModal metricKey={metricView} shipments={metricLists[metricView]} syncing={syncing} onClose={() => setMetricView(null)} onExport={handleListExport} onMark={handleManualMark} onSync={(ids) => handleSync({ shipmentIds: ids })} onDelete={handleDeleteShipments} onEdit={openManualEdit} onDetail={setDetail} />}
-      {detail && <div className="drawer-backdrop" onClick={() => setDetail(null)}><aside className="detail-drawer" onClick={(event) => event.stopPropagation()}><button className="drawer-close" onClick={() => setDetail(null)}><X size={19} /></button><p className="eyebrow">SHIPMENT DETAIL</p><h2>单号追踪详情</h2><div className="drawer-carrier"><CarrierMark code={detail.carrierCode} /><div><strong>{detail.carrier}</strong><span>{detail.billNo}</span></div></div><div className="detail-grid"><DetailItem label="提单号" value={detail.billNo} /><DetailItem label="官网查询号" value={detail.verificationNo || detail.billNo} /><DetailItem label="柜号" value={detail.containerNo || '—'} /><DetailItem label="查询进度" value={<ProgressBadge shipment={detail} />} /><DetailItem label="船只状态" value={<VesselStateBadge shipment={detail} />} /><DetailItem label="人工标记" value={<ManualMarkSelect value={detail.manualMark} onChange={(value) => handleManualMark(detail.id, value)} disabled={syncing} />} /></div><div className="timeline"><TimelineItem label="到港时间 ATA / ETA" value={formatDateTime(detail.eta)} active={Boolean(detail.eta)} /><TimelineItem label="卸船时间" value={formatDateTime(detail.dischargeTime)} active={Boolean(detail.dischargeTime)} last /></div>{detail.route && <RouteTimeline route={detail.route} />}{detail.note && <div className="detail-alert"><CircleAlert size={17} /><div><strong>查询备注</strong><span>{detail.note}</span></div></div>}<div className="verification-card"><div><Globe2 size={17} /><div><strong>官网真实性核验</strong><span>官网复核会复制船司实际接受的查询号；森罗会自动去除 SMLM 前缀。部分官网会要求重新查询或接受 Cookie。</span></div></div><VerificationActions shipment={detail} /></div><div className="drawer-actions"><button className="secondary-button" onClick={() => openManualEdit(detail)}><Pencil size={15} />人工修改时间与状态</button></div><div className="drawer-meta">数据更新于 {formatDateTime(detail.lastUpdated)}</div></aside></div>}
+      {detail && <div className="drawer-backdrop" onClick={() => setDetail(null)}><aside className="detail-drawer" onClick={(event) => event.stopPropagation()}><button className="drawer-close" onClick={() => setDetail(null)}><X size={19} /></button><p className="eyebrow">SHIPMENT DETAIL</p><h2>单号追踪详情</h2><div className="drawer-carrier"><CarrierMark code={detail.carrierCode} /><div><strong>{detail.carrier}</strong><span>{detail.billNo}</span></div></div><div className="detail-grid"><DetailItem label="提单号" value={detail.billNo} /><DetailItem label="官网查询号" value={detail.verificationNo || detail.billNo} /><DetailItem label="柜号" value={detail.containerNo || '—'} /><DetailItem label="查询进度" value={<ProgressBadge shipment={detail} />} /><DetailItem label="船只状态" value={<VesselStateBadge shipment={detail} />} /><DetailItem label="人工标记" value={<ManualMarkSelect value={detail.manualMark} onChange={(value) => handleManualMark(detail.id, value)} disabled={syncing} />} /></div><div className="timeline"><TimelineItem label="到港时间 ATA / ETA" value={formatDateTime(detail.eta)} active={Boolean(detail.eta)} /><TimelineItem label="卸船时间" value={detail.dischargeTime ? formatDateTime(detail.dischargeTime) : detail.vesselState === '已到港已卸船' ? '已确认完成，官网未提供精确时间' : formatDateTime(null)} active={Boolean(detail.dischargeTime || detail.vesselState === '已到港已卸船')} last /></div>{(detail.trackingDetail || detail.route) && <RouteTimeline route={detail.route} detail={detail.trackingDetail} />}{detail.note && <div className="detail-alert"><CircleAlert size={17} /><div><strong>查询备注</strong><span>{detail.note}</span></div></div>}<div className="verification-card"><div><Globe2 size={17} /><div><strong>官网真实性核验</strong><span>官网复核会复制船司实际接受的查询号；森罗会自动去除 SMLM 前缀。部分官网会要求重新查询或接受 Cookie。</span></div></div><VerificationActions shipment={detail} /></div>{(detail.carrierCode === 'CMA' || detail.carrierCode === 'HAPAG') && <div className="manual-collection-card"><div><Globe2 size={17} /><div><strong>普通浏览器采集</strong><span>{detail.carrierCode === 'HAPAG' ? '赫伯罗特固定使用完整柜号查询；完成查询后由扩展采集当前页面。' : '用日常 Chrome/Edge 完成验证和查询，再由扩展采集当前结果页面。'}</span></div></div><div className="manual-collection-actions">{detail.carrierCode === 'CMA' && <button className="secondary-button" onClick={() => void startManualCollection(detail, 'bill')} disabled={manualCollectionOpening}><ExternalLink size={14} />提单号采集</button>}{detail.containerNo && <button className="secondary-button" onClick={() => void startManualCollection(detail, 'container')} disabled={manualCollectionOpening}><ExternalLink size={14} />{detail.carrierCode === 'HAPAG' ? '完整柜号采集' : '柜号采集'}</button>}</div></div>}<div className="drawer-actions"><button className="secondary-button" onClick={() => openManualEdit(detail)}><Pencil size={15} />人工修改时间与状态</button></div><div className="drawer-meta">数据更新于 {formatDateTime(detail.lastUpdated)}</div></aside></div>}
       {manualForm && <ManualFormModal form={manualForm} saving={manualSaving} onChange={setManualForm} onClose={() => !manualSaving && setManualForm(null)} onSave={saveManualForm} />}
+      {manualCollectionSession && <ManualCollectionModal session={manualCollectionSession} onClose={() => setManualCollectionSession(null)} onCopy={() => { void navigator.clipboard?.writeText(manualCollectionSession.token).then(() => setToast('采集令牌已复制')).catch(() => setToast('复制失败，请手动选择令牌')); }} onCopyQuery={() => { const value = manualCollectionSession.queryType === 'container' ? manualCollectionSession.containerNo : manualCollectionSession.queryBillNo; void navigator.clipboard?.writeText(value).then(() => setToast(`${manualCollectionSession.queryType === 'bill' ? '提单号' : '柜号'}已复制`)).catch(() => setToast('复制失败，请手动选择号码')); }} />}
       {verification && verificationKey !== verificationDismissed && <VerificationModal verification={verification} onSkip={skipVerification} onContinue={() => setVerificationDismissed(verificationKey)} />}
       {toast && <div className="toast"><Check size={17} />{toast}</div>}
     </div>
@@ -1007,12 +1172,176 @@ interface BackupView {
   reason: string;
 }
 
+interface ClearanceHistoryEntryView {
+  id: string;
+  archivedAt: string;
+  originalRowNumber: number;
+  carrier: string;
+  carrierCode: string;
+  carrierHint: string;
+  billNo: string;
+  containerNo: string;
+  arrivalTime: string | null;
+  dischargeTime: string | null;
+  vesselState: NonNullable<Shipment['vesselState']> | '';
+  manualMark: '已清关';
+  lastUpdated: string | null;
+  note: string;
+  progress: Shipment['progress'] | '';
+}
+
+interface ClearanceHistoryView {
+  retentionDays: 3 | 7;
+  lastCleanupAt: string | null;
+  entries: ClearanceHistoryEntryView[];
+}
+
 function fullDate(value: string) {
   return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value));
 }
 
+function historyExpiryText(archivedAt: string, retentionDays: 3 | 7) {
+  const expiresAt = new Date(archivedAt).getTime() + retentionDays * 24 * 60 * 60 * 1000;
+  const remaining = expiresAt - Date.now();
+  if (remaining <= 0) return '等待自动清理';
+  const hours = Math.ceil(remaining / (60 * 60 * 1000));
+  return hours <= 24 ? `${hours} 小时后清理` : `${Math.ceil(hours / 24)} 天后清理`;
+}
+
+function ClearanceHistoryPage({ onDashboardUpdated, onAutomationUpdated, onToast }: {
+  onDashboardUpdated: (dashboard: DashboardData) => void;
+  onAutomationUpdated: (automation: AutomationStatus) => void;
+  onToast: (message: string) => void;
+}) {
+  const [history, setHistory] = useState<ClearanceHistoryView>({ retentionDays: 7, lastCleanupAt: null, entries: [] });
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [query, setQuery] = useState('');
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  async function loadHistory() {
+    setLoading(true);
+    try {
+      const payload = await apiRequest<ClearanceHistoryView>('/api/clearance-history');
+      setHistory(payload);
+      setSelected((previous) => new Set([...previous].filter((id) => payload.entries.some((entry) => entry.id === id))));
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '清关历史加载失败');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { void loadHistory(); }, []);
+
+  const filtered = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return history.entries;
+    return history.entries.filter((entry) => [entry.carrier, entry.carrierCode, entry.billNo, entry.containerNo]
+      .some((value) => value.toLowerCase().includes(normalized)));
+  }, [history.entries, query]);
+
+  const allSelected = filtered.length > 0 && filtered.every((entry) => selected.has(entry.id));
+
+  function toggleOne(id: string) {
+    setSelected((previous) => {
+      const next = new Set(previous);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  async function updateRetention(retentionDays: 3 | 7) {
+    if (retentionDays < history.retentionDays && !window.confirm('切换为 3 天后，超过 3 天的清关历史会立即永久清理。确认继续吗？')) return;
+    setBusy(true);
+    try {
+      const payload = await apiRequest<ClearanceHistoryView>('/api/clearance-history/settings', {
+        method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ retentionDays }),
+      });
+      setHistory(payload);
+      setSelected(new Set());
+      onToast(`清关历史已改为保留 ${retentionDays} 天`);
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '保留周期保存失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function restore(entry: ClearanceHistoryEntryView) {
+    if (!window.confirm(`确认将 ${entry.billNo || entry.containerNo} 恢复到船期追踪？恢复后会重新参与人工更新和自动化任务。`)) return;
+    setBusy(true);
+    try {
+      const payload = await apiRequest<{ history: ClearanceHistoryView; dashboard: DashboardData; automation: AutomationStatus }>(`/api/clearance-history/${encodeURIComponent(entry.id)}/restore`, { method: 'POST' });
+      setHistory(payload.history);
+      onDashboardUpdated(payload.dashboard);
+      onAutomationUpdated(payload.automation);
+      setSelected((previous) => { const next = new Set(previous); next.delete(entry.id); return next; });
+      onToast('记录已恢复到船期追踪，人工标记已清除');
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '历史记录恢复失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteEntries(ids: string[]) {
+    if (!ids.length) return;
+    if (!window.confirm(`确认永久删除选中的 ${ids.length} 条清关历史？删除后只能从 Excel 备份中恢复。`)) return;
+    setBusy(true);
+    try {
+      const payload = await apiRequest<{ deleted: number; history: ClearanceHistoryView }>('/api/clearance-history/delete-batch', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids }),
+      });
+      setHistory(payload.history);
+      setSelected(new Set());
+      onToast(`已删除 ${payload.deleted} 条清关历史`);
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '清关历史删除失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cleanupExpired() {
+    setBusy(true);
+    try {
+      const payload = await apiRequest<{ deleted: number; history: ClearanceHistoryView }>('/api/clearance-history/cleanup', { method: 'POST' });
+      setHistory(payload.history);
+      setSelected(new Set());
+      onToast(payload.deleted ? `已清理 ${payload.deleted} 条到期历史` : '当前没有到期的清关历史');
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '清关历史清理失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <div className="module-page clearance-history-page">
+    <section className="page-heading module-heading">
+      <div><p className="eyebrow">CLEARANCE HISTORY</p><h1>清关历史</h1><p>标记为“已清关”的柜子会立即从在途追踪移入这里，并按保留周期自动清理。</p></div>
+      <button className="secondary-button" onClick={() => void cleanupExpired()} disabled={busy}><Eraser size={15} />立即清理到期记录</button>
+    </section>
+    <section className="clearance-summary-grid">
+      <article><Archive size={20} /><div><span>历史记录</span><strong>{history.entries.length} 条</strong><small>与当前船期 Excel 分离保存</small></div></article>
+      <article><Timer size={20} /><div><span>自动保留周期</span><strong>{history.retentionDays} 天</strong><small>服务每日检查一次到期记录</small></div><select value={history.retentionDays} disabled={busy} onChange={(event) => void updateRetention(Number(event.target.value) as 3 | 7)}><option value={3}>3 天</option><option value={7}>7 天</option></select></article>
+      <article><Check size={20} /><div><span>最近清理检查</span><strong>{history.lastCleanupAt ? fullDate(history.lastCleanupAt) : '尚未执行'}</strong><small>只删除超过保留周期的历史</small></div></article>
+    </section>
+    <section className="module-card clearance-history-card">
+      <div className="module-card-header"><div><strong>已清关记录</strong><span>可恢复到船期追踪；自动清理前仍保留完整时间、状态和备注</span></div>{selected.size > 0 && <button className="danger-button" onClick={() => void deleteEntries([...selected])} disabled={busy}><Trash2 size={13} />批量删除 ({selected.size})</button>}</div>
+      <div className="history-toolbar"><label className="search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索船司、提单号或柜号" />{query && <button onClick={() => setQuery('')}><X size={13} /></button>}</label><span>当前显示 {filtered.length} / {history.entries.length} 条</span></div>
+      <div className="module-table-wrap"><table className="module-table clearance-history-table"><thead><tr><th className="check-col"><input type="checkbox" checked={allSelected} onChange={() => setSelected(allSelected ? new Set() : new Set(filtered.map((entry) => entry.id)))} /></th><th>归档时间</th><th>船司</th><th>提单号</th><th>柜号</th><th>到港时间</th><th>卸船时间</th><th>船只状态</th><th>自动清理</th><th>操作</th></tr></thead><tbody>
+        {loading ? <tr><td colSpan={10}><div className="loading-state"><LoaderCircle className="spin" />正在读取清关历史…</div></td></tr> : filtered.length ? filtered.map((entry) => {
+          const stateClass = entry.vesselState === '已到港已卸船' ? 'done' : entry.vesselState === '已到港未卸船' ? 'working' : 'pending';
+          return <tr key={entry.id} className={selected.has(entry.id) ? 'selected-row' : ''}><td className="check-col"><input type="checkbox" checked={selected.has(entry.id)} onChange={() => toggleOne(entry.id)} /></td><td><div className="update-cell"><span>{fullDate(entry.archivedAt)}</span><small>原 Excel 第 {entry.originalRowNumber} 行</small></div></td><td><div className="carrier-cell"><CarrierMark code={entry.carrierCode} /><div><strong>{carrierLabel(entry.carrierCode, entry.carrier)}</strong><span>{entry.carrierCode}</span></div></div></td><td className="mono">{entry.billNo || '—'}</td><td className="mono">{entry.containerNo || '—'}</td><td><div className="date-cell eta">{formatDateTime(entry.arrivalTime, true)}</div></td><td><div className="date-cell discharge">{formatDateTime(entry.dischargeTime, true)}</div></td><td><span className={`status-badge ${stateClass}`}>{entry.vesselState || '未设置'}</span></td><td><span className="history-expiry">{historyExpiryText(entry.archivedAt, history.retentionDays)}</span></td><td><div className="row-actions"><button className="secondary-button compact-button" onClick={() => void restore(entry)} disabled={busy}><RefreshCw size={13} />恢复</button><button className="row-action danger-action" title="永久删除历史记录" onClick={() => void deleteEntries([entry.id])} disabled={busy}><Trash2 size={14} /></button></div></td></tr>;
+        }) : <tr><td colSpan={10}><div className="empty-state"><Archive size={23} /><strong>暂无清关历史</strong><span>在船期追踪中将人工标记改为“已清关”后，记录会自动移入这里</span></div></td></tr>}
+      </tbody></table></div>
+    </section>
+  </div>;
+}
+
 function ModulePage({ page, data, automation, authEnabled, currentUser, syncing, onSync, onMark, onDelete, onToggleAutomation, onCreateBackup, onRestoreBackup, onAutomationUpdated, onUpload, onToast, onOpenDetail, onOpenEdit, onOpenManual }: {
-  page: Exclude<PageId, 'overview'>;
+  page: Exclude<PageId, 'overview' | 'history'>;
   data: DashboardData | null;
   automation: AutomationStatus | null;
   authEnabled: boolean;
@@ -1047,6 +1376,7 @@ function ModulePage({ page, data, automation, authEnabled, currentUser, syncing,
   const [webhookSaving, setWebhookSaving] = useState(false);
   const [webhookTesting, setWebhookTesting] = useState(false);
   const [browserSaving, setBrowserSaving] = useState(false);
+  const [browserCleanup, setBrowserCleanup] = useState(false);
   const [deletingBackup, setDeletingBackup] = useState('');
   const [selectedBackups, setSelectedBackups] = useState<Set<string>>(new Set());
   const [selectedTasks, setSelectedTasks] = useState<Set<string>>(new Set());
@@ -1148,6 +1478,21 @@ function ModulePage({ page, data, automation, authEnabled, currentUser, syncing,
       onToast(error instanceof Error ? error.message : '浏览器采集设置保存失败');
     } finally {
       setBrowserSaving(false);
+    }
+  }
+
+  async function cleanupAutomationChrome() {
+    if (!window.confirm('确认清理工作台自动化 Chrome？当前没有运行中的查询任务时才可执行；日常使用的 Chrome 不受影响。')) return;
+    setBrowserCleanup(true);
+    try {
+      const payload = await apiRequest<{ automation: AutomationStatus; cleanup?: { orphanedProcesses?: number } }>('/api/automation/browser/cleanup', { method: 'POST' });
+      onAutomationUpdated(payload.automation);
+      const count = payload.cleanup?.orphanedProcesses || 0;
+      onToast(count ? `自动化 Chrome 已清理（${count} 个进程）；下次网页查询会重新打开会话` : '自动化 Chrome 已清理；下次网页查询会重新打开会话');
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : '自动化 Chrome 清理失败');
+    } finally {
+      setBrowserCleanup(false);
     }
   }
 
@@ -1383,7 +1728,7 @@ function ModulePage({ page, data, automation, authEnabled, currentUser, syncing,
 
   const pageInfo = {
     tracking: ['SHIPMENT TRACKING', '船期追踪', '按 Excel 字段查看全部单号的到港、卸船和查询进度。'],
-    sources: ['DATA SOURCES', '数据源管理', '查看船司识别规则、查询方式和官网解析器接入状态。'],
+    sources: ['DATA SOURCES', '数据源管理', '查看系统内置船司规则、接口状态和网页采集能力；订单更新请在船期追踪中执行。'],
     automation: ['AUTOMATION', '自动化任务', '管理定时计划、手动执行任务并查看历史运行结果。'],
     exports: ['EXPORTS & BACKUPS', '导出与备份', '下载当前工作簿，或恢复和查看每次更新前的自动备份。'],
     settings: ['SYSTEM SETTINGS', '系统设置', '检查服务运行模式、时区和企业微信通知配置。'],
@@ -1405,19 +1750,15 @@ function ModulePage({ page, data, automation, authEnabled, currentUser, syncing,
       </tbody></table></div>
     </section>}
 
-    {page === 'sources' && <section className="carrier-grid">
+    {page === 'sources' && <><section className="module-card source-explainer"><div className="module-card-header"><div><strong>数据源管理的作用</strong><span>这里维护船司识别规则与解析器状态，不直接保存订单。</span></div><span className="integration-tag ready">系统内置</span></div><p>每个船司的提单前缀、查询号码规则、官方接口和网页备用方式都在这里统一展示。数据源属于系统能力，不能像订单一样删除；如果某个官网暂时不可用，会在这里显示异常，订单更新仍请前往“船期追踪”执行。</p></section><section className="carrier-grid">
       {carrierRules.map((rule) => {
         const integrationLabel = { ready: '已接入', blocked: '浏览器仍受风控', limited: '浏览器备用已接入', error: '官网接口异常' }[rule.integration];
-        return <article className="carrier-rule-card" key={`${rule.code}-${rule.name}`}><div className="carrier-rule-head"><CarrierMark code={rule.code} /><div><strong>{carrierLabel(rule.code, rule.name)}</strong><span>{rule.prefix} · {rule.code}</span></div><span className={`integration-tag ${rule.integration}`}>{integrationLabel}</span></div><dl><div><dt>查询号码</dt><dd>{rule.removePrefix ? `去除 ${rule.code === 'SMLINE' ? 'SMLM' : rule.prefix} 前缀` : '保留完整提单号'}</dd></div><div><dt>查询方式</dt><dd>{rule.queryMode === 'bill-and-container' ? '提单号 + 柜号均需成功' : rule.queryMode === 'bill-or-container' ? '提单号 / 柜号任一成功' : rule.queryMode === 'bill-then-container' ? '提单失败后改查柜号' : '仅提单号'}</dd></div></dl><p className="integration-message">{rule.integrationMessage}</p><div className="carrier-rule-actions"><a href={rule.url} target="_blank" rel="noreferrer">打开船司查询页面<ExternalLink size={13} /></a><button className="text-action-button" onClick={() => syncCarrier(rule.code)} disabled={syncing}><RefreshCw size={13} />只更新此船司</button></div></article>;
+        return <article className="carrier-rule-card" key={`${rule.code}-${rule.name}`}><div className="carrier-rule-head"><CarrierMark code={rule.code} /><div><strong>{carrierLabel(rule.code, rule.name)}</strong><span>{rule.prefix} · {rule.code}</span></div><span className={`integration-tag ${rule.integration}`}>{integrationLabel}</span></div><dl><div><dt>查询号码</dt><dd>{rule.removePrefix ? `去除 ${rule.code === 'SMLINE' ? 'SMLM' : rule.prefix} 前缀` : '保留完整提单号'}</dd></div><div><dt>查询方式</dt><dd>{rule.queryMode === 'bill-and-container' ? '提单号 + 柜号均需成功' : rule.queryMode === 'bill-or-container' ? '提单号 / 柜号任一成功' : rule.queryMode === 'bill-then-container' ? '提单失败后改查柜号' : '仅提单号'}</dd></div></dl><p className="integration-message">{rule.integrationMessage}</p><div className="carrier-rule-actions"><a href={rule.url} target="_blank" rel="noreferrer">打开船司查询页面<ExternalLink size={13} /></a><span className="source-built-in">内置规则 · 不可删除</span></div></article>;
       })}
-    </section>}
+    </section></>}
 
     {page === 'automation' && <>
-      <section className="schedule-grid">
-        {(automation?.schedule || []).map((schedule, index) => <article className="schedule-card" key={schedule.time}><div className="schedule-index">0{index + 1}</div><div><span>每日定时任务</span><strong>{schedule.time}</strong><small>Asia/Shanghai · {schedule.cron}</small></div><span className={`enabled-pill ${automation?.enabled ? '' : 'disabled'}`}>{automation?.enabled ? '已启用' : '已停用'}</span></article>)}
-      </section>
-      <section className="module-card automation-controls"><div><div className="control-icon"><FileSpreadsheet size={18} /></div><div><strong>官方接口 + 网页模拟点击</strong><span>接口失败后使用系统 Chrome 串行查询；页面数据无法核验时保存截图并记录原因</span></div></div><label className="setting-toggle"><span>{automation?.enabled ? '定时任务已启用' : '定时任务已停用'}</span><input type="checkbox" checked={Boolean(automation?.enabled)} onChange={(event) => onToggleAutomation(event.target.checked)} /><span className="switch-slider" /></label></section>
-      <section className="module-card task-manager"><div className="module-card-header"><div><strong>自定义自动化任务</strong><span>可按船司或单条船期创建任务；批量执行时按列表顺序逐条完成</span></div><div className="task-toolbar"><button className="secondary-button" onClick={() => setTaskModalOpen(true)}><Save size={14} />新建任务</button>{selectedTasks.size > 0 && <><button className="secondary-button" onClick={runSelectedTasks} disabled={taskRunning}><RefreshCw size={14} />按顺序执行 ({selectedTasks.size})</button><button className="danger-button" onClick={deleteSelectedTasks}><Trash2 size={13} />批量删除</button></>}</div></div><div className="task-list">{tasks.length ? tasks.map((task) => <div className={`task-row ${selectedTasks.has(task.id) ? 'selected-row' : ''}`} key={task.id}><input type="checkbox" checked={selectedTasks.has(task.id)} onChange={() => toggleTask(task.id)} /><div className="task-main"><strong>{task.name}</strong><span>{task.scope === 'all' ? '全部未完成记录' : task.scope === 'carrier' ? `船司：${task.carrierCodes.map((code) => carrierLabel(code)).join('、')}` : `单条船期：${task.shipmentIds.length} 条`} · {task.scheduleTime ? `每天 ${task.scheduleTime}` : '仅手动执行'} · 创建于 {fullDate(task.createdAt)}</span></div><span className={`enabled-pill ${task.enabled ? '' : 'disabled'}`}>{task.enabled ? '已启用' : '已停用'}</span><button className="text-action-button" onClick={() => runTask(task)} disabled={!task.enabled || taskRunning}><RefreshCw size={13} />立即执行</button><button className="row-action" title={task.enabled ? '停用任务' : '启用任务'} onClick={async () => { try { const payload = await apiRequest<{ tasks: AutomationTask[] }>(`/api/automation/tasks/${encodeURIComponent(task.id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: !task.enabled }) }); setTasks(payload.tasks || []); } catch (error) { onToast(error instanceof Error ? error.message : '任务设置保存失败'); } }}><Clock3 size={14} /></button><button className="row-action danger-action" title="删除任务" onClick={async () => { if (!window.confirm(`确认删除任务“${task.name}”？`)) return; setDeletingTask(task.id); try { const payload = await apiRequest<{ tasks: AutomationTask[] }>('/api/automation/tasks/delete-batch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [task.id] }) }); setTasks(payload.tasks || []); setSelectedTasks((previous) => { const next = new Set(previous); next.delete(task.id); return next; }); onToast('任务已删除'); } catch (error) { onToast(error instanceof Error ? error.message : '删除任务失败'); } finally { setDeletingTask(''); } }} disabled={deletingTask === task.id}><Trash2 size={14} /></button></div>) : <div className="empty-module">尚未创建自定义任务。点击“新建任务”选择全部数据、船司或单条船期。</div>}</div></section>
+      {tasks.length ? <section className="module-card task-manager"><div className="module-card-header"><div><strong>自定义自动化任务</strong><span>可按船司或单条船期创建任务；批量执行时按列表顺序逐条完成</span></div><div className="task-toolbar"><button className="secondary-button" onClick={() => setTaskModalOpen(true)}><Save size={14} />新建任务</button>{selectedTasks.size > 0 && <><button className="secondary-button" onClick={runSelectedTasks} disabled={taskRunning}><RefreshCw size={14} />按顺序执行 ({selectedTasks.size})</button><button className="danger-button" onClick={deleteSelectedTasks}><Trash2 size={13} />批量删除</button></>}</div></div><div className="task-list">{tasks.map((task) => <div className={`task-row ${selectedTasks.has(task.id) ? 'selected-row' : ''}`} key={task.id}><input type="checkbox" checked={selectedTasks.has(task.id)} onChange={() => toggleTask(task.id)} /><div className="task-main"><strong>{task.name}</strong><span>{task.scope === 'all' ? '全部未完成记录' : task.scope === 'carrier' ? `船司：${task.carrierCodes.map((code) => carrierLabel(code)).join('、')}` : `单条船期：${task.shipmentIds.length} 条`} · {task.scheduleTime ? `每天 ${task.scheduleTime}` : '仅手动执行'} · 创建于 {fullDate(task.createdAt)}</span></div><span className={`enabled-pill ${task.enabled ? '' : 'disabled'}`}>{task.enabled ? '已启用' : '已停用'}</span><button className="text-action-button" onClick={() => runTask(task)} disabled={!task.enabled || taskRunning}><RefreshCw size={13} />立即执行</button><button className="row-action" title={task.enabled ? '停用任务' : '启用任务'} onClick={async () => { try { const payload = await apiRequest<{ tasks: AutomationTask[] }>(`/api/automation/tasks/${encodeURIComponent(task.id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: !task.enabled }) }); setTasks(payload.tasks || []); } catch (error) { onToast(error instanceof Error ? error.message : '任务设置保存失败'); } }}><Clock3 size={14} /></button><button className="row-action danger-action" title="删除任务" onClick={async () => { if (!window.confirm(`确认删除任务“${task.name}”？`)) return; setDeletingTask(task.id); try { const payload = await apiRequest<{ tasks: AutomationTask[] }>('/api/automation/tasks/delete-batch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: [task.id] }) }); setTasks(payload.tasks || []); setSelectedTasks((previous) => { const next = new Set(previous); next.delete(task.id); return next; }); onToast('任务已删除'); } catch (error) { onToast(error instanceof Error ? error.message : '删除任务失败'); } finally { setDeletingTask(''); } }} disabled={deletingTask === task.id}><Trash2 size={14} /></button></div>)}</div></section> : <button className="task-entry-button" type="button" onClick={() => setTaskModalOpen(true)}><span className="task-entry-icon"><Save size={17} /></span><span><strong>自定义自动化任务</strong><small>按船司、单条船期或全部未完成数据创建任务</small></span><ChevronRight size={18} /></button>}
       <RunHistory runs={runs} selected={selectedRuns} onToggle={toggleRun} onDelete={deleteRun} onDeleteSelected={deleteSelectedRuns} />
       {taskModalOpen && <div className="modal-backdrop" role="presentation" onMouseDown={() => !taskSaving && setTaskModalOpen(false)}><section className="task-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">CUSTOM AUTOMATION</p><h2>新建自动化任务</h2><p>选择数据范围和每日执行时间；时间留空时仅支持手动执行。</p></div><button className="drawer-close" onClick={() => setTaskModalOpen(false)} disabled={taskSaving}><X size={19} /></button></div><label className="setting-field"><span>任务名称</span><input value={taskName} onChange={(event) => setTaskName(event.target.value)} placeholder="例如：上午重点船司更新" /></label><label className="setting-field"><span>每日执行时间（可选）</span><input type="time" value={taskScheduleTime} onChange={(event) => setTaskScheduleTime(event.target.value)} /></label><label className="setting-field"><span>更新范围</span><select value={taskScope} onChange={(event) => { setTaskScope(event.target.value as AutomationTask['scope']); setTaskCarrierCodes([]); setTaskShipmentIds([]); }}><option value="all">全部未完成记录</option><option value="carrier">指定船司</option><option value="shipment">指定船期</option></select></label>{taskScope === 'carrier' && <div className="task-choice-grid">{Array.from(new Set((data?.shipments || []).map((item) => item.carrierCode))).map((code) => <label key={code}><input type="checkbox" checked={taskCarrierCodes.includes(code)} onChange={(event) => setTaskCarrierCodes((previous) => event.target.checked ? [...previous, code] : previous.filter((item) => item !== code))} />{carrierLabel(code)}</label>)}</div>}{taskScope === 'shipment' && <div className="task-choice-grid shipment-choice-grid">{(data?.shipments || []).map((item) => <label key={item.id}><input type="checkbox" checked={taskShipmentIds.includes(item.id)} onChange={(event) => setTaskShipmentIds((previous) => event.target.checked ? [...previous, item.id] : previous.filter((id) => id !== item.id))} /><span>{carrierLabel(item.carrierCode, item.carrier)} · {item.billNo}</span></label>)}</div>}<div className="modal-actions"><button className="secondary-button" onClick={() => setTaskModalOpen(false)} disabled={taskSaving}>取消</button><button className="primary-button" onClick={createTask} disabled={taskSaving}>{taskSaving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}{taskSaving ? '保存中…' : '创建任务'}</button></div></section></div>}
     </>}
@@ -1429,11 +1770,12 @@ function ModulePage({ page, data, automation, authEnabled, currentUser, syncing,
 
     {page === 'settings' && <section className="settings-grid">
       <article className="settings-card"><div className="settings-card-title"><Server size={19} /><div><strong>采集服务</strong><span>本地服务器运行状态</span></div><span className="setting-ok">运行中</span></div><div className="setting-row"><span>运行模式</span><strong>真实官网数据</strong></div><div className="setting-row"><span>支持船司规则</span><strong>{automation?.supportedCarriers || 15} 家</strong></div><div className="setting-row"><span>结构化数据库</span><strong>{automation?.databaseConfigured ? 'PostgreSQL 已启用' : '本地文件模式'}</strong></div><div className="setting-row"><span>服务端口</span><strong>{window.location.port || '8787'}</strong></div></article>
-      <article className="settings-card"><div className="settings-card-title"><Timer size={19} /><div><strong>计划任务</strong><span>仅在服务持续运行时执行</span></div><span className={automation?.enabled ? 'setting-ok' : 'setting-warn'}>{automation?.enabled ? '已启用' : '已停用'}</span></div><div className="setting-row"><span>定时任务开关</span><label className="setting-toggle"><span>{automation?.enabled ? '启用' : '停用'}</span><input type="checkbox" checked={Boolean(automation?.enabled)} onChange={(event) => onToggleAutomation(event.target.checked)} /><span className="switch-slider" /></label></div><div className="setting-row"><span>执行时区</span><strong>{automation?.timezone || 'Asia/Shanghai'}</strong></div><div className="setting-row"><span>执行时间</span><strong>{automation?.schedule.map((item) => item.time).join(' / ')}</strong></div><div className="setting-row"><span>查询范围</span><strong>未到港或未卸船</strong></div></article>
-      <article className="settings-card"><div className="settings-card-title"><Globe2 size={19} /><div><strong>网页模拟点击</strong><span>官方接口失败后的自动备用通道</span></div><span className={settingsView?.browserAutomationEnabled ? 'setting-ok' : 'setting-warn'}>{settingsView?.browserAutomationEnabled ? '已启用' : '已停用'}</span></div><div className="setting-row"><span>浏览器备用查询</span><label className="setting-toggle"><span>{settingsView?.browserAutomationEnabled ? '启用' : '停用'}</span><input type="checkbox" checked={Boolean(settingsView?.browserAutomationEnabled)} disabled={browserSaving} onChange={(event) => saveBrowserAutomation(event.target.checked)} /><span className="switch-slider" /></label></div><div className="setting-row"><span>运行方式</span><strong>系统 Chrome · 无界面</strong></div><div className="setting-row"><span>并发策略</span><strong>单线程串行，降低风控</strong></div><div className="setting-help">页面必须同时显示对应提单号/柜号和明确时间字段才会写入；验证码、空页面或无法核验的数据仍按失败处理，并保存证据截图。</div></article>
+      <article className="settings-card"><div className="settings-card-title"><Timer size={19} /><div><strong>自定义任务调度</strong><span>仅执行用户创建并设置时间的任务</span></div><span className={automation?.enabled ? 'setting-ok' : 'setting-warn'}>{automation?.enabled ? '已启用' : '已停用'}</span></div><div className="setting-row"><span>自定义调度开关</span><label className="setting-toggle"><span>{automation?.enabled ? '启用' : '停用'}</span><input type="checkbox" checked={Boolean(automation?.enabled)} onChange={(event) => onToggleAutomation(event.target.checked)} /><span className="switch-slider" /></label></div><div className="setting-row"><span>执行时区</span><strong>{automation?.timezone || 'Asia/Shanghai'}</strong></div><div className="setting-row"><span>执行时间</span><strong>由每条自定义任务单独设置</strong></div></article>
+      <article className="settings-card"><div className="settings-card-title"><Globe2 size={19} /><div><strong>官方接口 + 网页模拟点击</strong><span>官方接口优先，失败后才使用浏览器备用通道</span></div><span className={settingsView?.browserAutomationEnabled ? 'setting-ok' : 'setting-warn'}>{settingsView?.browserAutomationEnabled ? '已启用' : '已停用'}</span></div><div className="setting-row"><span>官方接口</span><strong>按船司适配器自动选择</strong></div><div className="setting-row"><span>网页模拟点击</span><label className="setting-toggle"><span>{settingsView?.browserAutomationEnabled ? '启用' : '停用'}</span><input type="checkbox" checked={Boolean(settingsView?.browserAutomationEnabled)} disabled={browserSaving} onChange={(event) => saveBrowserAutomation(event.target.checked)} /><span className="switch-slider" /></label></div><div className="setting-row"><span>运行方式</span><strong>系统 Chrome · 串行查询</strong></div><div className="setting-row"><span>并发策略</span><strong>单线程串行，降低风控</strong></div><div className="setting-help">页面必须同时显示对应提单号/柜号和明确时间字段才会写入；验证码、空页面或无法核验的数据仍按失败处理，并保存证据截图。</div></article>
+      <article className="settings-card"><div className="settings-card-title"><Eraser size={19} /><div><strong>自动化 Chrome 管理</strong><span>清理工作台创建的浏览器会话进程</span></div><span className="setting-ok">管理员操作</span></div><div className="setting-help">只清理工作台的自动化浏览器，不会关闭你日常使用的 Chrome。执行前请确认没有正在运行的查询任务；已保存的船司 Cookie 和验证配置仍保留在本地配置目录。</div><div className="setting-actions"><button className="secondary-button" onClick={() => void cleanupAutomationChrome()} disabled={browserCleanup || Boolean(automation?.running)}><Eraser size={15} />{browserCleanup ? '清理中…' : '清理自动化 Chrome'}</button></div></article>
       <article className="settings-card wecom-settings"><div className="settings-card-title"><MessageSquare size={19} /><div><strong>企业微信通知</strong><span>任务完成后发送汇总</span></div><span className={settingsView?.notificationConfigured || automation?.notificationConfigured ? 'setting-ok' : 'setting-warn'}>{settingsView?.notificationConfigured || automation?.notificationConfigured ? '已配置' : '待配置'}</span></div><div className="setting-help">可直接在这里保存企业微信机器人 Webhook。密钥只保存在本机服务端，不会回显完整地址。</div><label className="setting-field"><span>机器人 Webhook</span><input type="url" value={webhookInput} onChange={(event) => setWebhookInput(event.target.value)} placeholder={settingsView?.webhookPreview || 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…'} /></label><div className="setting-preview">{settingsView?.notificationConfigured ? `当前配置：${settingsView.webhookPreview}` : '当前未配置企业微信通知'}</div><div className="setting-actions"><button className="secondary-button" onClick={testWebhook} disabled={webhookTesting || (!webhookInput.trim() && !settingsView?.notificationConfigured)}><Send size={15} />{webhookTesting ? '发送中…' : '发送测试'}</button><button className="primary-button" onClick={saveWebhook} disabled={webhookSaving}>{webhookSaving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}{webhookSaving ? '保存中…' : '保存配置'}</button></div></article>
     </section>}
-    {page === 'settings' && currentUser?.role === 'admin' && <section className="settings-card account-settings-card"><div className="settings-card-title"><Users size={19} /><div><strong>账号与权限</strong><span>管理工作台登录账号、角色和使用状态</span></div><button className="primary-button compact-button" onClick={openCreateUser} disabled={!authEnabled}><UserPlus size={14} />新增账号</button></div>{!authEnabled && <div className="setting-help account-warning">当前处于免登录兼容模式。请在 `.env` 设置 `AUTH_ENABLED=true` 并重启服务后，才能启用账号登录和新增账号。</div>}<div className="account-table-wrap"><table className="account-table"><thead><tr><th>账号</th><th>角色</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{managedUsers.length ? managedUsers.map((user) => <tr key={user.id}><td><strong>{user.username}</strong>{user.id === currentUser.id && <span className="account-self">当前账号</span>}</td><td><select value={user.role} disabled={user.id === currentUser.id || !authEnabled} onChange={(event) => void updateManagedUser(user, { role: event.target.value as AuthManagedUser['role'] })}><option value="admin">管理员</option><option value="user">普通用户</option></select></td><td><button className={`account-status ${user.enabled ? 'enabled' : 'disabled'}`} disabled={!authEnabled} onClick={() => void updateManagedUser(user, { enabled: !user.enabled })}>{user.enabled ? '已启用' : '已停用'}</button></td><td>{fullDate(user.createdAt)}</td><td><div className="account-actions"><button className="text-action-button" onClick={() => openResetPassword(user)} disabled={!authEnabled}><KeyRound size={13} />重置密码</button>{user.id !== currentUser.id && <button className="row-action danger-action" title="删除账号" onClick={() => void deleteManagedUser(user)} disabled={!authEnabled}><Trash2 size={14} /></button>}</div></td></tr>) : <tr><td colSpan={5}><div className="empty-module">暂无账号，请先配置登录后新增账号。</div></td></tr>}</tbody></table></div><div className="setting-help">密码只保存为哈希值。停用账号会立即撤销其当前 Session；至少保留一个启用的管理员账号。</div></section>}
+    {page === 'settings' && currentUser?.role === 'admin' && <section className="settings-card account-settings-card"><div className="settings-card-title"><Users size={19} /><div><strong>账号与权限</strong><span>管理工作台登录账号、角色和使用状态</span></div><button className="primary-button compact-button" onClick={openCreateUser} disabled={!authEnabled}><UserPlus size={14} />新增账号</button></div>{!authEnabled && <div className="setting-help account-warning">当前处于免登录兼容模式。请在 `.env` 设置 `AUTH_ENABLED=true` 并重启服务后，才能启用账号登录和新增账号。</div>}<div className="account-table-wrap"><table className="account-table"><thead><tr><th>账号</th><th>角色</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{managedUsers.length ? managedUsers.map((user) => <tr key={user.id}><td><strong>{user.username}</strong>{user.id === currentUser.id && <span className="account-self">当前账号</span>}</td><td><select value={user.role} disabled={user.id === currentUser.id || !authEnabled} onChange={(event) => void updateManagedUser(user, { role: event.target.value as AuthManagedUser['role'] })}><option value="admin">管理员</option><option value="user">普通用户</option></select></td><td><button className={`account-status ${user.enabled ? 'enabled' : 'disabled'}`} disabled={!authEnabled} onClick={() => void updateManagedUser(user, { enabled: !user.enabled })}>{user.enabled ? '已启用' : '已停用'}</button></td><td>{fullDate(user.createdAt)}</td><td><div className="account-actions"><button className="text-action-button" onClick={() => openResetPassword(user)} disabled={!authEnabled}><KeyRound size={13} />重置密码</button>{user.id !== currentUser.id && <button className="row-action danger-action" title="删除账号" onClick={() => void deleteManagedUser(user)} disabled={!authEnabled}><Trash2 size={14} /></button>}</div></td></tr>) : <tr><td colSpan={5}><div className="empty-module">暂无账号，请先配置登录后新增账号。</div></td></tr>}</tbody></table></div></section>}
     {userModalMode && <div className="modal-backdrop" role="presentation" onMouseDown={closeUserModal}><section className="settings-modal account-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">ACCOUNT MANAGEMENT</p><h2>{userModalMode === 'create' ? '新增账号' : '重置密码'}</h2><p>{userModalMode === 'create' ? '创建后账号可以立即登录工作台。' : `为 ${userModalTarget?.username} 设置新密码。`}</p></div><button className="drawer-close" onClick={closeUserModal} disabled={userSaving}><X size={19} /></button></div>{userModalMode === 'create' && <><label className="setting-field"><span>用户名</span><input autoFocus value={userNameInput} onChange={(event) => setUserNameInput(event.target.value)} placeholder="2-32 位字符" /></label><label className="setting-field"><span>角色</span><select value={userRoleInput} onChange={(event) => setUserRoleInput(event.target.value as AuthManagedUser['role'])}><option value="user">普通用户</option><option value="admin">管理员</option></select></label></>}<label className="setting-field"><span>新密码</span><input type="password" autoFocus={userModalMode === 'reset'} value={userPasswordInput} onChange={(event) => setUserPasswordInput(event.target.value)} placeholder="至少 12 位" /></label><div className="setting-help">密码长度要求 12-128 位，建议使用随机密码。</div><div className="modal-actions"><button className="secondary-button" onClick={closeUserModal} disabled={userSaving}>取消</button><button className="primary-button" onClick={() => void saveManagedUser()} disabled={userSaving || (userModalMode === 'create' && !userNameInput.trim()) || userPasswordInput.length < 12}>{userSaving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}{userSaving ? '保存中…' : '保存'}</button></div></section></div>}
   </div>;
 }
@@ -1486,7 +1828,7 @@ function MetricListModal({ metricKey, shipments, syncing, onClose, onExport, onM
   const filtered = useMemo(() => filterAndSortShipments(shipments, dateField, dateFrom, dateTo, timeSort), [shipments, dateField, dateFrom, dateTo, timeSort]);
   const allSelected = filtered.length > 0 && filtered.every((shipment) => selected.has(shipment.id));
   const titles: Record<MetricKey, string> = {
-    tracking: '追踪中的货物', arriving: '未来 48 小时到港', working: '正在码头作业', completed: '已完成卸船', changed: '计划有变更',
+    tracking: '追踪中的货物', arriving: '未来 48 小时到港', working: '正在码头作业', completed: '已完成卸船', changed: '数据有异常',
   };
 
   useEffect(() => {
@@ -1597,7 +1939,41 @@ function TimelineItem({ label, value, active = false, last = false }: { label: s
   return <div className={`timeline-item ${active ? 'active' : ''} ${last ? 'last' : ''}`}><span className="timeline-dot" /><div><span>{label}</span><strong>{value}</strong></div></div>;
 }
 
-function RouteTimeline({ route }: { route: string }) {
-  const stops = route.split(/\s*→\s*/).map((item) => item.trim()).filter(Boolean);
-  return <section className="route-timeline"><div className="route-timeline-heading"><MapPin size={17} /><div><strong>官网运行线路</strong><span>按船司官网轨迹整理</span></div></div><div className="route-stops">{stops.map((stop, index) => <div className={`route-stop ${index === stops.length - 1 ? 'last' : ''}`} key={`${stop}-${index}`}><span className="route-stop-dot"><MapPin size={11} /></span><div><strong>{stop}</strong>{index < stops.length - 1 && <span>下一站</span>}</div></div>)}</div></section>;
+function RouteTimeline({ route, detail }: { route?: string | null; detail?: Shipment['trackingDetail'] }) {
+  const stops = detail?.routeStops?.length
+    ? detail.routeStops
+    : (route || '').split(/\s*→\s*/).map((name) => ({ name: name.trim(), role: 'unknown' as const })).filter((stop) => stop.name);
+  if (!stops.length) return null;
+  const roleLabels: Record<string, string> = { origin: '起始地', loading: '始发港', transshipment: '中转港', discharge: '目的港', delivery: '目的地', unknown: '线路节点' };
+  const normalized = (value: string | null) => (value || '').toUpperCase().replace(/[^A-Z0-9\u4e00-\u9fff]/g, '');
+  const events = detail?.events || [];
+  const eventStopCandidates = (event: (typeof events)[number]) => {
+    const location = normalized(event.location);
+    if (!location) return [];
+    const exact = stops.flatMap((stop, index) => normalized(stop.name) === location ? [index] : []);
+    if (exact.length) return exact;
+    return stops
+      .map((stop, index) => ({ index, name: normalized(stop.name) }))
+      .filter((item) => item.name && (location.includes(item.name) || item.name.includes(location)))
+      .sort((left, right) => right.name.length - left.name.length)
+      .map((item) => item.index);
+  };
+  // 部分线路会在提柜后返回原港还箱。同一地点可以出现多次，按官网事件顺序
+  // 向后匹配线路节点，避免把最后一次还箱错误归到第一次到港节点。
+  let routeCursor = 0;
+  const eventStopIndexes = events.map((event) => {
+    const candidates = eventStopCandidates(event);
+    if (!candidates.length) return -1;
+    const matched = candidates.find((index) => index >= routeCursor) ?? candidates.at(-1)!;
+    routeCursor = Math.max(routeCursor, matched);
+    return matched;
+  });
+  const eventsFor = (index: number) => events.filter((_, eventIndex) => eventStopIndexes[eventIndex] === index);
+  const unassignedEvents = events.filter((_, eventIndex) => eventStopIndexes[eventIndex] < 0);
+  const modeLabels: Record<string, string> = { ocean: '海运', rail: '铁路', truck: '卡车', terminal: '场站', unknown: '其他' };
+  const renderEvent = (event: (typeof events)[number], eventIndex: number) => {
+    const equipment = [event.facility, event.vesselName && `${event.vesselName}${event.voyageNo ? ` / ${event.voyageNo}` : ''}`].filter(Boolean).join(' · ');
+    return <div className={`route-event ${event.cargoState}`} key={`${event.label}-${event.time || 'na'}-${eventIndex}`}><div><b>{event.actual ? '实际' : '预计'}</b><em>{event.cargoState === 'laden' ? '有货' : event.cargoState === 'empty' ? '空箱' : '状态未知'}</em>{event.transportMode && <i>{modeLabels[event.transportMode]}</i>}</div><strong>{event.label}</strong><span>{event.location ? `${event.location} · ` : ''}{event.timeText || (event.time ? formatDateTime(event.time) : '时间未提供')}</span>{equipment && <small>{equipment}</small>}</div>;
+  };
+  return <section className="route-timeline"><div className="route-timeline-heading"><MapPin size={17} /><div><strong>官网完整运行线路</strong><span>{detail ? `已采集 ${detail.events.length} 条官网轨迹事件` : '按船司官网轨迹整理'}</span></div></div>{detail?.facts?.length ? <div className="tracking-facts">{detail.facts.map((fact) => <div key={`${fact.label}-${fact.value}`}><span>{fact.label}</span><strong>{fact.value}</strong></div>)}</div> : null}<div className="route-stops">{stops.map((stop, index) => <div className={`route-stop ${index === stops.length - 1 && !unassignedEvents.length ? 'last' : ''}`} key={`${stop.name}-${index}`}><span className="route-stop-dot"><MapPin size={11} /></span><div className="route-stop-content"><strong>{stop.name}</strong><span>{roleLabels[stop.role] || roleLabels.unknown}</span>{eventsFor(index).map(renderEvent)}</div></div>)}{unassignedEvents.length > 0 && <div className="route-stop last"><span className="route-stop-dot"><MapPin size={11} /></span><div className="route-stop-content"><strong>其他官网轨迹事件</strong><span>未能匹配到线路节点，保留原始地点</span>{unassignedEvents.map(renderEvent)}</div></div>}</div></section>;
 }

@@ -1,5 +1,5 @@
 import { buildQueryBillNo, resolveCarrierRule } from './carriers.js';
-import { classifyTrackingError, trackingError } from './errors.js';
+import { classifyTrackingError, isReferenceMissFailure, trackingError } from './errors.js';
 import type { TrackingQuery, TrackingResult, WorkbookRecord } from './types.js';
 
 export interface TrackingProvider {
@@ -35,6 +35,7 @@ export function mergeTrackingResults(primary: TrackingResult, secondary: Trackin
     ...(moreRecentArrival || primary),
     dischargeTime: primary.dischargeTime || secondary.dischargeTime,
     arrived: primary.arrived || secondary.arrived,
+    discharged: primary.discharged || secondary.discharged || Boolean(primary.dischargeTime || secondary.dischargeTime),
     routeText: primary.routeText || secondary.routeText || null,
     rawSummary: `${primary.rawSummary}；${secondary.rawSummary}；提单号与柜号结果已合并`,
   };
@@ -82,54 +83,32 @@ async function queryMaerskAlternatives(
 }
 
 async function queryBillOrContainer(baseQuery: Omit<TrackingQuery, 'queryType'>, provider: TrackingProvider) {
-  const attempts = [
-    { label: `提单号 ${baseQuery.queryBillNo}`, promise: provider.query({ ...baseQuery, queryType: 'bill' }) },
-    ...(baseQuery.containerNo
-      ? [{ label: `柜号 ${baseQuery.containerNo}`, promise: provider.query({ ...baseQuery, queryType: 'container' as const }) }]
-      : []),
-  ];
-  const settled = await Promise.allSettled(attempts.map(({ promise }) => promise));
-  const successes = settled.flatMap((outcome, index) => outcome.status === 'fulfilled'
-    ? [{ label: attempts[index].label, result: outcome.value }]
-    : []);
-  if (successes.length === 2) {
-    const billResult = successes[0].result;
-    const containerResult = successes[1].result;
-    const sameResult = billResult.arrivalTime?.getTime() === containerResult.arrivalTime?.getTime()
-      && billResult.dischargeTime?.getTime() === containerResult.dischargeTime?.getTime()
-      && billResult.arrivalKind === containerResult.arrivalKind
-      && billResult.arrived === containerResult.arrived;
-    if (sameResult) {
-      return {
-        ...billResult,
-        rawSummary: `${billResult.rawSummary}；${successes[1].label} 查询返回相同结果，OR 双查核验一致`,
-      };
+  try {
+    return await provider.query({ ...baseQuery, queryType: 'bill' });
+  } catch (billError) {
+    const billFailure = classifyTrackingError(billError);
+    if (!isReferenceMissFailure(billFailure)) throw billError;
+    if (!baseQuery.containerNo) {
+      throw trackingError(billFailure.category, `${baseQuery.rule.name}提单查询未找到结果，且没有柜号可供备用查询`, billFailure);
     }
-    return mergeTrackingResults(billResult, containerResult);
+    try {
+      const containerResult = await provider.query({ ...baseQuery, queryType: 'container' });
+      return {
+        ...containerResult,
+        rawSummary: `${containerResult.rawSummary}；提单号未找到后已按 OR 规则改用柜号 ${baseQuery.containerNo}`,
+      };
+    } catch (containerError) {
+      const containerFailure = classifyTrackingError(containerError);
+      throw trackingError(
+        containerFailure.category,
+        `${baseQuery.rule.name}提单号与柜号查询均失败：提单号 ${baseQuery.queryBillNo}（${billFailure.category}：${billFailure.reason}）；柜号 ${baseQuery.containerNo}（${containerFailure.category}：${containerFailure.reason}）`,
+        {
+          evidencePath: containerFailure.evidencePath || billFailure.evidencePath,
+          sourceUrl: containerFailure.sourceUrl || billFailure.sourceUrl,
+        },
+      );
+    }
   }
-  if (successes.length === 1) {
-    const failedIndex = settled.findIndex((outcome) => outcome.status === 'rejected');
-    if (failedIndex < 0) return successes[0].result;
-    const failedOutcome = settled[failedIndex] as PromiseRejectedResult;
-    const failure = classifyTrackingError(failedOutcome.reason);
-    return {
-      ...successes[0].result,
-      rawSummary: `${successes[0].result.rawSummary}；${successes[0].label}查询成功；${attempts[failedIndex].label}查询失败（${failure.category}：${failure.reason}），已按 OR 规则采用成功结果`,
-    };
-  }
-  const failures = settled.map((outcome, index) => ({
-    label: attempts[index].label,
-    failure: classifyTrackingError((outcome as PromiseRejectedResult).reason),
-  }));
-  const lastFailure = failures.at(-1)!.failure;
-  throw trackingError(
-    lastFailure.category,
-    `${baseQuery.rule.name}提单号与柜号查询均失败：${failures.map(({ label, failure }) => `${label}（${failure.category}：${failure.reason}）`).join('；')}`,
-    {
-      evidencePath: lastFailure.evidencePath || failures.find(({ failure }) => failure.evidencePath)?.failure.evidencePath,
-      sourceUrl: lastFailure.sourceUrl || failures.find(({ failure }) => failure.sourceUrl)?.failure.sourceUrl,
-    },
-  );
 }
 
 export async function trackRecord(record: WorkbookRecord, provider: TrackingProvider) {
@@ -148,10 +127,11 @@ export async function trackRecord(record: WorkbookRecord, provider: TrackingProv
     billResult = await provider.query({ ...baseQuery, queryType: 'bill' });
   } catch (billError) {
     const billFailure = classifyTrackingError(billError);
-    if (rule.code === 'MAERSK' && (billFailure.category === '订单号验证失败' || billFailure.category === '解析失败')) {
+    if (rule.code === 'MAERSK' && isReferenceMissFailure(billFailure)) {
       return { rule, result: await queryMaerskAlternatives(baseQuery, billError, provider) };
     }
-    if (rule.queryMode !== 'bill-then-container') throw billError;
+    if (rule.queryMode !== 'bill-then-container' && rule.queryMode !== 'bill-and-container') throw billError;
+    if (!isReferenceMissFailure(billFailure)) throw billError;
     if (!record.containerNo) throw trackingError('订单号验证失败', `${rule.name}提单查询失败，且没有柜号可供备用查询`);
     try {
       const containerResult = await provider.query({ ...baseQuery, queryType: 'container' });
@@ -159,7 +139,7 @@ export async function trackRecord(record: WorkbookRecord, provider: TrackingProv
         rule,
         result: {
           ...containerResult,
-          rawSummary: `${containerResult.rawSummary}；提单查询失败后已自动改用柜号查询（${billFailure.category}：${billFailure.reason}）`,
+          rawSummary: `${containerResult.rawSummary}；提单号明确未找到后已自动改用柜号 ${record.containerNo} 查询`,
         },
       };
     } catch (containerError) {

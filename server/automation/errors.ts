@@ -35,3 +35,13 @@ export function classifyTrackingError(error: unknown): { category: TrackingFailu
   if (/HTTP\s*(4\d\d|5\d\d)\b|接口|responseCode|errorCode|system error/i.test(reason)) return { category: '官网接口异常', reason };
   return { category: '解析失败', reason };
 }
+
+/**
+ * 只有官网明确表示号码不存在/无结果时，才允许从提单号切换到柜号。
+ * 验证码、风控、网络错误和普通页面解析失败都不能据此判断提单无效。
+ */
+export function isReferenceMissFailure(failure: Pick<ReturnType<typeof classifyTrackingError>, 'category' | 'reason'>) {
+  if (failure.category === '订单号验证失败') return true;
+  if (failure.category !== '解析失败') return false;
+  return /(?:未找到|查无|无记录|无结果|无数据|没有(?:可用|对应|匹配)?(?:的)?(?:订单|提单|货物|查询)?结果|未返回(?:该|对应)?(?:订单|提单|货物记录|查询结果)|no\s+(?:result|record|shipment|data)|not\s+found)/i.test(failure.reason);
+}

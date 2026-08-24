@@ -10,41 +10,44 @@ function shanghaiMinute(value: Date) {
   return { date: `${part('year')}-${part('month')}-${part('day')}`, time: `${part('hour')}:${part('minute')}` };
 }
 
-export function startScheduler(engine: AutomationEngine): ScheduledTask[] {
-  const expressions = ['0 9 * * *', '0 11 * * *', '30 17 * * *'];
-  const fixedTasks = expressions.map((expression) => cron.schedule(expression, async () => {
-    try {
-      const settings = await engine.settings();
-      if (settings.enabled && await engine.store.exists()) await engine.run('scheduled');
-    } catch (error) {
-      console.error('Scheduled tracking run failed:', error);
-    }
-  }, { timezone: 'Asia/Shanghai' }));
+export function startScheduler(engine: AutomationEngine, listEngines: () => AutomationEngine[] = () => [engine]): ScheduledTask[] {
   const executedTaskKeys = new Set<string>();
+  const executedCleanupKeys = new Set<string>();
   const customTask = cron.schedule('* * * * *', async () => {
-    try {
-      const settings = await engine.settings();
-      if (!settings.enabled || !(await engine.store.exists())) return;
-      const current = shanghaiMinute(new Date());
-      for (const key of executedTaskKeys) if (!key.startsWith(current.date)) executedTaskKeys.delete(key);
-      const tasks = await engine.listTasks();
-      for (const task of tasks) {
-        const taskKey = `${current.date}:${task.id}`;
-        const lastRun = task.lastRunAt ? shanghaiMinute(new Date(task.lastRunAt)) : null;
-        const alreadyRanToday = lastRun?.date === current.date && lastRun.time === task.scheduleTime;
-        if (task.enabled && task.scheduleTime === current.time && !alreadyRanToday && !executedTaskKeys.has(taskKey)) {
-          executedTaskKeys.add(taskKey);
-          try {
-            await engine.runTask(task.id);
-          } catch (error) {
-            executedTaskKeys.delete(taskKey);
-            console.error(`Custom scheduled task ${task.id} failed:`, error);
+    const current = shanghaiMinute(new Date());
+    for (const key of executedTaskKeys) if (!key.startsWith(current.date)) executedTaskKeys.delete(key);
+    for (const key of executedCleanupKeys) if (!key.includes(`:${current.date}:`)) executedCleanupKeys.delete(key);
+    for (const target of listEngines()) {
+      try {
+        const cleanupKey = `${target.store.dataDirectory}:${current.date}:clearance-history`;
+        if (!executedCleanupKeys.has(cleanupKey)) {
+          executedCleanupKeys.add(cleanupKey);
+          await target.cleanupClearanceHistory().catch((error) => {
+            executedCleanupKeys.delete(cleanupKey);
+            console.error('Clearance history cleanup failed:', error);
+          });
+        }
+        const settings = await target.settings();
+        if (!settings.enabled || !(await target.store.exists())) continue;
+        const tasks = await target.listTasks();
+        for (const task of tasks) {
+          const taskKey = `${target.store.dataDirectory}:${current.date}:${task.id}`;
+          const lastRun = task.lastRunAt ? shanghaiMinute(new Date(task.lastRunAt)) : null;
+          const alreadyRanToday = lastRun?.date === current.date && lastRun.time === task.scheduleTime;
+          if (task.enabled && task.scheduleTime === current.time && !alreadyRanToday && !executedTaskKeys.has(taskKey)) {
+            executedTaskKeys.add(taskKey);
+            try {
+              await target.runTask(task.id);
+            } catch (error) {
+              executedTaskKeys.delete(taskKey);
+              console.error(`Custom scheduled task ${task.id} failed:`, error);
+            }
           }
         }
+      } catch (error) {
+        console.error('Custom scheduled task check failed:', error);
       }
-    } catch (error) {
-      console.error('Custom scheduled task check failed:', error);
     }
   }, { timezone: 'Asia/Shanghai' });
-  return [...fixedTasks, customTask];
+  return [customTask];
 }

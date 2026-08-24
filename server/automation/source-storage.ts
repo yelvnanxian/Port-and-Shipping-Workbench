@@ -33,9 +33,27 @@ export function sourceEvidenceUrl(carrierCode: string, fileName: string) {
   return `/api/browser-evidence/${encodeURIComponent(safeSourceCode(carrierCode))}/${encodeURIComponent(fileName)}`;
 }
 
+export function sourceTrackingDetailDirectory(dataDirectory: string, carrierCode: string) {
+  return path.join(sourceDirectory(dataDirectory, carrierCode), 'tracking-details');
+}
+
+export function sourceTrackingDetailKey(billNo: string, containerNo = '') {
+  const normalized = `${billNo.trim().toUpperCase()}_${containerNo.trim().toUpperCase()}`
+    .replace(/[^A-Z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return normalized.slice(0, 120) || 'UNKNOWN';
+}
+
+export function sourceTrackingDetailPath(dataDirectory: string, carrierCode: string, key: string) {
+  return path.join(sourceTrackingDetailDirectory(dataDirectory, carrierCode), `${safeSourceCode(key)}.json`);
+}
+
+export function sourceTrackingDetailUrl(carrierCode: string, key: string) {
+  return `/api/tracking-details/${encodeURIComponent(safeSourceCode(carrierCode))}/${encodeURIComponent(`${safeSourceCode(key)}.json`)}`;
+}
+
 /** Accept both the new carrier-specific URL and the old flat URL. */
 export function evidenceFileNameFromUrl(value: string) {
   const match = value.match(/^\/api\/browser-evidence\/(?:[^/]+\/)?([^/?#]+)$/i);
   return match?.[1] ? decodeURIComponent(match[1]) : '';
 }
-

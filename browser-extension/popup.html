@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <title>船期采集器</title>
+    <style>
+      body { width: 330px; margin: 0; padding: 16px; color: #203f4b; font: 13px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      h1 { margin: 0 0 6px; font-size: 17px; }
+      p { margin: 6px 0 12px; color: #62757c; font-size: 12px; }
+      label { display: block; margin: 10px 0 5px; font-weight: 600; }
+      input, button { box-sizing: border-box; width: 100%; border-radius: 7px; padding: 9px 10px; border: 1px solid #cedbd9; background: #fff; font: inherit; }
+      input:focus { outline: 2px solid rgba(39, 145, 132, .2); border-color: #278f83; }
+      button { margin-top: 14px; color: white; background: #157d72; border-color: #157d72; cursor: pointer; font-weight: 600; }
+      button:disabled { opacity: .55; cursor: wait; }
+      #status { white-space: pre-wrap; margin-top: 12px; padding: 9px; border-radius: 7px; background: #f2f7f6; color: #46636a; font-size: 12px; }
+      .hint { margin-top: 12px; font-size: 11px; color: #76878c; }
+    </style>
+  </head>
+  <body>
+    <h1>港航工作台船期采集器</h1>
+    <p>请先在普通 Chrome/Edge 中完成官网验证并打开查询结果或 Details 页面，再点击采集。</p>
+    <label for="token">工作台采集令牌</label>
+    <input id="token" autocomplete="off" placeholder="粘贴工作台生成的令牌">
+    <label for="apiBase">工作台地址</label>
+    <input id="apiBase" value="http://127.0.0.1:8787" autocomplete="off">
+    <button id="collect">采集当前页面</button>
+    <div id="status">等待采集。</div>
+    <div class="hint">查询方式已绑定在采集令牌中。只会上传当前页面文字、清理后的页面快照和可见区域截图，不会读取浏览器 Cookie。</div>
+    <script src="popup.js"></script>
+  </body>
+</html>

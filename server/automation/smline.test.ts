@@ -12,8 +12,15 @@ const search = {
 const route = {
   TRANS_RESULT_KEY: 'S',
   count: '1',
-  list: [{ eta: '2026-08-20 17:00', etaFlag: 'C', vslEngNm: 'SM KWANGYANG', skdVoyNo: '2605', skdDirCd: 'E' }],
+  list: [{ eta: '2026-08-20 17:00', etaFlag: 'C', vslEngNm: 'SM KWANGYANG', skdVoyNo: '2605', skdDirCd: 'E', polNm: 'NINGBO,ZHEJIANG,CHINA', podNm: 'PORTLAND,OR,UNITED STATES' }],
 };
+
+test('森罗航线接口的起运港和目的港写入运行线路', () => {
+  const result = parseSmLineTrackingResponses(search, route, { TRANS_RESULT_KEY: 'S', list: [] }, 'SMCU1312616', 'SMLMNJBD6A755700');
+  assert.equal(result.routeText, 'NINGBO,ZHEJIANG,CHINA → PORTLAND,OR,UNITED STATES');
+  assert.equal(result.trackingDetail?.routeStops.length, 2);
+  assert.match(result.rawPageText || '', /routePayload/);
+});
 
 test('森罗只把实际事件写成到港或卸船', () => {
   const events = {
@@ -28,6 +35,7 @@ test('森罗只把实际事件写成到港或卸船', () => {
   assert.equal(result.arrivalKind, 'ETA');
   assert.equal(result.arrived, false);
   assert.equal(result.dischargeTime, null);
+  assert.equal(result.dischargeTimeText, null);
   assert.match(result.rawSummary, /预计卸船 2026-08-22 08:30/);
 });
 
@@ -43,7 +51,10 @@ test('森罗发现实际卸船事件后标记为已卸船', () => {
   const result = parseSmLineTrackingResponses(search, route, events, 'SMCU1312616', 'SMLMNJBD6A755700');
   assert.equal(result.arrivalKind, 'ATA');
   assert.equal(result.arrived, true);
-  assert.equal(result.dischargeTime?.toISOString(), '2026-08-20T13:30:00.000Z');
+  assert.equal(result.discharged, true);
+  assert.equal(result.dischargeTime, null);
+  assert.equal(result.dischargeTimeText, '2026-08-20 21:30（官网当地时间）');
+  assert.equal(result.trackingDetail?.events.length, 2);
 });
 
 test('森罗返回其他提单时拒绝写入', () => {

@@ -9,7 +9,8 @@
     "dev:api": "tsx watch server/index.ts",
     "build": "tsc -b && vite build",
     "test": "tsx --test server/**/*.test.ts",
-    "start": "tsx server/index.ts"
+    "start": "tsx server/index.ts",
+    "cleanup:evidence": "tsx scripts/cleanup-evidence.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -20,6 +21,7 @@
     "lucide-react": "^0.468.0",
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
+    "patchright": "1.62.1",
     "pg": "^8.23.0",
     "playwright-core": "^1.62.1",
     "react": "^19.1.1",

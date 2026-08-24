@@ -49,6 +49,22 @@ test('automation settings persist across engine instances', async () => {
   }
 });
 
+test('workbook store supports isolated per-user data directories', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-workspaces-'));
+  try {
+    const admin = new WorkbookStore(root);
+    const user = new WorkbookStore(root, path.join(root, 'data', 'workspaces', 'user-a'));
+    await admin.appendRecords([{ billNo: 'OOLU2171963250' }]);
+    await user.appendRecords([{ billNo: 'HDUJGLA26BZ04040' }]);
+    assert.equal((await admin.metadata())?.records, 1);
+    assert.equal((await user.metadata())?.records, 1);
+    assert.notEqual(admin.currentPath, user.currentPath);
+    assert.match(user.currentPath, /workspaces[\\/]user-a[\\/]current\.xlsx$/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('restoring a backup replaces the workbook and creates a safety backup', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-restore-'));
   try {

@@ -3,6 +3,52 @@ export type QueryProgress = '待查询' | '查询中' | '已完成' | '失败';
 export type ManualMark = '' | '已清关' | '查验中' | '其他';
 export type ArrivalKind = 'ATA' | 'ETA' | null;
 export type TrackingTime = Date | string | null;
+export type TrackingCargoState = 'laden' | 'empty' | 'unknown';
+export type TrackingEventType =
+  | 'origin'
+  | 'departure'
+  | 'transshipment'
+  | 'arrival'
+  | 'discharge'
+  | 'pickup'
+  | 'empty-return'
+  | 'delivery'
+  | 'other';
+
+export interface TrackingRouteStop {
+  name: string;
+  role: 'origin' | 'loading' | 'transshipment' | 'discharge' | 'delivery' | 'unknown';
+}
+
+export interface TrackingEventDetail {
+  label: string;
+  eventType: TrackingEventType;
+  location: string | null;
+  time: string | null;
+  timeText?: string | null;
+  actual: boolean;
+  cargoState: TrackingCargoState;
+  facility?: string | null;
+  vesselName?: string | null;
+  voyageNo?: string | null;
+  transportMode?: 'ocean' | 'rail' | 'truck' | 'terminal' | 'unknown';
+  sourceLine?: string;
+}
+
+export interface TrackingFact {
+  label: string;
+  value: string;
+}
+
+export interface TrackingDetail {
+  carrierCode: string;
+  queryType: TrackingQuery['queryType'];
+  queryValue: string;
+  capturedAt: string;
+  routeStops: TrackingRouteStop[];
+  events: TrackingEventDetail[];
+  facts?: TrackingFact[];
+}
 export type TrackingFailureCategory =
   | '订单号验证失败'
   | '官网拒绝访问'
@@ -49,12 +95,16 @@ export interface TrackingResult {
   arrivalTimeText?: string | null;
   arrivalKind: ArrivalKind;
   arrived: boolean;
+  /** 官网后续事件可确认已卸船，但未必提供可核验的精确卸船时刻。 */
+  discharged?: boolean;
   dischargeTime: Date | null;
   dischargeTimeText?: string | null;
   rawSummary: string;
   sourceUrl: string;
   evidencePath?: string;
   routeText?: string | null;
+  trackingDetail?: TrackingDetail;
+  rawPageText?: string;
 }
 
 export interface FailedTrackingDetail {

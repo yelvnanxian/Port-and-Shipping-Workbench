@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "港航工作台船期采集器",
+  "version": "1.0.2",
+  "description": "在用户完成船司官网验证后，采集当前结果页面并交给港航工作台解析。",
+  "permissions": ["activeTab", "tabs", "scripting"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://*.cma-cgm.com/*",
+    "https://*.hapag-lloyd.com/*",
+    "https://*.hapag-lloyd.cn/*"
+  ],
+  "action": {
+    "default_title": "采集当前船期页面",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.cma-cgm.com/*",
+        "https://*.hapag-lloyd.com/*",
+        "https://*.hapag-lloyd.cn/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

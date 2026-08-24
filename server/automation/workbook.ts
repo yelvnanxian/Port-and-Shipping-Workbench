@@ -75,8 +75,9 @@ export class WorkbookStore {
   readonly backupDirectory: string;
   readonly uploadDirectory: string;
 
-  constructor(rootDirectory = process.cwd()) {
-    this.dataDirectory = path.resolve(rootDirectory, 'data');
+  constructor(rootDirectory = process.cwd(), dataDirectoryOverride?: string) {
+    // 普通用户工作区可以传入独立目录；保留默认行为以兼容管理员工作区和现有调用方。
+    this.dataDirectory = path.resolve(dataDirectoryOverride || path.join(rootDirectory, 'data'));
     this.currentPath = path.join(this.dataDirectory, 'current.xlsx');
     this.backupDirectory = path.join(this.dataDirectory, 'backups');
     this.uploadDirectory = path.join(this.dataDirectory, 'uploads');
@@ -356,6 +357,74 @@ export class WorkbookStore {
     requested.sort((left, right) => right - left).forEach((rowNumber) => opened.sheet.spliceRows(rowNumber, 1));
     await this.save(opened.workbook);
     return { deleted: requested.length, metadata: await this.metadata() };
+  }
+
+  async archiveRecord(rowNumber: number, historyId: string) {
+    if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new Error('船期记录编号不合法');
+    const opened = await this.open();
+    const record = this.readRecords(opened.sheet, opened.headerMap).find((item) => item.rowNumber === rowNumber);
+    if (!record) throw new Error('找不到对应船期记录');
+    const row = opened.sheet.getRow(rowNumber);
+    for (const header of REQUIRED_HEADERS) row.getCell(opened.headerMap.get(header)!).value = null;
+    row.getCell(opened.headerMap.get('备注')!).value = `清关历史归档占位 ${historyId}`;
+    row.hidden = true;
+    row.height = 0;
+    await this.save(opened.workbook);
+    return { record, metadata: await this.metadata() };
+  }
+
+  async restoreRecord(entry: Omit<WorkbookRecord, 'rowNumber'>, options?: { preferredRowNumber?: number; historyId?: string }) {
+    const opened = await this.open();
+    const records = this.readRecords(opened.sheet, opened.headerMap);
+    const normalizedBill = entry.billNo.trim().toUpperCase();
+    const normalizedContainer = entry.containerNo.trim().toUpperCase();
+    const duplicate = records.find((record) => normalizedBill
+      ? record.billNo === normalizedBill
+      : Boolean(normalizedContainer && record.containerNo === normalizedContainer));
+    if (duplicate) throw new Error(`当前船期追踪已存在 ${normalizedBill || normalizedContainer}，不能重复恢复`);
+    if (!normalizedBill && !normalizedContainer) throw new Error('历史记录缺少提单号和柜号，无法恢复');
+    const values: Record<HeaderName, ExcelJS.CellValue> = {
+      船司: entry.carrierHint,
+      到港时间: entry.arrivalTime,
+      提单号: normalizedBill,
+      柜号: normalizedContainer,
+      卸船时间: entry.dischargeTime ?? '未卸船',
+      船只状态: entry.vesselState,
+      人工标记: null,
+      最后更新时间: entry.lastUpdated,
+      备注: entry.note,
+      进度: entry.progress,
+    };
+    const preferredRow = options?.preferredRowNumber && options.preferredRowNumber >= 2 && options.preferredRowNumber <= opened.sheet.rowCount
+      ? opened.sheet.getRow(options.preferredRowNumber)
+      : null;
+    const preferredMarker = preferredRow?.getCell(opened.headerMap.get('备注')!).text.trim() || '';
+    const canReusePreferred = Boolean(preferredRow
+      && !preferredRow.getCell(opened.headerMap.get('提单号')!).text.trim()
+      && !preferredRow.getCell(opened.headerMap.get('柜号')!).text.trim()
+      && (!options?.historyId || preferredMarker === `清关历史归档占位 ${options.historyId}`));
+    const row = canReusePreferred
+      ? preferredRow!
+      : opened.sheet.addRow(REQUIRED_HEADERS.map((header) => values[header]));
+    if (canReusePreferred) {
+      REQUIRED_HEADERS.forEach((header) => { row.getCell(opened.headerMap.get(header)!).value = values[header]; });
+    }
+    row.hidden = false;
+    row.height = 29;
+    if (row.number % 2 === 0) row.eachCell((cell) => { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'F3F8F7' } }; });
+    row.getCell(opened.headerMap.get('备注')!).alignment = { wrapText: true, vertical: 'middle' };
+    for (const header of ['到港时间', '卸船时间', '最后更新时间'] as HeaderName[]) {
+      const cell = row.getCell(opened.headerMap.get(header)!);
+      cell.numFmt = cell.value instanceof Date ? 'yyyy-mm-dd hh:mm' : 'General';
+    }
+    await this.save(opened.workbook);
+    return {
+      rowNumber: row.number,
+      ...entry,
+      billNo: normalizedBill,
+      containerNo: normalizedContainer,
+      manualMark: '' as const,
+    };
   }
 
   async exportRecords(rowNumbers: number[]) {

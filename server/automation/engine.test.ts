@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { AutomationEngine, evidencePathFromNote } from './engine.js';
+import { AutomationEngine, evidencePathFromNote, failureEvidencePathFromNote } from './engine.js';
 import type { TrackingProvider } from './tracker.js';
 import { WorkbookStore } from './workbook.js';
 
@@ -23,11 +23,176 @@ test('从成功备注中解析浏览器采集证据', () => {
   );
 });
 
+test('总览能识别浏览器结果中的已识别运行线路', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-route-note-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([{ billNo: 'COSU6503130310', containerNo: 'OOCU0872637', carrierHint: '中远海运' }]);
+    const opened = await store.open();
+    const [record] = store.readRecords(opened.sheet, opened.headerMap);
+    record.note = '中远海运浏览器模拟查询成功；已识别运行线路=Xingang, CN → Houston, US';
+    store.writeRecord(opened.sheet, opened.headerMap, record);
+    await store.save(opened.workbook);
+    const [dashboardRecord] = await new AutomationEngine(store).dashboardRecords();
+    assert.equal(dashboardRecord.route, 'Xingang, CN → Houston, US');
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('COSCO 成功查询会持久化完整轨迹并在总览返回结构化详情', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-tracking-detail-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([{ billNo: 'COSU6503130310', containerNo: 'OOCU0872637' }]);
+    const engine = new AutomationEngine(store);
+    const provider: TrackingProvider = {
+      async query(input) {
+        return {
+          arrivalTime: new Date('2026-08-06T16:07:44.000Z'),
+          arrivalKind: 'ATA' as const,
+          arrived: true,
+          discharged: true,
+          dischargeTime: null,
+          rawSummary: '中远海运真实页面查询成功',
+          sourceUrl: input.rule.url,
+          trackingDetail: {
+            carrierCode: 'COSCO',
+            queryType: input.queryType,
+            queryValue: input.queryBillNo,
+            capturedAt: '2026-08-22T00:00:00.000Z',
+            routeStops: [{ name: 'Xingang', role: 'loading' as const }, { name: 'Houston', role: 'discharge' as const }],
+            events: [{ label: '实际到港', eventType: 'arrival' as const, location: 'Houston', time: '2026-08-06T16:07:44.000Z', actual: true, cargoState: 'laden' as const }],
+          },
+          rawPageText: '提单号 6503130310\nXingang\nHouston\n实际到港 2026-08-06 11:07:44 CDT',
+        };
+      },
+    };
+    Object.defineProperty(engine, 'provider', { value: () => provider });
+    const summary = await engine.run('manual');
+    assert.equal(summary.success, 1);
+    const dashboard = await engine.dashboardRecords();
+    assert.equal(dashboard[0].trackingDetail?.routeStops[1].name, 'Houston');
+    assert.equal(dashboard[0].record.vesselState, '已到港已卸船');
+    assert.equal(dashboard[0].record.dischargeTime, null);
+    assert.ok(dashboard[0].trackingDetailUrl?.endsWith('.json'));
+    const fileName = dashboard[0].trackingDetailUrl!.split('/').at(-1)!;
+    const stored = await engine.readTrackingDetail('COSCO', fileName);
+    assert.match(stored.rawPageText, /实际到港/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('COSCO 查询失败会移除旧的轨迹详情，避免展示过期线路', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-tracking-detail-failure-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([{ billNo: 'COSU6503130310', containerNo: 'OOCU0872637' }]);
+    const engine = new AutomationEngine(store);
+    const successProvider: TrackingProvider = {
+      async query(input) {
+        return {
+          arrivalTime: new Date('2026-08-06T16:07:44.000Z'), arrivalKind: 'ATA' as const, arrived: true, dischargeTime: null,
+          rawSummary: '成功', sourceUrl: input.rule.url,
+          trackingDetail: { carrierCode: 'COSCO', queryType: input.queryType, queryValue: input.queryBillNo, capturedAt: new Date().toISOString(), routeStops: [{ name: 'Houston', role: 'discharge' as const }], events: [] },
+          rawPageText: '提单号 6503130310 Houston 实际到港',
+        };
+      },
+    };
+    Object.defineProperty(engine, 'provider', { value: () => successProvider, configurable: true });
+    await engine.run('manual');
+    Object.defineProperty(engine, 'provider', { value: () => ({ async query() { throw new Error('官网暂时不可用'); } }), configurable: true });
+    const failure = await engine.run('manual', { skipCompleted: false });
+    assert.equal(failure.failed, 1);
+    assert.equal((await engine.dashboardRecords())[0].trackingDetail, undefined);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('失败截图不会被当作成功采集证据', () => {
+  const note = '失败分类=验证码或风控；浏览器证据=/api/browser-evidence/failure.png';
   assert.equal(
-    evidencePathFromNote('失败分类=验证码或风控；浏览器证据=/api/browser-evidence/failure.png'),
+    evidencePathFromNote(note),
     '',
   );
+  assert.equal(failureEvidencePathFromNote(note), '/api/browser-evidence/failure.png');
+});
+
+test('达飞普通浏览器采集会解析真实页面并写回 Excel', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-manual-browser-cma-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([{ billNo: 'CMDUNGP4005669', containerNo: 'TDSU8099791' }]);
+    const engine = new AutomationEngine(store);
+    const opened = await store.open();
+    const [record] = store.readRecords(opened.sheet, opened.headerMap);
+    const result = await engine.applyManualBrowserCapture(record.rowNumber, {
+      queryType: 'bill',
+      pageUrl: 'https://www.cma-cgm.com/ebusiness/tracking',
+      pageText: [
+        'Bill of Lading CMDUNGP4005669',
+        'Container TDSU8099791',
+        'Port of Loading SHANGHAI, CN',
+        'Port of Discharge LOS ANGELES, US',
+        'Actual arrival at destination 20 Aug 2026 09:30',
+        'LOS ANGELES, US',
+        'Discharged from vessel 20 Aug 2026 15:20',
+        'LOS ANGELES, US',
+      ].join('\n'),
+      screenshot: Buffer.from('fake-png'),
+    });
+    assert.equal(result.record.vesselState, '已到港已卸船');
+    assert.equal(result.record.arrivalTime, '20 Aug 2026 09:30');
+    assert.equal(result.record.dischargeTime, '20 Aug 2026 15:20');
+    assert.match(result.record.note, /普通浏览器人工采集/);
+    assert.match(result.result.evidencePath || '', /\/api\/browser-evidence\/CMA\//);
+    const dashboard = await engine.dashboardRecords();
+    assert.equal(dashboard[0].route, 'SHANGHAI, CN → LOS ANGELES, US');
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('官网仅确认已卸船时不会继续沿用与 ATA 完全相同的可疑卸船时间', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-suspicious-discharge-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([{ billNo: 'COSU6503130310', containerNo: 'OOCU0872637', carrierHint: '中远海运' }]);
+    const opened = await store.open();
+    const [record] = store.readRecords(opened.sheet, opened.headerMap);
+    record.arrivalTime = '2026-08-06 11:07:44（官网当地时间）';
+    record.dischargeTime = '2026-08-06 11:07:44（官网当地时间）';
+    record.vesselState = '已到港已卸船';
+    record.progress = '已完成';
+    store.writeRecord(opened.sheet, opened.headerMap, record);
+    await store.save(opened.workbook);
+
+    const engine = new AutomationEngine(store);
+    Object.defineProperty(engine, 'provider', { value: () => ({
+      async query(input: { rule: { url: string } }) {
+        return {
+          arrivalTime: null,
+          arrivalTimeText: '2026-08-06 11:07:44 CDT（官网当地时间）',
+          arrivalKind: 'ATA' as const,
+          arrived: true,
+          discharged: true,
+          dischargeTime: null,
+          rawSummary: '官网后续提货事件确认已卸船，但未提供精确卸船时刻',
+          sourceUrl: input.rule.url,
+        };
+      },
+    }) });
+    const summary = await engine.run('manual', { shipmentIds: [`XLSX-${record.rowNumber}`] });
+    assert.equal(summary.success, 1);
+    const refreshed = await store.open();
+    const [updated] = store.readRecords(refreshed.sheet, refreshed.headerMap);
+    assert.equal(updated.dischargeTime, null);
+    assert.equal(updated.vesselState, '已到港已卸船');
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test('automation status exposes live per-record progress', async () => {
@@ -93,6 +258,65 @@ test('automation run completes when every workbook record is skipped', async () 
     assert.equal(summary.total, 0);
     assert.equal(summary.skipped, 1);
     assert.equal((await engine.status()).running, false);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('查询失败时清理上一次自动结果，避免失败进度与旧状态矛盾', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-failure-clears-stale-result-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([{ billNo: 'OOLU2171963250', containerNo: 'OOCU7496887', carrierHint: '东方海外' }]);
+    const opened = await store.open();
+    const [record] = store.readRecords(opened.sheet, opened.headerMap);
+    record.arrivalTime = new Date('2026-08-13T06:31:00.000Z');
+    record.dischargeTime = new Date('2026-08-13T06:31:00.000Z');
+    record.vesselState = '已到港已卸船';
+    record.progress = '已完成';
+    store.writeRecord(opened.sheet, opened.headerMap, record);
+    await store.save(opened.workbook);
+
+    const engine = new AutomationEngine(store);
+    Object.defineProperty(engine, 'provider', { value: () => ({
+      async query() {
+        throw new Error('模拟官网暂时不可用');
+      },
+    }) });
+    const summary = await engine.run('manual', { skipCompleted: false });
+    assert.equal(summary.failed, 1);
+
+    const refreshed = await store.open();
+    const [failed] = store.readRecords(refreshed.sheet, refreshed.headerMap);
+    assert.equal(failed.arrivalTime, null);
+    assert.equal(failed.dischargeTime, null);
+    assert.equal(failed.vesselState, '');
+    assert.equal(failed.progress, '失败');
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('关闭跳过已完成选项时会重新查询已完成卸船记录', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-refresh-completed-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([{ billNo: 'HDUJGLA26BZ04040', containerNo: 'SEKU6633329' }]);
+    const opened = await store.open();
+    const [record] = store.readRecords(opened.sheet, opened.headerMap);
+    record.vesselState = '已到港已卸船';
+    record.progress = '已完成';
+    store.writeRecord(opened.sheet, opened.headerMap, record);
+    await store.save(opened.workbook);
+    const engine = new AutomationEngine(store);
+    Object.defineProperty(engine, 'provider', { value: () => ({
+      async query(input: { rule: { url: string } }) {
+        return { arrivalTime: new Date('2026-08-21T00:00:00.000Z'), arrivalKind: 'ATA' as const, arrived: true, dischargeTime: new Date('2026-08-21T02:00:00.000Z'), rawSummary: '重新查询结果', sourceUrl: input.rule.url };
+      },
+    }) });
+    const summary = await engine.run('manual', { skipCompleted: false });
+    assert.equal(summary.total, 1);
+    assert.equal(summary.success, 1);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -182,7 +406,7 @@ test('人工补录和人工修改会写回状态、时间并创建备份', async
   }
 });
 
-test('标记已清关后自动任务跳过该记录', async () => {
+test('标记已清关后移入独立历史并可恢复到船期追踪', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-cleared-'));
   try {
     const store = new WorkbookStore(root);
@@ -191,14 +415,105 @@ test('标记已清关后自动任务跳过该记录', async () => {
     let calls = 0;
     Object.defineProperty(engine, 'provider', { value: () => ({ async query() { calls += 1; throw new Error('不应查询已清关记录'); } }) });
 
-    await engine.updateManualMark(2, '已清关');
+    await assert.rejects(
+      engine.updateManualMark(2, '已清关', { billNo: 'OOLU0000000000', containerNo: 'OOCU7496887' }),
+      /船期记录已发生变化/,
+    );
+    const archived = await engine.updateManualMark(2, '已清关', { billNo: 'OOLU2171963250', containerNo: 'OOCU7496887' });
     const summary = await engine.run('manual');
+
+    assert.equal(archived.archived, true);
+    assert.equal(summary.total, 0);
+    assert.equal(summary.skipped, 0);
+    assert.equal(calls, 0);
+    assert.equal((await store.metadata())?.records, 0);
+    assert.equal((await store.metadata())?.queryable, 0);
+    const archivedWorkbook = await store.open();
+    assert.equal(archivedWorkbook.sheet.getRow(2).hidden, true);
+    const history = await engine.listClearanceHistory();
+    assert.equal(history.entries.length, 1);
+    assert.equal(history.entries[0].billNo, 'OOLU2171963250');
+    assert.equal(history.entries[0].manualMark, '已清关');
+
+    await engine.restoreClearanceHistory(history.entries[0].id);
+    const restoredWorkbook = await store.open();
+    const restored = store.readRecords(restoredWorkbook.sheet, restoredWorkbook.headerMap);
+    assert.equal(restored.length, 1);
+    assert.equal(restored[0].rowNumber, 2);
+    assert.equal(restoredWorkbook.sheet.getRow(2).hidden, false);
+    assert.equal(restored[0].manualMark, '');
+    assert.equal((await engine.listClearanceHistory()).entries.length, 0);
+    assert.ok((await store.listBackups()).length >= 1);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('清关历史按 3 天或 7 天保留周期清理到期记录', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-clearance-retention-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([{ billNo: 'OOLU2171963250', containerNo: 'OOCU7496887' }]);
+    const opened = await store.open();
+    const [record] = store.readRecords(opened.sheet, opened.headerMap);
+    const engine = new AutomationEngine(store);
+    await engine.setClearanceRetentionDays(3);
+    await engine.clearanceHistory.archive(record, new Date('2026-08-01T00:00:00.000Z'));
+    const cleanup = await engine.cleanupClearanceHistory(new Date('2026-08-05T00:00:00.000Z'));
+    assert.equal(cleanup.deleted, 1);
+    assert.equal(cleanup.history.retentionDays, 3);
+    assert.equal(cleanup.history.entries.length, 0);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('旧版 Excel 中已有的已清关标记会自动迁移且不会重复归档', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-clearance-migration-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([{ billNo: 'OOLU2171963250', containerNo: 'OOCU7496887', manualMark: '已清关' }]);
+    const engine = new AutomationEngine(store);
+    const first = await engine.migrateClearedRecordsToHistory();
+    const second = await engine.migrateClearedRecordsToHistory();
+    assert.equal(first.migrated, 1);
+    assert.equal(second.migrated, 0);
+    assert.equal((await store.metadata())?.records, 0);
+    assert.equal((await engine.listClearanceHistory()).entries.length, 1);
+    assert.equal((await store.open()).sheet.getRow(2).hidden, true);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('达飞和赫伯罗特自动更新会安全跳过并保留已有真实数据', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-manual-browser-only-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([{ billNo: 'CMDUNGP4005669', containerNo: 'TDSU8099791' }]);
+    const opened = await store.open();
+    const [record] = store.readRecords(opened.sheet, opened.headerMap);
+    record.arrivalTime = '20 Aug 2026 09:30';
+    record.vesselState = '已到港未卸船';
+    record.progress = '已完成';
+    record.note = '到港字段=ATA；普通浏览器人工采集';
+    store.writeRecord(opened.sheet, opened.headerMap, record);
+    await store.save(opened.workbook);
+
+    const engine = new AutomationEngine(store);
+    let providerCalls = 0;
+    Object.defineProperty(engine, 'provider', { value: () => ({ async query() { providerCalls += 1; throw new Error('不应启动自动化浏览器'); } }) });
+    const summary = await engine.run('manual', { shipmentIds: [`XLSX-${record.rowNumber}`] });
 
     assert.equal(summary.total, 0);
     assert.equal(summary.skipped, 1);
-    assert.equal(calls, 0);
-    assert.equal((await store.metadata())?.queryable, 0);
-    assert.ok((await store.listBackups()).length >= 1);
+    assert.equal(providerCalls, 0);
+    const refreshed = await store.open();
+    const [preserved] = store.readRecords(refreshed.sheet, refreshed.headerMap);
+    assert.ok(preserved.arrivalTime instanceof Date);
+    assert.equal(preserved.arrivalTime.toISOString(), '2026-08-20T01:30:00.000Z');
+    assert.equal(preserved.vesselState, '已到港未卸船');
+    assert.match(preserved.note, /普通浏览器人工采集/);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

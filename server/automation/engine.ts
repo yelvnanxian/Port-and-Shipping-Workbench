@@ -1,16 +1,24 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { buildQueryBillNo, resolveCarrierRule } from './carriers.js';
+import { createApiEvidence } from './api-evidence.js';
 import { BrowserTrackingProvider, FallbackTrackingProvider, type BrowserVerificationCallbacks } from './browser.js';
-import { classifyTrackingError } from './errors.js';
+import { classifyTrackingError, trackingError } from './errors.js';
 import { EvergreenTrackingProvider } from './evergreen.js';
 import { MatsonTrackingProvider } from './matson.js';
 import { YangmingTrackingProvider } from './yangming.js';
+import { WanhaiPatchrightTrackingProvider } from './wanhai-patchright.js';
+import { ZimPatchrightTrackingProvider } from './zim-patchright.js';
 import { notifyWeCom } from './notifier.js';
+import { OoclPatchrightTrackingProvider } from './oocl-patchright.js';
 import { OoclTrackingProvider } from './oocl.js';
 import { OneTrackingProvider } from './one.js';
 import { HedeTrackingProvider } from './hede.js';
 import { HmmTrackingProvider } from './hmm.js';
+import { parseCmaTrackingText } from './cma.js';
+import { parseHapagTrackingText } from './hapag.js';
+import { isManualCollectionCarrier } from './manual-collection.js';
+import { ClearanceHistoryStore, type ClearanceRetentionDays } from './clearance-history.js';
 import { OfficialSiteProbeProvider } from './official-probe.js';
 import { SmLineTrackingProvider } from './smline.js';
 import { RateLimiter } from './rate-limiter.js';
@@ -18,6 +26,7 @@ import { CarrierRoutingTrackingProvider, trackRecord, type TrackingProvider } fr
 import type { AutomationSettings, AutomationTask, AutomationTaskScope, FailedTrackingDetail, ManualMark, QueryProgress, RunProgress, RunSummary, TrackingTime, VesselState, WorkbookRecord } from './types.js';
 import { WorkbookStore } from './workbook.js';
 import type { AppDatabase } from '../database.js';
+import { safeSourceCode, sourceEvidenceDirectory, sourceEvidenceUrl, sourceTrackingDetailKey, sourceTrackingDetailPath, sourceTrackingDetailUrl } from './source-storage.js';
 
 function isQueryable(record: WorkbookRecord) {
   return record.manualMark !== '已清关'
@@ -37,7 +46,19 @@ function sourceUrlFromNote(note: string) {
 }
 
 function routeTextFromNote(note: string) {
-  return note.match(/(?:^|；)运行线路=([^；]+)/)?.[1]?.trim() || null;
+  return note.match(/(?:^|；)(?:已识别)?运行线路=([^；]+)/)?.[1]?.trim() || null;
+}
+
+/**
+ * 自动查询失败时不能继续沿用上一次自动查询的时间和船只状态。
+ * 否则 Excel 会出现“进度=失败”但仍显示“已到港已卸船”的矛盾组合，
+ * 使用者容易把历史值误认为本次已核验结果。人工标记不属于解析结果，
+ * 因此保留不动。
+ */
+function clearAutomaticTrackingResult(record: WorkbookRecord) {
+  record.arrivalTime = null;
+  record.dischargeTime = null;
+  record.vesselState = '';
 }
 
 function manualTime(value: unknown): TrackingTime {
@@ -75,8 +96,38 @@ async function writeJsonAtomic(filePath: string, value: unknown) {
   }
 }
 
+type StoredTrackingDetail = {
+  carrierCode: string;
+  billNo: string;
+  containerNo: string;
+  sourceUrl: string;
+  capturedAt: string;
+  trackingDetail: NonNullable<import('./types.js').TrackingResult['trackingDetail']>;
+  rawPageText: string;
+};
+
 export function evidencePathFromNote(note: string) {
   return note.match(/(?:^|；)成功证据=(\/api\/browser-evidence\/[^；\s]+)/i)?.[1] || '';
+}
+
+export function failureEvidencePathFromNote(note: string) {
+  return note.match(/(?:^|；)浏览器证据=(\/api\/browser-evidence\/[^；\s]+)/i)?.[1] || '';
+}
+
+function trackingMomentIdentity(value: TrackingTime) {
+  if (!value) return '';
+  if (value instanceof Date) return value.toISOString();
+  const numeric = value.match(/\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (numeric) {
+    const [, year, month, day, hour, minute, second = '00'] = numeric;
+    return [year, month.padStart(2, '0'), day.padStart(2, '0'), hour.padStart(2, '0'), minute, second].join('-');
+  }
+  return value.trim();
+}
+
+function isSuspiciousArrivalAsDischarge(arrival: TrackingTime, discharge: TrackingTime) {
+  const arrivalIdentity = trackingMomentIdentity(arrival);
+  return Boolean(arrivalIdentity && arrivalIdentity === trackingMomentIdentity(discharge));
 }
 
 export class AutomationEngine {
@@ -84,7 +135,7 @@ export class AutomationEngine {
   private processingQueue = false;
   private readonly runQueue: Array<{
     reason: RunSummary['reason'];
-    selection?: { carrierCodes?: string[]; shipmentIds?: string[] };
+    selection?: { carrierCodes?: string[]; shipmentIds?: string[]; skipCompleted?: boolean };
     resolve: (summary: RunSummary) => void;
     reject: (error: unknown) => void;
   }> = [];
@@ -95,16 +146,20 @@ export class AutomationEngine {
   readonly runLogPath: string;
   readonly settingsPath: string;
   readonly tasksPath: string;
+  readonly clearanceHistory: ClearanceHistoryStore;
   private browserEvidenceProvider: BrowserTrackingProvider | null = null;
   private verificationSkipRequested = false;
   private readonly database?: AppDatabase;
+  private readonly defaultWechatWebhookUrl?: string;
 
-  constructor(store = new WorkbookStore(), database?: AppDatabase) {
+  constructor(store = new WorkbookStore(), database?: AppDatabase, options?: { defaultWechatWebhookUrl?: string }) {
     this.store = store;
     this.database = database?.enabled ? database : undefined;
+    this.defaultWechatWebhookUrl = options?.defaultWechatWebhookUrl;
     this.runLogPath = path.join(store.dataDirectory, 'runs.json');
     this.settingsPath = path.join(store.dataDirectory, 'settings.json');
     this.tasksPath = path.join(store.dataDirectory, 'tasks.json');
+    this.clearanceHistory = new ClearanceHistoryStore(store.dataDirectory);
   }
 
   get isRunning() {
@@ -132,11 +187,49 @@ export class AutomationEngine {
       : null;
     this.browserEvidenceProvider = browser;
     const withBrowserFallback = (primary: TrackingProvider) => browser ? new FallbackTrackingProvider(primary, browser) : primary;
-    const hmm = settings.browserAutomationEnabled
+    const oocl = settings.browserAutomationEnabled
+      ? new FallbackTrackingProvider(
+        new OoclTrackingProvider(),
+        new OoclPatchrightTrackingProvider(this.store.dataDirectory, undefined, verificationCallbacks),
+      )
+      : new OoclTrackingProvider();
+    const wanhai = settings.browserAutomationEnabled
+      ? new FallbackTrackingProvider(
+        new OfficialSiteProbeProvider(),
+        new WanhaiPatchrightTrackingProvider(this.store.dataDirectory, undefined, verificationCallbacks),
+      )
+      : new OfficialSiteProbeProvider();
+    const zim = settings.browserAutomationEnabled
+      ? new FallbackTrackingProvider(
+        new OfficialSiteProbeProvider(),
+        new ZimPatchrightTrackingProvider(this.store.dataDirectory, undefined, verificationCallbacks),
+      )
+      : new OfficialSiteProbeProvider();
+    // CMA and Hapag-Lloyd trigger managed challenges as soon as an automated
+    // browser profile opens. They deliberately use the ordinary-browser
+    // extension flow instead, so an automation run must never launch Chrome
+    // for these two carriers.
+    const manualBrowserOnly: TrackingProvider = {
+      async query(input) {
+        throw trackingError(
+          '验证码或风控',
+          `${input.rule.name}已改用普通浏览器扩展采集，请在该单号详情中点击“普通浏览器采集”`,
+          { sourceUrl: input.rule.url },
+        );
+      },
+    };
+    const hmmPrimary = settings.browserAutomationEnabled
       ? new HmmTrackingProvider(this.store.dataDirectory, undefined, verificationCallbacks)
       : new OfficialSiteProbeProvider();
+    const hmm = browser && settings.browserAutomationEnabled
+      ? new FallbackTrackingProvider(hmmPrimary, browser)
+      : hmmPrimary;
     return new CarrierRoutingTrackingProvider(new Map<string, TrackingProvider>([
-      ['OOCL', withBrowserFallback(new OoclTrackingProvider())],
+      ['OOCL', oocl],
+      ['WANHAI', wanhai],
+      ['ZIM', zim],
+      ['HAPAG', manualBrowserOnly],
+      ['CMA', manualBrowserOnly],
       ['ONE', withBrowserFallback(new OneTrackingProvider())],
       ['HEDE', withBrowserFallback(new HedeTrackingProvider())],
       ['SMLINE', withBrowserFallback(new SmLineTrackingProvider())],
@@ -169,6 +262,49 @@ export class AutomationEngine {
         );
       }
     });
+  }
+
+  private trackingDetailKey(record: WorkbookRecord) {
+    return sourceTrackingDetailKey(record.billNo, record.containerNo);
+  }
+
+  private async saveTrackingDetail(record: WorkbookRecord, result: import('./types.js').TrackingResult) {
+    const detail = result.trackingDetail;
+    if (!detail || !result.rawPageText) return null;
+    const carrierCode = safeSourceCode(detail.carrierCode);
+    const key = this.trackingDetailKey(record);
+    const filePath = sourceTrackingDetailPath(this.store.dataDirectory, carrierCode, key);
+    const stored: StoredTrackingDetail = {
+      carrierCode,
+      billNo: record.billNo,
+      containerNo: record.containerNo,
+      sourceUrl: result.sourceUrl,
+      capturedAt: detail.capturedAt,
+      trackingDetail: detail,
+      rawPageText: result.rawPageText,
+    };
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await writeJsonAtomic(filePath, stored);
+    return sourceTrackingDetailUrl(carrierCode, key);
+  }
+
+  private async removeTrackingDetail(record: WorkbookRecord, carrierCode?: string) {
+    const code = carrierCode || (() => {
+      try { return resolveCarrierRule(record).code; } catch { return ''; }
+    })();
+    if (!code) return;
+    const filePath = sourceTrackingDetailPath(this.store.dataDirectory, code, this.trackingDetailKey(record));
+    await fs.rm(filePath, { force: true }).catch(() => undefined);
+  }
+
+  async readTrackingDetail(carrierCode: string, fileName: string) {
+    const code = safeSourceCode(carrierCode);
+    const expectedCarrier = code === carrierCode.trim().toUpperCase();
+    const safeName = path.basename(fileName);
+    if (!expectedCarrier || safeName !== fileName || !/\.json$/i.test(safeName)) throw new Error('轨迹详情路径不合法');
+    const filePath = sourceTrackingDetailPath(this.store.dataDirectory, code, safeName.replace(/\.json$/i, ''));
+    const raw = await fs.readFile(filePath, 'utf8');
+    return JSON.parse(raw) as StoredTrackingDetail;
   }
 
   async listRuns(): Promise<RunSummary[]> {
@@ -362,25 +498,206 @@ export class AutomationEngine {
     return { record, backupPath };
   }
 
-  async updateManualMark(rowNumber: number, value: unknown) {
+  /**
+   * Apply a page collected from the user's ordinary Chrome/Edge tab.
+   * CMA and Hapag-Lloyd are deliberately handled here instead of launching
+   * Patchright, because their managed challenge is triggered before a query
+   * form is rendered in automated profiles.
+   */
+  async applyManualBrowserCapture(rowNumber: number, input: {
+    queryType: 'bill' | 'container';
+    pageUrl: string;
+    pageText: string;
+    screenshot?: Buffer;
+  }) {
+    if (this.running) throw new Error('自动更新正在执行，请等待当前任务完成');
+    if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new Error('船期记录编号不合法');
+    if (!input.pageText.trim()) throw new Error('采集页面没有可解析的文字内容');
+    const opened = await this.store.open();
+    const record = this.store.readRecords(opened.sheet, opened.headerMap).find((item) => item.rowNumber === rowNumber);
+    if (!record) throw new Error('找不到对应船期记录');
+    const rule = resolveCarrierRule(record);
+    if (rule.code !== 'CMA' && rule.code !== 'HAPAG') throw new Error('普通浏览器采集目前仅支持达飞和赫伯罗特');
+    const query: import('./types.js').TrackingQuery = {
+      rule,
+      originalBillNo: record.billNo,
+      queryBillNo: buildQueryBillNo(record.billNo, rule),
+      containerNo: record.containerNo,
+      queryType: input.queryType,
+    };
+    let evidencePath: string | undefined;
+    if (input.screenshot?.length) {
+      const reference = safeSourceCode(`${record.billNo}_${record.containerNo || input.queryType}`).slice(0, 80);
+      const baseName = `${new Date().toISOString().replace(/[:.]/g, '-')}_${rule.code}_${reference}_manual`;
+      const directory = sourceEvidenceDirectory(this.store.dataDirectory, rule.code);
+      await fs.mkdir(directory, { recursive: true });
+      await Promise.all([
+        fs.writeFile(path.join(directory, `${baseName}.png`), input.screenshot, { mode: 0o600 }),
+        fs.writeFile(path.join(directory, `${baseName}.txt`), input.pageText.slice(0, 4 * 1024 * 1024), { mode: 0o600 }),
+      ]);
+      evidencePath = sourceEvidenceUrl(rule.code, `${baseName}.png`);
+    }
+    let parsed: import('./types.js').TrackingResult;
+    try {
+      parsed = rule.code === 'CMA'
+        ? parseCmaTrackingText(input.pageText, query)
+        : parseHapagTrackingText(input.pageText, query);
+    } catch (error) {
+      const failure = classifyTrackingError(error);
+      throw trackingError(failure.category, failure.reason, { evidencePath, sourceUrl: input.pageUrl });
+    }
+    let result: import('./types.js').TrackingResult = {
+      ...parsed,
+      sourceUrl: input.pageUrl,
+      rawPageText: input.pageText,
+      rawSummary: `${parsed.rawSummary}；普通浏览器人工采集` ,
+      evidencePath,
+    };
+    const backupPath = await this.store.backup('普通浏览器采集前备份');
+    const previousArrival = record.arrivalTime;
+    const previousDischarge = record.dischargeTime;
+    record.carrierHint = rule.name;
+    record.arrivalTime = result.arrivalTimeText || result.arrivalTime;
+    const canPreservePreviousDischarge = Boolean(result.discharged && previousDischarge && !isSuspiciousArrivalAsDischarge(previousArrival, previousDischarge));
+    record.dischargeTime = result.dischargeTimeText || result.dischargeTime || (canPreservePreviousDischarge ? previousDischarge : null);
+    record.vesselState = result.discharged || result.dischargeTime || result.dischargeTimeText
+      ? '已到港已卸船'
+      : result.arrived
+        ? '已到港未卸船'
+        : '未到港未卸船';
+    record.lastUpdated = new Date();
+    record.progress = '已完成';
+    const routeSummary = result.routeText ? `；运行线路=${result.routeText}` : '';
+    record.note = `${result.arrivalKind ? `到港字段=${result.arrivalKind}；` : ''}${result.rawSummary}${routeSummary}；来源=${result.sourceUrl}${result.evidencePath ? `；成功证据=${result.evidencePath}` : ''}`;
+    this.store.writeRecord(opened.sheet, opened.headerMap, record);
+    try {
+      await this.removeTrackingDetail(record, rule.code);
+      if (result.trackingDetail && result.rawPageText) await this.saveTrackingDetail(record, result);
+    } catch (error) {
+      console.warn(`[AutomationEngine] ${record.billNo} 普通浏览器采集详情保存失败：`, error);
+    }
+    await this.store.save(opened.workbook);
+    await this.syncDatabaseFromWorkbook();
+    return { record, result, backupPath };
+  }
+
+  async updateManualMark(rowNumber: number, value: unknown, expected?: { billNo: string; containerNo: string }) {
     if (this.running) throw new Error('自动更新正在执行，请稍后再修改人工标记');
     if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new Error('船期记录编号不合法');
     const opened = await this.store.open();
     const record = this.store.readRecords(opened.sheet, opened.headerMap).find((item) => item.rowNumber === rowNumber);
     if (!record) throw new Error('找不到对应船期记录');
+    if (expected && (record.billNo !== expected.billNo.trim().toUpperCase() || record.containerNo !== expected.containerNo.trim().toUpperCase())) {
+      throw new Error('船期记录已发生变化，请刷新页面后重试');
+    }
     const nextMark = manualMark(value);
-    const backupPath = await this.store.backup('修改人工标记前备份');
+    const backupPath = await this.store.backup(nextMark === '已清关' ? '归档已清关记录前备份' : '修改人工标记前备份');
+    if (nextMark === '已清关') {
+      if (!backupPath) throw new Error('当前 Excel 不存在，无法归档清关记录');
+      let historyEntry: Awaited<ReturnType<ClearanceHistoryStore['archive']>> | null = null;
+      try {
+        historyEntry = await this.clearanceHistory.archive(record);
+        await this.store.archiveRecord(rowNumber, historyEntry.id);
+        await this.syncDatabaseFromWorkbook().catch((error) => console.warn('[AutomationEngine] 清关归档后 PostgreSQL 镜像同步失败：', error));
+        return { record, historyEntry, archived: true, backupPath };
+      } catch (error) {
+        if (historyEntry) await this.clearanceHistory.remove([historyEntry.id]).catch(() => undefined);
+        await fs.copyFile(backupPath, this.store.currentPath).catch(() => undefined);
+        throw error;
+      }
+    }
     record.manualMark = nextMark;
     this.store.writeRecord(opened.sheet, opened.headerMap, record);
     await this.store.save(opened.workbook);
     await this.syncDatabaseFromWorkbook();
-    return { record, backupPath };
+    return { record, archived: false, backupPath };
+  }
+
+  async listClearanceHistory() {
+    return this.clearanceHistory.snapshot();
+  }
+
+  async migrateClearedRecordsToHistory() {
+    if (this.running || !(await this.store.exists())) return { migrated: 0 };
+    const opened = await this.store.open();
+    const cleared = this.store.readRecords(opened.sheet, opened.headerMap).filter((record) => record.manualMark === '已清关');
+    if (!cleared.length) return { migrated: 0 };
+    const backupPath = await this.store.backup('迁移旧版已清关记录前备份');
+    if (!backupPath) throw new Error('当前 Excel 不存在，无法迁移已清关记录');
+    const existing = await this.clearanceHistory.snapshot();
+    const createdIds: string[] = [];
+    try {
+      for (const record of cleared) {
+        let historyEntry = existing.entries.find((entry) => entry.billNo === record.billNo && entry.containerNo === record.containerNo);
+        if (!historyEntry) {
+          historyEntry = await this.clearanceHistory.archive(record);
+          createdIds.push(historyEntry.id);
+          existing.entries.push(historyEntry);
+        }
+        await this.store.archiveRecord(record.rowNumber, historyEntry.id);
+      }
+      await this.syncDatabaseFromWorkbook().catch((error) => console.warn('[AutomationEngine] 旧版清关记录迁移后 PostgreSQL 镜像同步失败：', error));
+      return { migrated: cleared.length, backupPath };
+    } catch (error) {
+      if (createdIds.length) await this.clearanceHistory.remove(createdIds).catch(() => undefined);
+      await fs.copyFile(backupPath, this.store.currentPath).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async setClearanceRetentionDays(retentionDays: ClearanceRetentionDays) {
+    await this.clearanceHistory.setRetentionDays(retentionDays);
+    await this.clearanceHistory.cleanupExpired();
+    return this.clearanceHistory.snapshot();
+  }
+
+  async cleanupClearanceHistory(now = new Date()) {
+    const deleted = await this.clearanceHistory.cleanupExpired(now);
+    return { deleted, history: await this.clearanceHistory.snapshot() };
+  }
+
+  async deleteClearanceHistory(ids: string[]) {
+    const deleted = await this.clearanceHistory.remove(ids);
+    return { deleted, history: await this.clearanceHistory.snapshot() };
+  }
+
+  async restoreClearanceHistory(id: string) {
+    if (this.running) throw new Error('自动更新正在执行，请稍后再恢复历史记录');
+    const history = await this.clearanceHistory.snapshot();
+    const entry = history.entries.find((item) => item.id === id);
+    if (!entry) throw new Error('找不到对应清关历史记录');
+    const backupPath = await this.store.backup('恢复清关历史前备份');
+    if (!backupPath) throw new Error('当前 Excel 不存在，无法恢复历史记录');
+    const restored = await this.store.restoreRecord({
+      carrierHint: entry.carrierHint,
+      billNo: entry.billNo,
+      containerNo: entry.containerNo,
+      arrivalTime: entry.arrivalTime,
+      dischargeTime: entry.dischargeTime,
+      vesselState: entry.vesselState,
+      manualMark: '',
+      lastUpdated: entry.lastUpdated ? new Date(entry.lastUpdated) : null,
+      note: entry.note,
+      progress: entry.progress,
+    }, { preferredRowNumber: entry.originalRowNumber, historyId: entry.id });
+    try {
+      const deleted = await this.clearanceHistory.remove([id]);
+      if (deleted !== 1) throw new Error('清关历史记录状态已变化，请刷新后重试');
+      await this.syncDatabaseFromWorkbook().catch((error) => console.warn('[AutomationEngine] 清关历史恢复后 PostgreSQL 镜像同步失败：', error));
+      return { record: restored, backupPath, history: await this.clearanceHistory.snapshot() };
+    } catch (error) {
+      await fs.copyFile(backupPath, this.store.currentPath).catch(() => undefined);
+      throw error;
+    }
   }
 
   async deleteShipments(rowNumbers: number[]) {
     if (this.running) throw new Error('自动更新正在执行，请稍后再删除船期记录');
+    const opened = await this.store.open();
+    const targets = this.store.readRecords(opened.sheet, opened.headerMap).filter((record) => rowNumbers.includes(record.rowNumber));
     const backupPath = await this.store.backup('删除船期记录前备份');
     const result = await this.store.deleteRecords(rowNumbers);
+    await Promise.all(targets.map((record) => this.removeTrackingDetail(record)));
     await this.syncDatabaseFromWorkbook();
     return { ...result, backupPath };
   }
@@ -389,21 +706,17 @@ export class AutomationEngine {
     const fallback: AutomationSettings = {
       enabled: true,
       browserAutomationEnabled: true,
-      schedule: [
-        { time: '09:00', cron: '0 9 * * *' },
-        { time: '11:00', cron: '0 11 * * *' },
-        { time: '17:30', cron: '30 17 * * *' },
-      ],
+      schedule: [],
       timezone: 'Asia/Shanghai',
-      wechatWebhookUrl: process.env.WECHAT_WEBHOOK_URL?.trim() || '',
+      wechatWebhookUrl: this.defaultWechatWebhookUrl ?? (process.env.WECHAT_WEBHOOK_URL?.trim() || ''),
     };
     if (this.database) {
       const result = await this.database.query<{ payload: AutomationSettings }>('SELECT payload FROM automation_settings WHERE id = 1');
-      if (result.rows[0]?.payload) return { ...fallback, ...result.rows[0].payload, schedule: fallback.schedule, wechatWebhookUrl: result.rows[0].payload.wechatWebhookUrl ?? fallback.wechatWebhookUrl };
+      if (result.rows[0]?.payload) return { ...fallback, ...result.rows[0].payload, schedule: [], wechatWebhookUrl: result.rows[0].payload.wechatWebhookUrl ?? fallback.wechatWebhookUrl };
     }
     try {
       const saved = JSON.parse(await fs.readFile(this.settingsPath, 'utf8')) as Partial<AutomationSettings>;
-      const normalized = { ...fallback, ...saved, schedule: fallback.schedule, wechatWebhookUrl: saved.wechatWebhookUrl ?? fallback.wechatWebhookUrl };
+      const normalized = { ...fallback, ...saved, schedule: [], wechatWebhookUrl: saved.wechatWebhookUrl ?? fallback.wechatWebhookUrl };
       if (this.database) await this.saveSettings(normalized);
       return normalized;
     } catch {
@@ -455,7 +768,7 @@ export class AutomationEngine {
     await writeJsonAtomic(this.runLogPath, [summary, ...runs].slice(0, 30));
   }
 
-  private async executeRun(reason: RunSummary['reason'], selection?: { carrierCodes?: string[]; shipmentIds?: string[] }): Promise<RunSummary> {
+  private async executeRun(reason: RunSummary['reason'], selection?: { carrierCodes?: string[]; shipmentIds?: string[]; skipCompleted?: boolean }): Promise<RunSummary> {
     if (this.running) throw new Error('已有更新任务正在执行');
     this.running = true;
     const startedAt = new Date();
@@ -482,13 +795,14 @@ export class AutomationEngine {
       await this.syncDatabaseFromWorkbook();
       const selectedCarrierCodes = selection?.carrierCodes?.length ? new Set(selection.carrierCodes.map((code) => code.toUpperCase())) : null;
       const selectedShipmentIds = selection?.shipmentIds?.length ? new Set(selection.shipmentIds) : null;
+      const skipCompleted = selection?.skipCompleted !== false;
       const records = allRecords.filter((record) => {
         if (selectedShipmentIds) {
           const rowId = `XLSX-${record.rowNumber}`;
           if (!selectedShipmentIds.has(rowId) && !selectedShipmentIds.has(record.billNo)) return false;
           // 显式点选更新时，不因“已到港已卸船”等历史状态跳过；仅保留已清关保护。
           if (record.manualMark === '已清关') return false;
-        } else if (!isQueryable(record)) {
+        } else if (skipCompleted ? !isQueryable(record) : record.manualMark === '已清关') {
           return false;
         }
         if (selectedCarrierCodes) {
@@ -498,6 +812,12 @@ export class AutomationEngine {
             return false;
           }
         }
+        // These records are collected from a user-controlled ordinary browser
+        // tab. Skipping them here prevents scheduled/full syncs from launching
+        // an automated Chrome or erasing a previously verified manual result.
+        try {
+          if (isManualCollectionCarrier(resolveCarrierRule(record).code)) return false;
+        } catch { /* unsupported prefixes are still reported by the normal run */ }
         return true;
       });
       this.currentRun.total = records.length;
@@ -562,6 +882,8 @@ export class AutomationEngine {
           this.currentRun?.currentBills.push(activeBill);
 
           try {
+            const previouslyVerifiedArrival = record.arrivalTime;
+            const previouslyVerifiedDischarge = record.dischargeTime;
             const { rule, result: primaryResult } = await trackRecord(record, rateLimitedProvider);
             let result = primaryResult;
             let evidenceWarning = '';
@@ -573,6 +895,8 @@ export class AutomationEngine {
                   ...result,
                   evidencePath: captured.result.evidencePath || result.evidencePath,
                   routeText: result.routeText || captured.result.routeText,
+                  trackingDetail: captured.result.trackingDetail || result.trackingDetail,
+                  rawPageText: captured.result.rawPageText || result.rawPageText,
                 };
                 if (!result.evidencePath) evidenceWarning = '；成功页面未生成截图证据';
               } catch (captureError) {
@@ -581,17 +905,48 @@ export class AutomationEngine {
                 console.warn(`[AutomationEngine] ${record.billNo} 成功证据采集失败：${captureFailure.reason}`);
               }
             }
+            // 官网页面无法截图（例如官网维护），但官方接口已经返回可核验数据时，
+            // 仍生成带来源域名和原始响应哈希的视觉凭证。凭证会明确标注并非网页截图。
+            if (!result.evidencePath) {
+              try {
+                result = { ...result, evidencePath: await createApiEvidence(this.store.dataDirectory, record, rule, result) };
+                evidenceWarning = evidenceWarning
+                  ? '；官网成功页截图不可用，已保存官方接口采集凭证'
+                  : '；已保存官方接口采集凭证';
+              } catch (apiEvidenceError) {
+                evidenceWarning = '；采集证据保存失败，请查看后端日志';
+                console.warn(`[AutomationEngine] ${record.billNo} 官方接口凭证保存失败：`, apiEvidenceError);
+              }
+            }
             record.carrierHint = rule.name;
             record.arrivalTime = result.arrivalTimeText || result.arrivalTime;
-            record.dischargeTime = result.dischargeTimeText || result.dischargeTime;
-            record.vesselState = result.dischargeTime || result.dischargeTimeText
+            // 一些官网摘要只返回“已提货/已配送”等最新事件，会覆盖此前返回过的
+            // 精确卸船时刻。只要最新结果仍明确确认已卸船，就保留上一次官网已核验
+            // 的卸船时间，避免一次更新把真实历史事件降级为“未卸船”。
+            const canPreservePreviousDischarge = result.discharged
+              && previouslyVerifiedDischarge
+              && !isSuspiciousArrivalAsDischarge(previouslyVerifiedArrival, previouslyVerifiedDischarge);
+            record.dischargeTime = result.dischargeTimeText || result.dischargeTime
+              || (canPreservePreviousDischarge ? previouslyVerifiedDischarge : null);
+            record.vesselState = result.discharged || result.dischargeTime || result.dischargeTimeText
               ? '已到港已卸船'
               : result.arrived
                 ? '已到港未卸船'
                 : '未到港未卸船';
             record.lastUpdated = new Date();
             record.progress = '已完成';
-            record.note = `${result.arrivalKind ? `到港字段=${result.arrivalKind}；` : ''}${result.rawSummary}${result.routeText ? `；运行线路=${result.routeText}` : ''}${evidenceWarning}；来源=${result.sourceUrl}${result.evidencePath ? `；成功证据=${result.evidencePath}` : ''}`;
+            const routeSummary = result.routeText && !/(?:运行线路|已识别运行线路)=/.test(result.rawSummary)
+              ? `；运行线路=${result.routeText}`
+              : '';
+            let detailWarning = '';
+            try {
+              await this.removeTrackingDetail(record, rule.code);
+              if (result.trackingDetail && result.rawPageText) await this.saveTrackingDetail(record, result);
+            } catch (detailError) {
+              detailWarning = '；完整轨迹详情保存失败，请查看后端日志';
+              console.warn(`[AutomationEngine] ${record.billNo} 完整轨迹详情保存失败：`, detailError);
+            }
+            record.note = `${result.arrivalKind ? `到港字段=${result.arrivalKind}；` : ''}${result.rawSummary}${routeSummary}${evidenceWarning}${detailWarning}；来源=${result.sourceUrl}${result.evidencePath ? `；成功证据=${result.evidencePath}` : ''}`;
             success += 1;
             if (record.vesselState !== '已到港已卸船') unfinished += 1;
           } catch (error) {
@@ -616,6 +971,8 @@ export class AutomationEngine {
               sourceUrl: failure.sourceUrl || sourceUrl,
               evidencePath: failure.evidencePath,
             };
+            clearAutomaticTrackingResult(record);
+            await this.removeTrackingDetail(record, carrierCode);
             record.lastUpdated = new Date();
             record.progress = '失败';
             record.note = failedNote(detail);
@@ -630,7 +987,10 @@ export class AutomationEngine {
           }
         }
       };
-      await Promise.all(Array.from({ length: Math.min(5, records.length) }, () => worker()));
+      // 浏览器会话、人工验证提示和证据截图必须共用一个顺序上下文；并发打开多个船司验证页
+      // 会让前端只能显示最后一个验证提示，也会让验证码等待时间相互叠加。官方接口同样保持
+      // 单线程，优先保证 Excel 写回、浏览器 Cookie 和人工验证状态的一致性。
+      await worker();
       this.currentRun.phase = 'saving';
       await this.store.save(workbook);
       await this.syncDatabaseFromWorkbook();
@@ -674,7 +1034,7 @@ export class AutomationEngine {
    */
   async run(
     reason: RunSummary['reason'],
-    selection?: { carrierCodes?: string[]; shipmentIds?: string[] },
+    selection?: { carrierCodes?: string[]; shipmentIds?: string[]; skipCompleted?: boolean },
     idempotencyKey?: string,
   ): Promise<RunSummary> {
     const key = idempotencyKey?.trim();
@@ -764,7 +1124,8 @@ export class AutomationEngine {
   async dashboardRecords() {
     if (!(await this.store.exists())) return [];
     const { sheet, headerMap } = await this.store.open();
-    return this.store.readRecords(sheet, headerMap).map((record) => {
+    const records = this.store.readRecords(sheet, headerMap);
+    return Promise.all(records.map(async (record) => {
       let carrier = record.carrierHint || '未知船司';
       let carrierCode = 'UNKNOWN';
       let sourceUrl = '';
@@ -774,10 +1135,24 @@ export class AutomationEngine {
         carrier = rule.name;
         carrierCode = rule.code;
         sourceUrl = rule.url;
-        verificationNo = rule.code === 'SMLINE' && record.containerNo && record.note.includes('本次通道=柜号')
+        verificationNo = rule.code === 'HAPAG' && record.containerNo
           ? record.containerNo
-          : buildQueryBillNo(record.billNo, rule);
+          : rule.code === 'SMLINE' && record.containerNo && record.note.includes('本次通道=柜号')
+            ? record.containerNo
+            : buildQueryBillNo(record.billNo, rule);
       } catch { /* 错误展示在 Excel 备注中 */ }
+      const detailKey = this.trackingDetailKey(record);
+      let trackingDetail: StoredTrackingDetail['trackingDetail'] | undefined;
+      let trackingDetailUrl: string | undefined;
+      if (carrierCode !== 'UNKNOWN') {
+        try {
+          const stored = await this.readTrackingDetail(carrierCode, `${detailKey}.json`);
+          trackingDetail = stored.trackingDetail;
+          trackingDetailUrl = sourceTrackingDetailUrl(carrierCode, detailKey);
+        } catch {
+          // 详情文件可能尚未采集，不能因此影响总览列表。
+        }
+      }
       return {
         record: {
           ...record,
@@ -788,9 +1163,12 @@ export class AutomationEngine {
         carrierCode,
         sourceUrl: sourceUrlFromNote(record.note) || sourceUrl,
         evidencePath: evidencePathFromNote(record.note),
+        failureEvidencePath: failureEvidencePathFromNote(record.note),
         verificationNo,
         route: routeTextFromNote(record.note),
+        trackingDetail,
+        trackingDetailUrl,
       };
-    });
+    }));
   }
 }

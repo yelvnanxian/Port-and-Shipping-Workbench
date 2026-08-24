@@ -20,7 +20,34 @@ export interface Shipment {
   progress?: '待查询' | '查询中' | '已完成' | '失败';
   sourceUrl?: string;
   evidencePath?: string;
+  failureEvidencePath?: string;
   verificationNo?: string;
+  trackingDetail?: {
+    carrierCode: string;
+    queryType: 'bill' | 'container';
+    queryValue: string;
+    capturedAt: string;
+    routeStops: Array<{
+      name: string;
+      role: 'origin' | 'loading' | 'transshipment' | 'discharge' | 'delivery' | 'unknown';
+    }>;
+    events: Array<{
+      label: string;
+      eventType: 'origin' | 'departure' | 'transshipment' | 'arrival' | 'discharge' | 'pickup' | 'empty-return' | 'delivery' | 'other';
+      location: string | null;
+      time: string | null;
+      timeText?: string | null;
+      actual: boolean;
+      cargoState: 'laden' | 'empty' | 'unknown';
+      facility?: string | null;
+      vesselName?: string | null;
+      voyageNo?: string | null;
+      transportMode?: 'ocean' | 'rail' | 'truck' | 'terminal' | 'unknown';
+      sourceLine?: string;
+    }>;
+    facts?: Array<{ label: string; value: string }>;
+  };
+  trackingDetailUrl?: string;
 }
 
 export interface CarrierSource {

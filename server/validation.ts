@@ -42,6 +42,7 @@ export function recordIds(value: unknown, field: string, pattern: RegExp, maxIte
 }
 
 export const shipmentIdPattern = /^XLSX-[1-9]\d{0,8}$/;
+export const clearanceHistoryIdPattern = /^CLR-[a-z0-9]{6,16}-[a-z0-9]{6,16}$/;
 export const runIdPattern = /^RUN-\d{8,20}$/;
 export const taskIdPattern = /^TASK-[A-Za-z0-9-]{8,80}$/;
 export const userIdPattern = /^user-[A-Za-z0-9]{8,40}$/;

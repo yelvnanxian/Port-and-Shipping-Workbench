@@ -1,6 +1,6 @@
 import { trackingError } from './errors.js';
 import type { TrackingProvider } from './tracker.js';
-import type { TrackingQuery, TrackingResult } from './types.js';
+import type { TrackingCargoState, TrackingEventDetail, TrackingEventType, TrackingFact, TrackingQuery, TrackingResult, TrackingRouteStop } from './types.js';
 
 const SMLINE_ENDPOINT = 'https://esvc.smlines.com/smline/CUP_HOM_3301GS.do';
 const SMLINE_SOURCE = 'https://esvc.smlines.com/smline/CUP_HOM_3301.do?sessLocale=zh';
@@ -17,14 +17,9 @@ function text(value: unknown) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function parseOfficialDateTime(value: unknown) {
-  const match = text(value).match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})(?::(\d{2}))?$/);
-  if (!match) return null;
-  const parsed = new Date(Date.UTC(
-    Number(match[1]), Number(match[2]) - 1, Number(match[3]),
-    Number(match[4]) - 8, Number(match[5]), Number(match[6] || 0),
-  ));
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
+function officialTime(value: unknown) {
+  const matched = text(value).match(/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?$/)?.[0] || '';
+  return matched ? `${matched}（官网当地时间）` : null;
 }
 
 function payloadList(payload: unknown, label: string) {
@@ -37,11 +32,96 @@ function payloadList(payload: unknown, label: string) {
 }
 
 function isArrivalEvent(event: Record<string, unknown>) {
-  return /arrival at port of discharg/i.test(text(event.statusNm));
+  return /arrival at port of discharg/i.test(statusName(event));
 }
 
 function isDischargeEvent(event: Record<string, unknown>) {
-  return /unloaded|discharged/i.test(text(event.statusNm));
+  return /unloaded|discharged/i.test(statusName(event));
+}
+
+function statusName(event: Record<string, unknown>) {
+  return text(event.statusNm).replace(/<br\s*\/?>/gi, ' / ').replace(/\s+/g, ' ').trim();
+}
+
+function eventDefinition(event: Record<string, unknown>): { eventType: TrackingEventType; cargoState: TrackingCargoState; transportMode: TrackingEventDetail['transportMode'] } {
+  const status = statusName(event);
+  if (/empty container returned|empty.*(?:return|gate.?in)/i.test(status)) return { eventType: 'empty-return', cargoState: 'empty', transportMode: 'terminal' };
+  if (/empty container release/i.test(status)) return { eventType: 'pickup', cargoState: 'empty', transportMode: 'truck' };
+  if (/unloaded|discharged/i.test(status)) return { eventType: 'discharge', cargoState: 'laden', transportMode: 'ocean' };
+  if (/arrival at port of discharg|berthing destination/i.test(status)) return { eventType: 'arrival', cargoState: 'laden', transportMode: 'ocean' };
+  if (/loaded on .*port of loading|departure from port of loading/i.test(status)) return { eventType: 'departure', cargoState: 'laden', transportMode: 'ocean' };
+  if (/gate in to outbound terminal/i.test(status)) return { eventType: 'origin', cargoState: 'laden', transportMode: 'terminal' };
+  if (/gate out from inbound|shuttled to/i.test(status)) return { eventType: 'pickup', cargoState: 'laden', transportMode: 'truck' };
+  if (/transship|relay/i.test(status)) return { eventType: 'transshipment', cargoState: 'laden', transportMode: 'ocean' };
+  return { eventType: 'other', cargoState: 'unknown', transportMode: 'unknown' };
+}
+
+function structuredEvents(events: Array<Record<string, unknown>>) {
+  return events.map((event): TrackingEventDetail => {
+    const definition = eventDefinition(event);
+    const voyage = [text(event.skdVoyNo), text(event.skdDirCd)].filter(Boolean).join('');
+    return {
+      label: statusName(event) || text(event.statusCd) || '官网未命名事件',
+      eventType: definition.eventType,
+      location: text(event.placeNm) || null,
+      facility: text(event.yardNm) || null,
+      time: null,
+      timeText: officialTime(event.eventDt),
+      actual: text(event.actTpCd).toUpperCase() === 'A',
+      cargoState: definition.cargoState,
+      vesselName: text(event.vslEngNm) || null,
+      voyageNo: voyage || null,
+      transportMode: definition.transportMode,
+      sourceLine: [text(event.no), text(event.eventDt), text(event.placeNm), statusName(event), text(event.vslEngNm), voyage, text(event.yardNm), text(event.actTpCd)].filter(Boolean).join(' | '),
+    };
+  }).sort((left, right) => (left.timeText || '').localeCompare(right.timeText || ''));
+}
+
+function normalizedLocation(value: string) {
+  return value.toUpperCase().replace(/[^A-Z0-9\u4e00-\u9fff]/g, '');
+}
+
+function routeStopsFromOfficial(routes: Array<Record<string, unknown>>, events: TrackingEventDetail[]) {
+  const orderedRoutes = [...routes].sort((left, right) => Number(text(left.rn) || text(left.vslSeq) || 0) - Number(text(right.rn) || text(right.vslSeq) || 0));
+  const stops: TrackingRouteStop[] = [];
+  const append = (name: string, role: TrackingRouteStop['role']) => {
+    if (!name) return;
+    const previous = stops.at(-1);
+    if (previous && normalizedLocation(previous.name) === normalizedLocation(name)) {
+      if (role === 'loading' || role === 'discharge') previous.role = role;
+      return;
+    }
+    stops.push({ name, role });
+  };
+  orderedRoutes.forEach((route, index) => {
+    const loading = text(route.porNm) || text(route.placeOfReceiptNm) || text(route.receiptNm) || text(route.polNm) || text(route.portOfLoadingNm);
+    const discharge = text(route.podNm) || text(route.portOfDischargeNm) || text(route.pldNm) || text(route.placeOfDeliveryNm) || text(route.deliveryNm);
+    append(loading, index === 0 ? 'loading' : 'transshipment');
+    append(discharge, index === orderedRoutes.length - 1 ? 'discharge' : 'transshipment');
+  });
+  if (stops.length < 2) {
+    for (const event of events) {
+      if (!event.location || stops.some((stop) => normalizedLocation(stop.name) === normalizedLocation(event.location!))) continue;
+      append(event.location, event.eventType === 'arrival' || event.eventType === 'discharge' ? 'discharge' : stops.length ? 'transshipment' : 'loading');
+    }
+  }
+  return stops;
+}
+
+function routeFacts(routes: Array<Record<string, unknown>>) {
+  return routes.flatMap((route, index): TrackingFact[] => {
+    const leg = `航段 ${index + 1}`;
+    const loading = text(route.polNm) || text(route.portOfLoadingNm);
+    const discharge = text(route.podNm) || text(route.portOfDischargeNm);
+    const vessel = text(route.vslEngNm);
+    const voyage = [text(route.skdVoyNo), text(route.skdDirCd)].filter(Boolean).join('');
+    return [
+      ...(loading || discharge ? [{ label: `${leg} · 线路`, value: [loading, discharge].filter(Boolean).join(' → ') }] : []),
+      ...(vessel || voyage ? [{ label: `${leg} · 船舶/航次`, value: [vessel, voyage].filter(Boolean).join(' / ') }] : []),
+      ...(text(route.etd) ? [{ label: `${leg} · 开航`, value: `${text(route.etd)}（${text(route.etdFlag).toUpperCase() === 'A' ? '实际' : '预计'}，官网当地时间）` }] : []),
+      ...(text(route.eta) ? [{ label: `${leg} · 到港`, value: `${text(route.eta)}（${text(route.etaFlag).toUpperCase() === 'A' ? '实际' : '预计'}，官网当地时间）` }] : []),
+    ];
+  });
 }
 
 export function parseSmLineTrackingResponses(
@@ -73,6 +153,9 @@ export function parseSmLineTrackingResponses(
   const selected = queryType === 'container'
     ? matchedShipments.find((item) => [text(item.blNo), text(item.bkgNo)].some((value) => value.toUpperCase() === billNo)) || matchedShipments[0]
     : matchedShipments.find((item) => text(item.cntrNo).toUpperCase() === expected) || matchedShipments[0];
+  if (queryType === 'bill' && expected && text(selected.cntrNo).toUpperCase() !== expected) {
+    throw trackingError('订单号验证失败', `森罗提单查询未返回输入柜号 ${expected}，将改用柜号查询核验`);
+  }
   const bookingNo = (text(selected.bkgNo) || text(selected.blNo)).toUpperCase();
   const copNo = text(selected.copNo).toUpperCase();
   const containerNo = text(selected.cntrNo).toUpperCase();
@@ -83,31 +166,61 @@ export function parseSmLineTrackingResponses(
     if (text(item.cntrNo) && containerNo && text(item.cntrNo).toUpperCase() !== containerNo) return false;
     return true;
   });
-  const route = routes[0] || {};
-  const actualArrivalEvent = events.find((event) => text(event.actTpCd).toUpperCase() === 'A' && isArrivalEvent(event));
-  const estimatedArrivalEvent = events.find((event) => text(event.actTpCd).toUpperCase() !== 'A' && isArrivalEvent(event));
-  const actualDischargeEvent = events.find((event) => text(event.actTpCd).toUpperCase() === 'A' && isDischargeEvent(event));
-  const estimatedDischargeEvent = events.find((event) => text(event.actTpCd).toUpperCase() !== 'A' && isDischargeEvent(event));
-  const routeArrival = parseOfficialDateTime(route.eta);
-  const actualArrival = parseOfficialDateTime(actualArrivalEvent?.eventDt);
-  const estimatedArrival = parseOfficialDateTime(estimatedArrivalEvent?.eventDt);
-  const dischargeTime = parseOfficialDateTime(actualDischargeEvent?.eventDt);
+  const route = routes.at(-1) || {};
+  const actualArrivalEvent = [...events].reverse().find((event) => text(event.actTpCd).toUpperCase() === 'A' && isArrivalEvent(event));
+  const estimatedArrivalEvent = [...events].reverse().find((event) => text(event.actTpCd).toUpperCase() !== 'A' && isArrivalEvent(event));
+  const actualDischargeEvent = [...events].reverse().find((event) => text(event.actTpCd).toUpperCase() === 'A' && isDischargeEvent(event));
+  const estimatedDischargeEvent = [...events].reverse().find((event) => text(event.actTpCd).toUpperCase() !== 'A' && isDischargeEvent(event));
+  const routeArrivalText = officialTime(route.eta);
+  const actualArrivalText = officialTime(actualArrivalEvent?.eventDt);
+  const estimatedArrivalText = officialTime(estimatedArrivalEvent?.eventDt);
+  const dischargeTimeText = officialTime(actualDischargeEvent?.eventDt);
   const routeMarkedActual = text(route.etaFlag).toUpperCase() === 'A';
-  const arrivalTime = actualArrival || routeArrival || estimatedArrival;
-  const arrivalKind = actualArrival || (routeMarkedActual && routeArrival) ? 'ATA' : arrivalTime ? 'ETA' : null;
+  const arrivalTimeText = actualArrivalText || routeArrivalText || estimatedArrivalText;
+  const arrivalKind = actualArrivalText || (routeMarkedActual && routeArrivalText) ? 'ATA' : arrivalTimeText ? 'ETA' : null;
   const estimatedDischarge = text(estimatedDischargeEvent?.eventDt);
   const vessel = text(route.vslEngNm) || text(selected.vslEngNm) || '未提供';
   const voyage = [text(route.skdVoyNo), text(route.skdDirCd)].filter(Boolean).join('') || '未提供';
-  const estimateNote = !dischargeTime && estimatedDischarge
+  const trackingEvents = structuredEvents(events);
+  const routeStops = routeStopsFromOfficial(routes, trackingEvents);
+  const routeText = routeStops.map((stop) => stop.name).join(' → ') || null;
+  const facts: TrackingFact[] = [
+    ['官网提单号', bookingNo],
+    ['官网柜号', containerNo],
+    ['追踪流水号', copNo],
+    ['箱型', text(selected.cntrTpszNm) || text(selected.cntrTpszCd)],
+    ['重量', text(selected.weight)],
+    ['封号', text(selected.sealNo)],
+    ['最新动态', statusName(selected)],
+    ['最新动态时间', text(selected.eventDt)],
+    ['最新动态地点', text(selected.placeNm)],
+    ['最新作业区', text(selected.yardNm)],
+    ...routeFacts(routes).map((fact) => [fact.label, fact.value] as [string, string]),
+  ].flatMap(([label, value]) => value ? [{ label, value }] : []);
+  const estimateNote = !dischargeTimeText && estimatedDischarge
     ? `；官网另有预计卸船 ${estimatedDischarge}，该事件标记为预计，未写成实际卸船`
     : '';
   return {
-    arrivalTime,
+    arrivalTime: null,
+    arrivalTimeText,
     arrivalKind,
-    arrived: Boolean(actualArrival || dischargeTime || (routeMarkedActual && routeArrival)),
-    dischargeTime,
-    rawSummary: `森罗官方三段追踪解析成功；本次官网校验=${queryType === 'container' ? `柜号 ${expected}` : `提单号 ${billNo || bookingNo}`}；关联提单号=${bookingNo || '未提供'}；柜号=${text(selected.cntrNo) || expected || '未提供'}；船名=${vessel}；航次=${voyage}${dischargeTime ? '；已发现实际卸船事件' : '；未发现实际卸船事件'}${estimateNote}`,
+    arrived: Boolean(actualArrivalText || dischargeTimeText || (routeMarkedActual && routeArrivalText)),
+    discharged: Boolean(dischargeTimeText),
+    dischargeTime: null,
+    dischargeTimeText,
+    rawSummary: `森罗官方三段追踪解析成功；本次官网校验=${queryType === 'container' ? `柜号 ${expected}` : `提单号 ${billNo || bookingNo}`}；关联提单号=${bookingNo || '未提供'}；柜号=${text(selected.cntrNo) || expected || '未提供'}；船名=${vessel}；航次=${voyage}${dischargeTimeText ? '；已发现实际卸船事件' : '；未发现实际卸船事件'}；已解析 ${trackingEvents.length} 条事件和 ${routes.length} 个官方航段${routeText ? `；运行线路=${routeText}` : ''}${estimateNote}`,
     sourceUrl: SMLINE_SOURCE,
+    routeText,
+    trackingDetail: {
+      carrierCode: 'SMLINE',
+      queryType,
+      queryValue: queryType === 'container' ? expected : billNo,
+      capturedAt: new Date().toISOString(),
+      routeStops,
+      events: trackingEvents,
+      facts,
+    },
+    rawPageText: JSON.stringify({ searchPayload, routePayload, eventPayload }, null, 2),
   };
 }
 
@@ -159,17 +272,22 @@ export class SmLineTrackingProvider implements TrackingProvider {
       const searchPayload = await this.post({ f_cmd: '121', search_type: searchType, search_name: queryValue }, queryLabel, controller.signal);
       const shipments = payloadList(searchPayload, queryLabel);
       if (!shipments.length) throw trackingError('订单号验证失败', `森罗官网未找到${input.queryType === 'container' ? `柜号 ${expected}` : `提单 ${input.originalBillNo}`}`);
-      const selected = shipments.find((item) => {
+      const exactSelected = shipments.find((item) => {
         const returnedContainer = text(item.cntrNo).toUpperCase();
         const returnedBills = [text(item.blNo), text(item.bkgNo)].map((value) => value.toUpperCase());
         return input.queryType === 'container'
           ? returnedContainer === expected && returnedBills.includes(billNo)
           : returnedBills.includes(billNo) && returnedContainer === expected;
-      }) || shipments.find((item) => {
+      });
+      const referenceSelected = shipments.find((item) => {
         const returnedContainer = text(item.cntrNo).toUpperCase();
         const returnedBills = [text(item.blNo), text(item.bkgNo)].map((value) => value.toUpperCase());
         return input.queryType === 'container' ? returnedContainer === expected : returnedBills.includes(billNo);
       });
+      if (input.queryType === 'bill' && expected && !exactSelected && referenceSelected) {
+        throw trackingError('订单号验证失败', `森罗提单 ${billNo} 的结果未包含输入柜号 ${expected}，将按 OR 规则改查柜号`);
+      }
+      const selected = exactSelected || referenceSelected;
       if (!selected) {
         throw trackingError('订单号验证失败', `森罗官网${queryLabel}返回结果与查询的${input.queryType === 'container' ? `柜号 ${expected}` : `提单号 ${billNo}`}不一致`);
       }

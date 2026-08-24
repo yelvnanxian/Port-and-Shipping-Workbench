@@ -246,7 +246,11 @@ export class AuthService {
 
   requireSession = (req: Request, res: Response, next: NextFunction) => {
     const current = this.sessionFromRequest(req);
-    if (!current) { res.status(401).json({ message: '请先登录', code: 'AUTH_REQUIRED' }); return; }
+    if (!current) {
+      const hasSessionCookie = Boolean(cookieValue(req, SESSION_COOKIE));
+      res.status(401).json({ message: hasSessionCookie ? '登录状态已失效，请重新登录' : '请先登录', code: 'AUTH_REQUIRED' });
+      return;
+    }
     req.authUser = current.user;
     req.authCsrfToken = current.csrfToken;
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && this.enabled && req.get('x-csrf-token') !== current.csrfToken) {

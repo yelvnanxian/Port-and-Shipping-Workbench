@@ -13,6 +13,10 @@ function configuredOrigins() {
 
 export function corsOrigin(origin: string | undefined) {
   if (!origin) return true;
+  // The optional manual-collection extension runs in a browser-extension
+  // origin. It still needs a short-lived collection token; allowing the
+  // scheme here does not grant access to ordinary unauthenticated requests.
+  if (/^(?:chrome|moz)-extension:\/\/[a-z0-9_-]+$/i.test(origin)) return origin;
   return configuredOrigins().has(origin) ? origin : false;
 }
 

@@ -34,6 +34,11 @@ test('cors origin allows configured origins and rejects unknown origins', () => 
   }
 });
 
+test('cors 允许浏览器扩展提交短期采集令牌', () => {
+  assert.equal(corsOrigin('chrome-extension://abcdefghijklmnop'), 'chrome-extension://abcdefghijklmnop');
+  assert.equal(corsOrigin('moz-extension://port-workbench'), 'moz-extension://port-workbench');
+});
+
 test('rate limiter rejects requests over the configured window quota', async () => {
   const app = express();
   app.use(createRateLimiter({ windowMs: 60_000, max: 1, name: 'test' }));
