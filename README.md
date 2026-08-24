@@ -76,6 +76,8 @@ BROWSER_HUMAN_VERIFY=true
 BROWSER_HUMAN_VERIFY_TIMEOUT_MS=180000
 ```
 
+以星、东方海外和万海的验证会保存在本机 `data/browser-profile/` 中，不会提交到 GitHub，也不要在不同电脑之间复制。新电脑首次查询时请使用有界面浏览器完成验证，之后继续使用同一个本地 Profile。
+
 Windows 的 Chrome 路径通常为：
 
 ```dotenv

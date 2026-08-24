@@ -268,11 +268,12 @@ export class AutomationEngine {
         new WanhaiPatchrightTrackingProvider(this.store.dataDirectory, undefined, verificationCallbacks),
       )
       : new OfficialSiteProbeProvider();
+    // 以星的动态页面通常无法通过无 Cookie 的普通 HTTP 预请求得到结果。
+    // 新电脑首次运行时，这个匿名预请求反而会先触发风控，再让浏览器会话
+    // 接手。启用浏览器自动化后直接使用持久化 Patchright 会话，减少一次
+    // 无效访问，并让人工验证 Cookie 留在同一个本地 Profile 中。
     const zim = settings.browserAutomationEnabled
-      ? new FallbackTrackingProvider(
-        new OfficialSiteProbeProvider(),
-        new ZimPatchrightTrackingProvider(this.store.dataDirectory, undefined, verificationCallbacks),
-      )
+      ? new ZimPatchrightTrackingProvider(this.store.dataDirectory, undefined, verificationCallbacks)
       : new OfficialSiteProbeProvider();
     // CMA and Hapag-Lloyd trigger managed challenges as soon as an automated
     // browser profile opens. They deliberately use the ordinary-browser
