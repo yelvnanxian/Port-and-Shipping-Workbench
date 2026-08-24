@@ -25,3 +25,5 @@ outputs/**/*.png
 outputs/**/*.inspect.ndjson
 outputs/diagnostics/
 outputs/demo-cleanup-*/
+# 真实订单结果只能保留在本机，不进入代码仓库；模板文件仍可提交。
+outputs/**/*真实查询结果*.xlsx

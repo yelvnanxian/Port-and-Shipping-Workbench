@@ -104,6 +104,8 @@ DATABASE_SSL=false
 
 不配置 `DATABASE_URL` 时，项目会继续使用本地文件保存数据。
 
+真实订单 Excel、浏览器 Profile、截图证据、账号和运行记录都属于本机运行数据，不要提交到 GitHub。仓库只保留脱敏模板；首次使用请在工作台中导入自己的 `.xlsx` 文件。
+
 通过 Cloudflare Tunnel 开放访问时，服务仍应只监听本机，并信任本机反向代理传入的真实客户端地址：
 
 ```dotenv
