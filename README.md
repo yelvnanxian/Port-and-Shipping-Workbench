@@ -41,16 +41,23 @@ brew install --cask google-chrome
 ```bash
 git clone https://github.com/yelvnanxian/Port-and-Shipping-Workbench.git
 cd Port-and-Shipping-Workbench
-npm install
+npm ci
+npm run setup
 ```
 
-### 3. 创建配置文件
+`npm run setup` 只会在没有 `.env` 时创建配置文件，并自动生成一组随机管理员密码；已有 `.env` 不会被覆盖。
+
+### 3. 检查本地环境
 
 ```bash
-cp .env.example .env
+npm run preflight
 ```
 
-至少修改管理员账号和密码：
+检查失败时先按终端提示修复，不要直接启动服务。
+
+### 4. 修改配置文件
+
+至少确认管理员账号和密码：
 
 ```dotenv
 PORT=8787
@@ -109,7 +116,8 @@ APP_TRUST_PROXY=true
 生产方式启动：
 
 ```bash
-npm install
+npm ci
+npm run preflight
 npm test
 npm run build
 npm start

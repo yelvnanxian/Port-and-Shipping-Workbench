@@ -4,12 +4,14 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -n web,api -c cyan,green \"vite\" \"tsx watch server/index.ts\"",
+    "dev": "npm run preflight && concurrently -n web,api -c cyan,green \"vite\" \"tsx watch server/index.ts\"",
     "dev:web": "vite",
-    "dev:api": "tsx watch server/index.ts",
+    "dev:api": "npm run preflight && tsx watch server/index.ts",
+    "setup": "node scripts/setup.mjs",
+    "preflight": "node scripts/preflight.mjs",
     "build": "tsc -b && vite build",
     "test": "tsx --test server/**/*.test.ts",
-    "start": "tsx server/index.ts",
+    "start": "npm run preflight && tsx server/index.ts",
     "cleanup:evidence": "tsx scripts/cleanup-evidence.ts"
   },
   "dependencies": {
