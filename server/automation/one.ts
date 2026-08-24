@@ -268,7 +268,9 @@ export function parseOneTrackingResponse(
   const events = fullEvents.length ? fullEvents : Array.isArray(row.cargoEvents) ? row.cargoEvents.map(object) : [];
   const destinationEvents = events.filter((event) => isDestinationArrival(eventName(event)) && eventDate(event));
   const actualArrivalEvent = destinationEvents.filter(isActual).sort((a, b) => eventDate(b)!.getTime() - eventDate(a)!.getTime())[0];
-  const estimatedArrivalEvent = destinationEvents.sort((a, b) => eventDate(b)!.getTime() - eventDate(a)!.getTime())[0];
+  const estimatedArrivalEvent = destinationEvents
+    .filter((event) => !isActual(event))
+    .sort((a, b) => eventDate(b)!.getTime() - eventDate(a)!.getTime())[0];
   const dischargeEvent = events.filter((event) => isDischarge(eventName(event)) && isActual(event) && eventDate(event))
     .sort((a, b) => eventDate(b)!.getTime() - eventDate(a)!.getTime())[0];
   const actualArrival = actualArrivalEvent ? eventDate(actualArrivalEvent) : null;

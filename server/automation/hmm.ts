@@ -511,6 +511,7 @@ export function parseHmmTrackingHtml(html: string, expectedBillNo: string, expec
 export class HmmTrackingProvider implements TrackingProvider {
   private browser: BrowserContext | null = null;
   private context: BrowserContext | null = null;
+  private page: Page | null = null;
   private queue: Promise<void> = Promise.resolve();
 
   constructor(
@@ -581,6 +582,13 @@ export class HmmTrackingProvider implements TrackingProvider {
     }
   }
 
+  private async getPage(context: BrowserContext) {
+    if (this.page && !this.page.isClosed()) return this.page;
+    this.page = context.pages().find((candidate) => /hmm21\.com/i.test(candidate.url())) || await context.newPage();
+    this.page.setDefaultTimeout(this.timeoutMs);
+    return this.page;
+  }
+
   private async execute(input: TrackingQuery): Promise<TrackingResult> {
     if (input.rule.code !== 'HMM') throw trackingError('解析失败', `韩新海运解析器不能查询 ${input.rule.name}`);
     const billNo = input.queryBillNo.trim().toUpperCase();
@@ -590,21 +598,29 @@ export class HmmTrackingProvider implements TrackingProvider {
     if (input.queryType === 'container' && !/^[A-Z]{4}\d{7}$/.test(queryValue)) throw trackingError('订单号验证失败', `韩新海运柜号格式不正确：${queryValue || '空'}`);
 
     const context = await this.getContext();
-    const page = await context.newPage();
-    page.setDefaultTimeout(this.timeoutMs);
+    const page = await this.getPage(context);
     let sourceUrl = HMM_SOURCE;
     try {
-      await page.goto(HMM_SOURCE, { waitUntil: 'domcontentloaded', timeout: this.timeoutMs });
-      sourceUrl = page.url();
-      const initialText = await page.locator('body').innerText().catch(() => '');
+      await page.bringToFront().catch(() => undefined);
+      sourceUrl = page.url() || HMM_SOURCE;
       await waitForManualVerification(page, input, this.verificationCallbacks);
       const afterVerification = await page.locator('body').innerText().catch(() => '');
       if (/access to this site has been limited|access denied|security check/i.test(afterVerification)) {
         throw trackingError('验证码或风控', '韩新海运官网限制了当前浏览器会话；该站必须使用有界面的真实 Chrome 会话');
       }
-      await page.waitForFunction("typeof search === 'function'", undefined, { timeout: this.timeoutMs });
       const queryField = input.queryType === 'container' ? 'input[name="srchCntrNo1"]' : 'input[name="srchBlNo1"]';
-      await page.locator(queryField).fill(queryValue);
+      let field = page.locator(queryField);
+      const fieldReady = await field.isVisible().catch(() => false) && await field.isEditable().catch(() => false);
+      if (!fieldReady) {
+        // 结果页仍复用同一个 HMM 会话；只有搜索表单不存在时才回到追踪页。
+        await page.goto(HMM_SOURCE, { waitUntil: 'domcontentloaded', timeout: this.timeoutMs });
+        sourceUrl = page.url();
+        await waitForManualVerification(page, input, this.verificationCallbacks);
+        field = page.locator(queryField);
+      }
+      await page.waitForFunction("typeof search === 'function'", undefined, { timeout: this.timeoutMs });
+      await field.fill('');
+      await field.fill(queryValue);
       const responsePromise = page.waitForResponse((response) => response.url().includes('/selectTrackNTrace.do'), { timeout: this.timeoutMs });
       await page.locator('button[onclick="search()"]').click();
       const response = await responsePromise;
@@ -628,7 +644,8 @@ export class HmmTrackingProvider implements TrackingProvider {
       throw trackingError(failure.category, failure.reason, { sourceUrl: page.url() || sourceUrl, evidencePath });
     } finally {
       await this.saveState().catch(() => undefined);
-      await page.close().catch(() => undefined);
+      // 保留查询页和验证状态，下一条记录直接复用当前页面。
+      this.page = page.isClosed() ? null : page;
     }
   }
 
@@ -639,5 +656,6 @@ export class HmmTrackingProvider implements TrackingProvider {
     // 上下文和人工验证会话继续保留，下一次任务直接复用，避免 Chrome 恢复提示。
     this.context = null;
     this.browser = null;
+    this.page = null;
   }
 }

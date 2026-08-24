@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { NextFunction, Request, Response } from 'express';
 import type { AppDatabase } from './database.js';
 import { auditLog } from './audit.js';
+import { SerialExecutionCoordinator } from './automation/concurrency.js';
 
 export type UserRole = 'admin' | 'user';
 export interface AuthUser { id: string; username: string; role: UserRole }
@@ -62,6 +63,7 @@ export class AuthService {
   private readonly sessions = new Map<string, Session>();
   private readonly revokedSessions = new Map<string, RevokedSession>();
   private readonly failedLogins = new Map<string, { count: number; resetAt: number }>();
+  private readonly userMutationCoordinator = new SerialExecutionCoordinator();
   readonly enabled = authEnabled();
   readonly usersPath: string;
   private readonly database?: AppDatabase;
@@ -105,7 +107,7 @@ export class AuthService {
 
   private async saveUsers() {
     await fs.mkdir(path.dirname(this.usersPath), { recursive: true });
-    const temporaryPath = `${this.usersPath}.tmp-${process.pid}`;
+    const temporaryPath = `${this.usersPath}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
     await fs.writeFile(temporaryPath, JSON.stringify(this.users || [], null, 2), { mode: 0o600 });
     await fs.rename(temporaryPath, this.usersPath);
     if (this.database) {
@@ -201,6 +203,7 @@ export class AuthService {
   }
 
   async createUser(input: { username: string; password: string; role: UserRole }) {
+    return this.userMutationCoordinator.run(async () => {
     if (!this.enabled) throw new Error('请先在 .env 中设置 AUTH_ENABLED=true 后再管理登录账号');
     const users = await this.usersOrThrow();
     const username = cleanUsername(input.username);
@@ -213,9 +216,11 @@ export class AuthService {
     await this.saveUsers();
     await auditLog(path.dirname(this.usersPath), 'auth.user.create', { userId: user.id, username: user.username, role: user.role });
     return publicUserView(user);
+    });
   }
 
   async updateUser(id: string, patch: { role?: UserRole; enabled?: boolean }, actorId: string) {
+    return this.userMutationCoordinator.run(async () => {
     const users = await this.usersOrThrow();
     const user = users.find((item) => item.id === id);
     if (!user) throw new Error('用户不存在');
@@ -232,9 +237,11 @@ export class AuthService {
     if (!nextEnabled || roleChanged) this.revokeUserSessions(id, 'revoked');
     await auditLog(path.dirname(this.usersPath), 'auth.user.update', { actorId, userId: id, role: nextRole, enabled: nextEnabled });
     return publicUserView(user);
+    });
   }
 
   async resetPassword(id: string, password: string, actorId: string) {
+    return this.userMutationCoordinator.run(async () => {
     const users = await this.usersOrThrow();
     const user = users.find((item) => item.id === id);
     if (!user) throw new Error('用户不存在');
@@ -246,9 +253,11 @@ export class AuthService {
     if (id !== actorId) this.revokeUserSessions(id, 'revoked');
     await auditLog(path.dirname(this.usersPath), 'auth.user.password_reset', { actorId, userId: id });
     return publicUserView(user);
+    });
   }
 
   async deleteUser(id: string, actorId: string) {
+    return this.userMutationCoordinator.run(async () => {
     const users = await this.usersOrThrow();
     const index = users.findIndex((item) => item.id === id);
     if (index < 0) throw new Error('用户不存在');
@@ -260,6 +269,7 @@ export class AuthService {
     this.revokeUserSessions(id, 'revoked');
     await auditLog(path.dirname(this.usersPath), 'auth.user.delete', { actorId, userId: id, username: user.username });
     return this.listUsers();
+    });
   }
 
   private revokeUserSessions(userId: string, reason: SessionRevocationReason) {

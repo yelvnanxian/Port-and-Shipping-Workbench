@@ -38,6 +38,14 @@ function noResultText(value: string) {
   return /未找到|查无|无记录|不存在|无资料|no\s+(?:data|result|record)|not found|invalid/i.test(value);
 }
 
+function isWanhaiPage(page: Page) {
+  return /cn\.wanhai\.com\/cec\//i.test(page.url());
+}
+
+function isWanhaiTrackingPage(page: Page) {
+  return isWanhaiPage(page) && /#\/cargotracking/i.test(page.url());
+}
+
 function hasResult(text: string, input: TrackingQuery) {
   const expected = normalizedReference(input.queryType === 'container' ? input.containerNo : input.queryBillNo);
   const normalized = normalizedReference(text);
@@ -237,6 +245,7 @@ async function findExistingResult(context: BrowserContext, input: TrackingQuery)
 
 export class WanhaiPatchrightTrackingProvider implements TrackingProvider {
   private queue: Promise<void> = Promise.resolve();
+  private activePage: Page | null = null;
 
   constructor(
     private readonly dataDirectory: string,
@@ -270,6 +279,7 @@ export class WanhaiPatchrightTrackingProvider implements TrackingProvider {
     const context = await wanhaiContext(this.dataDirectory);
     const existing = await findExistingResult(context, input);
     if (existing) {
+      this.activePage = existing.page;
       const result = parseWanhaiTrackingText(existing.text, input);
       const evidencePath = await this.saveEvidence(existing.page, input, 'success');
       return { ...result, evidencePath, sourceUrl: existing.page.url(), rawPageText: existing.text };
@@ -285,17 +295,28 @@ export class WanhaiPatchrightTrackingProvider implements TrackingProvider {
       const body = await response.text().catch(() => '');
       if (body && body.length <= 2 * 1024 * 1024) apiBodies.push({ url: response.url(), body });
     };
+    const dialogListener = async (dialog: import('patchright').Dialog) => {
+      latestDialog = dialog.message();
+      await dialog.accept().catch(() => undefined);
+    };
     context.on('response', responseListener);
     try {
-      activePage = context.pages().find((page) => /cn\.wanhai\.com/i.test(page.url())) || await context.newPage();
-      activePage.on('dialog', async (dialog) => {
-        latestDialog = dialog.message();
-        await dialog.accept().catch(() => undefined);
-      });
-      if (!/cn\.wanhai\.com/i.test(activePage.url())) {
+      if (this.activePage && !this.activePage.isClosed() && isWanhaiPage(this.activePage)) {
+        activePage = this.activePage;
+      } else {
+        activePage = context.pages().find(isWanhaiTrackingPage)
+          || context.pages().find(isWanhaiPage)
+          || await context.newPage();
+        this.activePage = activePage;
+      }
+      activePage.on('dialog', dialogListener);
+      // 同一批次始终复用这一个 Cargo Tracking 标签页。若用户或官网把页面
+      // 导航到了其他万海页面，只恢复到追踪路由，不新建浏览器或 Profile。
+      if (!isWanhaiTrackingPage(activePage)) {
         await activePage.goto(WANHAI_TRACKING, { waitUntil: 'domcontentloaded', timeout: 60_000 });
       }
       await waitForReady(activePage, input, this.callbacks, this.timeoutMs);
+      await activePage.bringToFront().catch(() => undefined);
       await dismissCookies(activePage);
       const inputElement = await queryInput(activePage);
       if (!inputElement) throw trackingError('官网接口异常', '万海官网未找到可交互查询输入框');
@@ -318,11 +339,13 @@ export class WanhaiPatchrightTrackingProvider implements TrackingProvider {
       throw trackingError(failure.category, failure.reason, { evidencePath, sourceUrl: activePage?.url() || WANHAI_TRACKING });
     } finally {
       context.off('response', responseListener);
+      activePage?.off('dialog', dialogListener);
     }
   }
 
   async close() {
     await this.queue;
+    this.activePage = null;
     // 持久会话与当前结果页继续保留，后续任务复用 Cookie 和页面状态。
   }
 }

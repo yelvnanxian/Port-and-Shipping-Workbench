@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { chromium, type BrowserContext, type Page, type Response } from 'patchright';
+import { chromium, type BrowserContext, type Locator, type Page, type Response } from 'patchright';
 import { browserExecutablePath, type BrowserVerificationCallbacks } from './browser.js';
 import { classifyTrackingError, trackingError } from './errors.js';
 import { sourceEvidenceDirectory, sourceEvidenceUrl } from './source-storage.js';
@@ -89,6 +89,82 @@ async function dismissCookies(page: Page) {
     return true;
   }
   return false;
+}
+
+const ZIM_QUERY_INPUT_SELECTORS = [
+  'input[name="consnumber"]',
+  'input[id*="consnumber" i]',
+  'input[name*="tracking" i]',
+  'input[id*="tracking" i]',
+  'input[placeholder*="tracking" i]',
+  'input[placeholder*="shipment" i]',
+  'input[placeholder*="提单" i]',
+  'input[placeholder*="柜号" i]',
+];
+
+async function firstVisibleEditable(page: Page, selectors: string[]) {
+  for (const selector of selectors) {
+    const candidates = page.locator(selector);
+    for (let index = 0; index < Math.min(await candidates.count(), 10); index += 1) {
+      const candidate = candidates.nth(index);
+      if (await candidate.isVisible().catch(() => false) && await candidate.isEditable().catch(() => false)) {
+        return candidate;
+      }
+    }
+  }
+  return null;
+}
+
+async function clickSearchAgain(page: Page) {
+  const actions = page.locator('button, a, [role="button"]');
+  const pattern = /track another|new search|search again|查询其他|重新查询|继续查询/i;
+  for (let index = 0; index < Math.min(await actions.count(), 80); index += 1) {
+    const action = actions.nth(index);
+    if (!await action.isVisible().catch(() => false)) continue;
+    const text = await action.innerText().catch(() => '');
+    if (!pattern.test(text)) continue;
+    await action.click({ timeout: 10_000 }).catch(() => undefined);
+    await page.waitForTimeout(300);
+    return true;
+  }
+  return false;
+}
+
+async function submitSearch(page: Page, input: Locator) {
+  const form = input.locator('xpath=ancestor::form[1]');
+  const actions = await form.count().then((count) => count
+    ? form.locator('button, input[type="submit"], [role="button"]')
+    : page.locator('button, input[type="submit"], [role="button"]'));
+  const pattern = /track|search|查询|追踪|提交/i;
+  for (let index = 0; index < Math.min(await actions.count(), 100); index += 1) {
+    const action = actions.nth(index);
+    if (!await action.isVisible().catch(() => false)) continue;
+    const text = `${await action.innerText().catch(() => '')} ${await action.getAttribute('value').catch(() => '')}`;
+    if (!pattern.test(text)) continue;
+    await action.click({ timeout: 10_000 }).catch(() => undefined);
+    return true;
+  }
+  await input.press('Enter').catch(() => undefined);
+  return false;
+}
+
+/**
+ * 尝试在现有以星页面内重新发起查询。
+ * 页面结构变化或结果页没有“重新查询”入口时返回 false，由调用方使用
+ * 官方查询 URL 兜底；这样不会因为猜错控件而把未经核验的数据写入工作表。
+ */
+async function reuseSearchPage(page: Page, queryValue: string) {
+  let input = await firstVisibleEditable(page, ZIM_QUERY_INPUT_SELECTORS);
+  if (!input) {
+    await clickSearchAgain(page);
+    input = await firstVisibleEditable(page, ZIM_QUERY_INPUT_SELECTORS);
+  }
+  if (!input) return false;
+  await input.fill('');
+  await input.fill(queryValue);
+  await submitSearch(page, input);
+  await page.waitForTimeout(500);
+  return true;
 }
 
 function resetContext(context: BrowserContext) {
@@ -228,7 +304,12 @@ export class ZimPatchrightTrackingProvider implements TrackingProvider {
       activePage = context.pages().find((page) => /zimchina\.com/i.test(page.url())) || await context.newPage();
       const url = new URL(ZIM_TRACKING);
       url.searchParams.set('consnumber', queryValue);
-      await activePage.goto(url.toString(), { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      const reusedSearchPage = await reuseSearchPage(activePage, queryValue);
+      if (!reusedSearchPage) {
+        await activePage.goto(url.toString(), { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      } else {
+        await activePage.waitForLoadState('domcontentloaded', { timeout: 60_000 }).catch(() => undefined);
+      }
       await preventMapScroll(activePage);
       await dismissCookies(activePage);
       const text = await waitForResult(activePage, input, this.callbacks, this.timeoutMs);

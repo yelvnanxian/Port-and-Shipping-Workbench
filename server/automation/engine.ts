@@ -22,12 +22,13 @@ import { ClearanceHistoryStore, type ClearanceRetentionDays } from './clearance-
 import { OfficialSiteProbeProvider } from './official-probe.js';
 import { SmLineTrackingProvider } from './smline.js';
 import { RateLimiter } from './rate-limiter.js';
-import { CarrierRoutingTrackingProvider, trackRecord, type TrackingProvider } from './tracker.js';
+import { CachedTrackingProvider, CarrierRoutingTrackingProvider, trackRecord, type TrackingProvider } from './tracker.js';
 import type { AutomationSettings, AutomationTask, AutomationTaskScope, FailedTrackingDetail, ManualMark, QueryProgress, RunProgress, RunSummary, TrackingTime, VesselState, WorkbookRecord } from './types.js';
 import { WorkbookStore } from './workbook.js';
 import type { AppDatabase } from '../database.js';
 import { safeSourceCode, sourceEvidenceDirectory, sourceEvidenceUrl, sourceTrackingDetailKey, sourceTrackingDetailPath, sourceTrackingDetailUrl } from './source-storage.js';
 import { SerialExecutionCoordinator } from './concurrency.js';
+import { checkAndPlanCarrierBatches } from './batch-checker.js';
 
 function isQueryable(record: WorkbookRecord) {
   return record.manualMark !== '已清关'
@@ -65,14 +66,33 @@ function clearAutomaticTrackingResult(record: WorkbookRecord) {
 function manualTime(value: unknown): TrackingTime {
   if (value === null || value === undefined || value === '') return null;
   if (typeof value !== 'string') throw new Error('时间必须是文本或空值');
-  const normalized = value.trim().replace('T', ' ');
+  let normalized = value.trim().replace('T', ' ').replace(/\//g, '-');
   if (!normalized) return null;
+  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(normalized)) normalized = `${normalized} 00:00:00`;
   const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(normalized);
   const localValue = /\d{2}:\d{2}$/.test(normalized) ? `${normalized}:00` : normalized;
   const withTimezone = hasTimezone ? normalized : `${localValue}+08:00`;
   const parsed = new Date(withTimezone.replace(' ', 'T'));
   if (Number.isNaN(parsed.getTime())) throw new Error(`无法识别时间：${value}`);
   return withTimezone;
+}
+
+/**
+ * Parse a manually entered time as Beijing time when no explicit timezone is
+ * present. Excel and browser inputs can use either ISO's `T` separator or a
+ * space, and date-only values are treated as 00:00:00 in Asia/Shanghai.
+ */
+function manualTimeDate(value: TrackingTime): Date | null {
+  if (value === null || value === undefined || value === '') return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+  if (typeof value !== 'string') return null;
+  let normalized = value.trim().replace('T', ' ').replace(/\//g, '-');
+  if (!normalized) return null;
+  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(normalized)) normalized = `${normalized} 00:00:00`;
+  if (/^\d{4}-\d{1,2}-\d{1,2} \d{2}:\d{2}$/.test(normalized)) normalized = `${normalized}:00`;
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(normalized);
+  const parsed = new Date(`${normalized.replace(' ', 'T')}${hasTimezone ? '' : '+08:00'}`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 function manualState(value: unknown): VesselState {
@@ -82,13 +102,54 @@ function manualState(value: unknown): VesselState {
   return value;
 }
 
+/**
+ * Derive the effective vessel state for manual data.
+ *
+ * A manually entered future timestamp is a plan, not proof that the event has
+ * happened. The backend therefore treats future ATA/ETA and discharge times
+ * as pending, using Asia/Shanghai semantics for timezone-less values. An
+ * explicitly selected state is retained only when it does not contradict the
+ * timestamps; an actual discharge timestamp always wins because discharge
+ * implies arrival.
+ */
+export function deriveManualVesselState(
+  arrivalTime: TrackingTime,
+  dischargeTime: TrackingTime,
+  requestedState: VesselState,
+  now = new Date(),
+): VesselState {
+  const nowMs = now.getTime();
+  if (Number.isNaN(nowMs)) throw new Error('当前时间不合法');
+  const arrivalMs = manualTimeDate(arrivalTime)?.getTime() ?? null;
+  const dischargeMs = manualTimeDate(dischargeTime)?.getTime() ?? null;
+  const arrivalReached = arrivalMs !== null && arrivalMs <= nowMs;
+  const arrivalFuture = arrivalMs !== null && arrivalMs > nowMs;
+  const dischargeReached = dischargeMs !== null && dischargeMs <= nowMs;
+  const dischargeFuture = dischargeMs !== null && dischargeMs > nowMs;
+
+  // A completed discharge is definitive, even if an arrival field was entered
+  // incorrectly or left blank.
+  if (dischargeReached) return '已到港已卸船';
+  // A future arrival cannot be shown as arrived, regardless of the selected
+  // state or a future discharge estimate.
+  if (arrivalFuture) return '未到港未卸船';
+  // A future discharge is not completion. It is only "arrived" when the
+  // arrival time has already passed.
+  if (dischargeFuture) return arrivalReached ? '已到港未卸船' : '未到港未卸船';
+  // A reached arrival should be reflected immediately unless the user has
+  // explicitly recorded the stronger completed state without a precise time.
+  if (arrivalReached) return requestedState === '已到港已卸船' ? '已到港已卸船' : '已到港未卸船';
+  // With no time evidence, preserve the user's explicit state.
+  return requestedState;
+}
+
 function manualMark(value: unknown): ManualMark {
   if (value === '' || value === '已清关' || value === '查验中' || value === '其他') return value;
   throw new Error('人工标记不合法');
 }
 
 async function writeJsonAtomic(filePath: string, value: unknown) {
-  const temporaryPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  const temporaryPath = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   try {
     await fs.writeFile(temporaryPath, JSON.stringify(value, null, 2), { mode: 0o600 });
     await fs.rename(temporaryPath, filePath);
@@ -172,6 +233,10 @@ export class AutomationEngine {
 
   get queuedRuns() {
     return this.runQueue.length + (this.waitingForRunCoordinator ? 1 : 0);
+  }
+
+  withWorkspaceWrite<T>(task: () => Promise<T>) {
+    return this.store.withWriteLock(task);
   }
 
   private provider(settings: AutomationSettings): TrackingProvider {
@@ -339,6 +404,7 @@ export class AutomationEngine {
   }
 
   async deleteRuns(ids: string[]) {
+    return this.withWorkspaceWrite(async () => {
     const requested = new Set(ids.filter(Boolean));
     if (this.database && requested.size) {
       await this.database.query('DELETE FROM automation_runs WHERE id = ANY($1::text[])', [[...requested]]);
@@ -349,6 +415,7 @@ export class AutomationEngine {
     await this.store.initialize();
     await writeJsonAtomic(this.runLogPath, kept);
     return kept;
+    });
   }
 
   async listTasks(): Promise<AutomationTask[]> {
@@ -383,6 +450,7 @@ export class AutomationEngine {
   }
 
   async createTask(input: { name: string; scope: AutomationTaskScope; carrierCodes?: string[]; shipmentIds?: string[]; scheduleTime?: string | null }) {
+    return this.withWorkspaceWrite(async () => {
     const name = input.name.trim();
     if (!name) throw new Error('任务名称不能为空');
     if (name.length > 80) throw new Error('任务名称不能超过 80 个字符');
@@ -412,26 +480,32 @@ export class AutomationEngine {
     tasks.push(task);
     await this.saveTasks(tasks);
     return task;
+    });
   }
 
   async deleteTasks(ids: string[]) {
+    return this.withWorkspaceWrite(async () => {
     const requested = new Set(ids.filter(Boolean));
     const tasks = await this.listTasks();
     const kept = tasks.filter((task) => !requested.has(task.id));
     await this.saveTasks(kept);
     return kept;
+    });
   }
 
   async updateTask(id: string, patch: { enabled?: boolean }) {
+    return this.withWorkspaceWrite(async () => {
     const tasks = await this.listTasks();
     const index = tasks.findIndex((task) => task.id === id);
     if (index < 0) throw new Error('自动化任务不存在');
     tasks[index] = { ...tasks[index], enabled: patch.enabled ?? tasks[index].enabled, updatedAt: new Date().toISOString() };
     await this.saveTasks(tasks);
     return tasks[index];
+    });
   }
 
   async manualAppend(input: { billNo: string; containerNo?: string; carrierHint?: string; arrivalTime?: unknown; dischargeTime?: unknown; vesselState: unknown; note?: string }) {
+    return this.withWorkspaceWrite(async () => {
     if (this.running) throw new Error('自动更新正在执行，请稍后再进行人工补录');
     const billNo = input.billNo.trim().toUpperCase();
     if (!billNo) throw new Error('提单号不能为空');
@@ -441,7 +515,7 @@ export class AutomationEngine {
     if ((input.note || '').length > 1000) throw new Error('备注不能超过 1000 个字符');
     const arrivalTime = manualTime(input.arrivalTime);
     const dischargeTime = manualTime(input.dischargeTime);
-    const vesselState = manualState(input.vesselState);
+    const vesselState = deriveManualVesselState(arrivalTime, dischargeTime, manualState(input.vesselState));
     const note = input.note?.trim() ? `人工补录：${input.note.trim()}` : '人工补录数据';
     if (await this.store.exists()) {
       const opened = await this.store.open();
@@ -474,14 +548,16 @@ export class AutomationEngine {
     }
     await this.syncDatabaseFromWorkbook();
     return { ...result, backupPath };
+    });
   }
 
   async manualUpdate(rowNumber: number, input: { arrivalTime?: unknown; dischargeTime?: unknown; vesselState: unknown; note?: string }) {
+    return this.withWorkspaceWrite(async () => {
     if (this.running) throw new Error('自动更新正在执行，请稍后再进行人工补录');
     if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new Error('船期记录编号不合法');
     const arrivalTime = manualTime(input.arrivalTime);
     const dischargeTime = manualTime(input.dischargeTime);
-    const vesselState = manualState(input.vesselState);
+    const vesselState = deriveManualVesselState(arrivalTime, dischargeTime, manualState(input.vesselState));
     if ((input.note || '').length > 1000) throw new Error('备注不能超过 1000 个字符');
     const opened = await this.store.open();
     const records = this.store.readRecords(opened.sheet, opened.headerMap);
@@ -500,6 +576,7 @@ export class AutomationEngine {
     await this.store.save(opened.workbook);
     await this.syncDatabaseFromWorkbook();
     return { record, backupPath };
+    });
   }
 
   /**
@@ -514,6 +591,7 @@ export class AutomationEngine {
     pageText: string;
     screenshot?: Buffer;
   }) {
+    return this.withWorkspaceWrite(async () => {
     if (this.running) throw new Error('自动更新正在执行，请等待当前任务完成');
     if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new Error('船期记录编号不合法');
     if (!input.pageText.trim()) throw new Error('采集页面没有可解析的文字内容');
@@ -583,9 +661,11 @@ export class AutomationEngine {
     await this.store.save(opened.workbook);
     await this.syncDatabaseFromWorkbook();
     return { record, result, backupPath };
+    });
   }
 
   async updateManualMark(rowNumber: number, value: unknown, expected?: { billNo: string; containerNo: string }) {
+    return this.withWorkspaceWrite(async () => {
     if (this.running) throw new Error('自动更新正在执行，请稍后再修改人工标记');
     if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new Error('船期记录编号不合法');
     const opened = await this.store.open();
@@ -615,6 +695,7 @@ export class AutomationEngine {
     await this.store.save(opened.workbook);
     await this.syncDatabaseFromWorkbook();
     return { record, archived: false, backupPath };
+    });
   }
 
   async listClearanceHistory() {
@@ -622,6 +703,7 @@ export class AutomationEngine {
   }
 
   async migrateClearedRecordsToHistory() {
+    return this.withWorkspaceWrite(async () => {
     if (this.running || !(await this.store.exists())) return { migrated: 0 };
     const opened = await this.store.open();
     const cleared = this.store.readRecords(opened.sheet, opened.headerMap).filter((record) => record.manualMark === '已清关');
@@ -647,25 +729,33 @@ export class AutomationEngine {
       await fs.copyFile(backupPath, this.store.currentPath).catch(() => undefined);
       throw error;
     }
+    });
   }
 
   async setClearanceRetentionDays(retentionDays: ClearanceRetentionDays) {
+    return this.withWorkspaceWrite(async () => {
     await this.clearanceHistory.setRetentionDays(retentionDays);
     await this.clearanceHistory.cleanupExpired();
     return this.clearanceHistory.snapshot();
+    });
   }
 
   async cleanupClearanceHistory(now = new Date()) {
+    return this.withWorkspaceWrite(async () => {
     const deleted = await this.clearanceHistory.cleanupExpired(now);
     return { deleted, history: await this.clearanceHistory.snapshot() };
+    });
   }
 
   async deleteClearanceHistory(ids: string[]) {
+    return this.withWorkspaceWrite(async () => {
     const deleted = await this.clearanceHistory.remove(ids);
     return { deleted, history: await this.clearanceHistory.snapshot() };
+    });
   }
 
   async restoreClearanceHistory(id: string) {
+    return this.withWorkspaceWrite(async () => {
     if (this.running) throw new Error('自动更新正在执行，请稍后再恢复历史记录');
     const history = await this.clearanceHistory.snapshot();
     const entry = history.entries.find((item) => item.id === id);
@@ -693,9 +783,11 @@ export class AutomationEngine {
       await fs.copyFile(backupPath, this.store.currentPath).catch(() => undefined);
       throw error;
     }
+    });
   }
 
   async deleteShipments(rowNumbers: number[]) {
+    return this.withWorkspaceWrite(async () => {
     if (this.running) throw new Error('自动更新正在执行，请稍后再删除船期记录');
     const opened = await this.store.open();
     const targets = this.store.readRecords(opened.sheet, opened.headerMap).filter((record) => rowNumbers.includes(record.rowNumber));
@@ -704,6 +796,7 @@ export class AutomationEngine {
     await Promise.all(targets.map((record) => this.removeTrackingDetail(record)));
     await this.syncDatabaseFromWorkbook();
     return { ...result, backupPath };
+    });
   }
 
   async settings(): Promise<AutomationSettings> {
@@ -744,6 +837,7 @@ export class AutomationEngine {
   }
 
   async updateSettings(patch: Partial<Pick<AutomationSettings, 'enabled' | 'browserAutomationEnabled' | 'wechatWebhookUrl'>>) {
+    return this.withWorkspaceWrite(async () => {
     const current = await this.settings();
     const next = {
       ...current,
@@ -753,6 +847,7 @@ export class AutomationEngine {
     };
     await this.saveSettings(next);
     return next;
+    });
   }
 
   private async saveRun(summary: RunSummary) {
@@ -828,7 +923,7 @@ export class AutomationEngine {
       this.currentRun.skipped = allRecords.length - records.length;
       backupPath = await this.store.backup(`${reason === 'manual' ? '手动' : '定时'}更新前备份`);
       provider = this.provider(settings);
-      const activeProvider = provider;
+      const activeProvider = new CachedTrackingProvider(provider);
       const failedDetails: FailedTrackingDetail[] = [];
       let success = 0;
       let unfinished = 0;
@@ -865,6 +960,7 @@ export class AutomationEngine {
           return activeProvider.query(input);
         },
       };
+      const batchPlan = checkAndPlanCarrierBatches(records);
 
       for (const record of records) {
         record.progress = '查询中';
@@ -873,15 +969,43 @@ export class AutomationEngine {
       await this.store.save(workbook);
       await this.syncDatabaseFromWorkbook();
       this.currentRun.phase = 'querying';
+      const carrierCircuitBreakers = new Map<string, FailedTrackingDetail>();
 
-      let cursor = 0;
       const worker = async () => {
-        while (cursor < records.length) {
-          const record = records[cursor++];
+        // 按船司集中处理，保证同一 Provider 的页面、Cookie、接口会话和
+        // 后续缓存可以连续复用；每条记录仍按行号写回，不改变工作表顺序。
+        for (const batch of batchPlan.batches) {
+          for (const record of batch.records) {
           let carrier = record.carrierHint || '未知船司';
           try {
             carrier = resolveCarrierRule(record).name;
           } catch { /* 前缀错误会在查询结果中记录 */ }
+
+          const batchCarrierCode = batch.rule?.code;
+          const circuit = batchCarrierCode ? carrierCircuitBreakers.get(batchCarrierCode) : undefined;
+          if (circuit && batchCarrierCode) {
+            const detail: FailedTrackingDetail = {
+              carrier,
+              carrierCode: batchCarrierCode,
+              billNo: record.billNo,
+              containerNo: record.containerNo,
+              category: '验证码或风控',
+              reason: `同一批次的上一条${carrier}记录已触发验证或风控，剩余订单已暂停；请完成验证后重新执行该船司任务`,
+              sourceUrl: circuit.sourceUrl,
+            };
+            clearAutomaticTrackingResult(record);
+            await this.removeTrackingDetail(record, detail.carrierCode);
+            record.lastUpdated = new Date();
+            record.progress = '失败';
+            record.note = failedNote(detail);
+            failedDetails.push(detail);
+            this.store.writeRecord(sheet, headerMap, record);
+            if (this.currentRun) {
+              this.currentRun.completed += 1;
+              this.currentRun.failed = failedDetails.length;
+            }
+            continue;
+          }
           const activeBill = { billNo: record.billNo, carrier };
           this.currentRun?.currentBills.push(activeBill);
 
@@ -981,6 +1105,13 @@ export class AutomationEngine {
             record.progress = '失败';
             record.note = failedNote(detail);
             failedDetails.push(detail);
+            if (
+              carrierCode !== 'UNKNOWN'
+              && (failure.category === '验证码或风控' || failure.category === '官网拒绝访问')
+              && !carrierCircuitBreakers.has(carrierCode)
+            ) {
+              carrierCircuitBreakers.set(carrierCode, detail);
+            }
           }
           this.store.writeRecord(sheet, headerMap, record);
           if (this.currentRun) {
@@ -988,6 +1119,7 @@ export class AutomationEngine {
             this.currentRun.success = success;
             this.currentRun.failed = failedDetails.length;
             this.currentRun.currentBills = this.currentRun.currentBills.filter((item) => item !== activeBill);
+          }
           }
         }
       };
@@ -1067,7 +1199,7 @@ export class AutomationEngine {
           this.waitingForRunCoordinator = true;
           next.resolve(await this.runCoordinator.run(async () => {
             this.waitingForRunCoordinator = false;
-            return this.executeRun(next.reason, next.selection);
+            return this.withWorkspaceWrite(() => this.executeRun(next.reason, next.selection));
           }));
         } catch (error) {
           next.reject(error);
@@ -1090,12 +1222,14 @@ export class AutomationEngine {
         ? { shipmentIds: task.shipmentIds }
         : undefined;
     const run = await this.run('manual', selection);
-    const tasks = await this.listTasks();
-    const index = tasks.findIndex((item) => item.id === id);
-    if (index >= 0) {
-      tasks[index] = { ...tasks[index], lastRunAt: run.finishedAt, lastRunId: run.id, updatedAt: run.finishedAt };
-      await this.saveTasks(tasks);
-    }
+    await this.withWorkspaceWrite(async () => {
+      const tasks = await this.listTasks();
+      const index = tasks.findIndex((item) => item.id === id);
+      if (index >= 0) {
+        tasks[index] = { ...tasks[index], lastRunAt: run.finishedAt, lastRunId: run.id, updatedAt: run.finishedAt };
+        await this.saveTasks(tasks);
+      }
+    });
     return run;
   }
 
@@ -1116,7 +1250,7 @@ export class AutomationEngine {
     const settings = await this.settings();
     return {
       running: this.running,
-      queuedRuns: this.runQueue.length,
+      queuedRuns: this.queuedRuns,
       currentRun: this.currentRun ? { ...this.currentRun, currentBills: [...this.currentRun.currentBills] } : null,
       mode: 'live' as const,
       enabled: settings.enabled,

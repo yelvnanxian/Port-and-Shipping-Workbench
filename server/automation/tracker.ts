@@ -7,6 +7,75 @@ export interface TrackingProvider {
   close?(): Promise<void>;
 }
 
+function queryCacheKey(input: TrackingQuery) {
+  const normalize = (value: string) => value.trim().toUpperCase();
+  return [
+    input.rule.code,
+    input.queryType,
+    normalize(input.queryType === 'container' ? input.containerNo : input.queryBillNo),
+    normalize(input.originalBillNo),
+    normalize(input.containerNo),
+  ].join('|');
+}
+
+/**
+ * 单次批量任务内的查询缓存。
+ * 成功结果可以安全复用；失败不缓存，避免临时网络问题阻塞后续重试。
+ * 同一查询同时进入时复用 in-flight Promise，避免重复打到官网。
+ */
+export class CachedTrackingProvider implements TrackingProvider {
+  private readonly results = new Map<string, TrackingResult>();
+  private readonly referenceMisses = new Map<string, { error: unknown; expiresAt: number }>();
+  private readonly pending = new Map<string, Promise<TrackingResult>>();
+
+  constructor(
+    private readonly inner: TrackingProvider,
+    private readonly referenceMissTtlMs = 5 * 60 * 1000,
+  ) {}
+
+  query(input: TrackingQuery): Promise<TrackingResult> {
+    const key = queryCacheKey(input);
+    const cached = this.results.get(key);
+    if (cached) return Promise.resolve(cached);
+    const referenceMiss = this.referenceMisses.get(key);
+    if (referenceMiss) {
+      if (referenceMiss.expiresAt > Date.now()) return Promise.reject(referenceMiss.error);
+      this.referenceMisses.delete(key);
+    }
+    const active = this.pending.get(key);
+    if (active) return active;
+    const request = this.inner.query(input)
+      .then((result) => {
+        this.results.set(key, result);
+        return result;
+      })
+      .catch((error) => {
+        const failure = classifyTrackingError(error);
+        // 只有官网明确表示号码不存在时才缓存；验证码、限流、超时和
+        // 解析异常必须允许后续记录重新尝试。
+        if (failure.category === '订单号验证失败') {
+          this.referenceMisses.set(key, { error, expiresAt: Date.now() + this.referenceMissTtlMs });
+        }
+        throw error;
+      })
+      .finally(() => {
+        this.pending.delete(key);
+      });
+    this.pending.set(key, request);
+    return request;
+  }
+
+  clear() {
+    this.results.clear();
+    this.referenceMisses.clear();
+    this.pending.clear();
+  }
+
+  async close() {
+    await this.inner.close?.();
+  }
+}
+
 export class CarrierRoutingTrackingProvider implements TrackingProvider {
   constructor(
     private readonly providers: Map<string, TrackingProvider>,

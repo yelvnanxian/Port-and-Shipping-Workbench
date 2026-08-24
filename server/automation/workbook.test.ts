@@ -65,6 +65,22 @@ test('workbook store supports isolated per-user data directories', async () => {
   }
 });
 
+test('同一工作区的并发新增会串行写入且不会互相覆盖', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-concurrent-write-'));
+  try {
+    const store = new WorkbookStore(root);
+    await Promise.all([
+      store.appendRecords([{ billNo: 'TESTBILL000001', containerNo: 'TSTU0000017' }]),
+      store.appendRecords([{ billNo: 'TESTBILL000002', containerNo: 'TSTU0000022' }]),
+    ]);
+    const opened = await store.open();
+    const records = store.readRecords(opened.sheet, opened.headerMap);
+    assert.deepEqual(records.map((record) => record.billNo).sort(), ['TESTBILL000001', 'TESTBILL000002']);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('restoring a backup replaces the workbook and creates a safety backup', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-restore-'));
   try {

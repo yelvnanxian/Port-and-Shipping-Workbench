@@ -152,8 +152,17 @@ async function findExistingResult(context: BrowserContext, input: TrackingQuery)
   return null;
 }
 
+function isOoclHome(page: Page) {
+  return /^https:\/\/www\.oocl\.com\/schi\/Pages\/default\.aspx/i.test(page.url());
+}
+
+function isOoclResult(page: Page) {
+  return /pbcontroltower\.digital\.oocl\.com/i.test(page.url());
+}
+
 export class OoclPatchrightTrackingProvider implements TrackingProvider {
   private queue: Promise<void> = Promise.resolve();
+  private lastResultPage: Page | null = null;
 
   constructor(
     private readonly dataDirectory: string,
@@ -187,6 +196,7 @@ export class OoclPatchrightTrackingProvider implements TrackingProvider {
     const context = await ooclContext(this.dataDirectory);
     const existing = await findExistingResult(context, input);
     if (existing) {
+      this.lastResultPage = existing.page;
       const result = parseOoclControlTowerText(existing.text, input);
       const evidencePath = await this.saveEvidence(existing.page, input, 'success');
       return { ...result, evidencePath, rawPageText: existing.text };
@@ -204,19 +214,23 @@ export class OoclPatchrightTrackingProvider implements TrackingProvider {
     };
     context.on('response', responseListener);
     try {
-      let home = context.pages().find((page) => /^https:\/\/www\.oocl\.com\/schi\/Pages\/default\.aspx/i.test(page.url()));
+      // 首页是整个批次的固定查询入口。结果页只负责展示和采集，
+      // 下一条记录仍回到同一个首页输入框，避免重新打开官网或重建会话。
+      let home = context.pages().find(isOoclHome);
       if (!home) home = await context.newPage();
       activePage = home;
-      if (!/^https:\/\/www\.oocl\.com\/schi\/Pages\/default\.aspx/i.test(home.url())) {
+      if (!isOoclHome(home)) {
         await home.goto(OOCL_HOME, { waitUntil: 'domcontentloaded', timeout: 60_000 });
       }
       await home.locator('#SEARCH_NUMBER').waitFor({ state: 'visible', timeout: 60_000 });
+      await home.bringToFront().catch(() => undefined);
       await home.selectOption('#ooclCargoSelector', input.queryType === 'container' ? 'cont' : 'bl');
+      await home.locator('#SEARCH_NUMBER').fill('');
       await home.locator('#SEARCH_NUMBER').fill(queryValue);
       const popupPromise = context.waitForEvent('page', { timeout: 20_000 }).catch(() => null);
       await home.locator('#container_btn').click({ timeout: 10_000 });
       const popup = await popupPromise;
-      activePage = popup || context.pages().find((page) => /pbcontroltower\.digital\.oocl\.com/i.test(page.url())) || home;
+      activePage = popup || context.pages().find(isOoclResult) || home;
       await activePage.waitForLoadState('domcontentloaded', { timeout: 60_000 }).catch(() => undefined);
       const text = await waitForResult(activePage, input, this.callbacks, () => captchaRequested, this.timeoutMs);
       const result = parseOoclControlTowerText(text, input);
@@ -224,6 +238,12 @@ export class OoclPatchrightTrackingProvider implements TrackingProvider {
       const rawPageText = apiBodies.length
         ? `${text}\n\n${apiBodies.map((item) => `[OOCL API ${item.url}]\n${item.body}`).join('\n\n')}`
         : text;
+      // 成功后只保留一个结果页，避免批量查询不断累积 Chrome 标签；
+      // 浏览器、首页和持久 Profile 均继续保留。
+      if (this.lastResultPage && this.lastResultPage !== activePage && !this.lastResultPage.isClosed()) {
+        await this.lastResultPage.close().catch(() => undefined);
+      }
+      if (isOoclResult(activePage)) this.lastResultPage = activePage;
       return { ...result, evidencePath, sourceUrl: activePage.url(), rawPageText };
     } catch (error) {
       const failure = classifyTrackingError(error);
@@ -236,6 +256,7 @@ export class OoclPatchrightTrackingProvider implements TrackingProvider {
 
   async close() {
     await this.queue;
+    this.lastResultPage = null;
     // 保留 OOCL Patchright Profile 和已通过人工验证的页面；任务结束不关闭 Chrome。
   }
 }

@@ -95,6 +95,15 @@ DATABASE_SSL=false
 
 不配置 `DATABASE_URL` 时，项目会继续使用本地文件保存数据。
 
+通过 Cloudflare Tunnel 开放访问时，服务仍应只监听本机，并信任本机反向代理传入的真实客户端地址：
+
+```dotenv
+APP_HOST=127.0.0.1
+APP_TRUST_PROXY=true
+```
+
+不要在直接暴露端口到公网时开启 `APP_TRUST_PROXY`，否则攻击者可能伪造来源地址绕过按 IP 的登录限流。
+
 ## 启动项目
 
 生产方式启动：

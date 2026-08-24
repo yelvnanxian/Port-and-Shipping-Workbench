@@ -128,6 +128,32 @@ function manualInputTime(value: string | null) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+function manualFormTimeMs(value: string) {
+  if (!value.trim()) return null;
+  const normalized = value.trim().replace('T', ' ');
+  const parsed = new Date(`${normalized.length === 16 ? `${normalized}:00` : normalized}+08:00`.replace(' ', 'T'));
+  return Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
+}
+
+function deriveManualFormState(
+  arrivalTime: string,
+  dischargeTime: string,
+  requestedState: ManualForm['vesselState'],
+  now = Date.now(),
+): ManualForm['vesselState'] {
+  const arrivalMs = manualFormTimeMs(arrivalTime);
+  const dischargeMs = manualFormTimeMs(dischargeTime);
+  const arrivalReached = arrivalMs !== null && arrivalMs <= now;
+  const arrivalFuture = arrivalMs !== null && arrivalMs > now;
+  const dischargeReached = dischargeMs !== null && dischargeMs <= now;
+  const dischargeFuture = dischargeMs !== null && dischargeMs > now;
+  if (dischargeReached) return '已到港已卸船';
+  if (arrivalFuture) return '未到港未卸船';
+  if (dischargeFuture) return arrivalReached ? '已到港未卸船' : '未到港未卸船';
+  if (arrivalReached) return requestedState === '已到港已卸船' ? '已到港已卸船' : '已到港未卸船';
+  return requestedState;
+}
+
 const navItems: Array<{ id: PageId; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'overview', label: '运营总览', icon: LayoutDashboard },
   { id: 'tracking', label: '船期追踪', icon: Ship },
@@ -1943,28 +1969,26 @@ function ManualFormModal({ form, saving, onChange, onClose, onSave }: { form: Ma
   }
 
   function updateState(vesselState: ManualForm['vesselState']) {
+    const arrivalTime = vesselState === '未到港未卸船' ? '' : form.arrivalTime;
+    const dischargeTime = vesselState === '已到港已卸船' ? form.dischargeTime : '';
     update({
-      vesselState,
-      arrivalTime: vesselState === '未到港未卸船' ? '' : form.arrivalTime,
-      dischargeTime: vesselState === '已到港已卸船' ? form.dischargeTime : '',
+      arrivalTime,
+      dischargeTime,
+      vesselState: deriveManualFormState(arrivalTime, dischargeTime, vesselState),
     });
   }
 
   function updateArrivalTime(arrivalTime: string) {
     update({
       arrivalTime,
-      vesselState: arrivalTime && form.vesselState === '未到港未卸船' ? '已到港未卸船' : form.vesselState,
+      vesselState: deriveManualFormState(arrivalTime, form.dischargeTime, form.vesselState),
     });
   }
 
   function updateDischargeTime(dischargeTime: string) {
     update({
       dischargeTime,
-      vesselState: dischargeTime
-        ? '已到港已卸船'
-        : form.vesselState === '已到港已卸船'
-          ? form.arrivalTime ? '已到港未卸船' : '未到港未卸船'
-          : form.vesselState,
+      vesselState: deriveManualFormState(form.arrivalTime, dischargeTime, form.vesselState),
     });
   }
 
@@ -1980,7 +2004,7 @@ function ManualFormModal({ form, saving, onChange, onClose, onSave }: { form: Ma
         <label className="setting-field manual-full"><span>船只状态</span><select value={form.vesselState} onChange={(event) => updateState(event.target.value as ManualForm['vesselState'])}><option value="未到港未卸船">未到港未卸船</option><option value="已到港未卸船">已到港未卸船</option><option value="已到港已卸船">已到港已卸船</option></select></label>
         <label className="setting-field manual-full"><span>人工备注</span><textarea value={form.note} onChange={(event) => update({ note: event.target.value })} placeholder="例如：人工从码头回执核实，或官网人工查询结果" /></label>
       </div>
-      <div className="manual-hint"><CircleAlert size={15} /><span>到港时间和卸船时间可直接覆盖解析结果；填写到港时间会自动切换为“已到港未卸船”，填写卸船时间会自动切换为“已到港已卸船”。选择船只状态仍可主动清空不适用的时间。</span></div>
+      <div className="manual-hint"><CircleAlert size={15} /><span>时间按北京时间判断：未来到港时间不会提前标记为已到港，未来卸船时间不会提前标记为已卸船；实际状态以保存时后端校验结果为准。选择船只状态仍可主动清空不适用的时间。</span></div>
       <div className="modal-actions"><button className="secondary-button" onClick={onClose} disabled={saving}>取消</button><button className="primary-button" onClick={onSave} disabled={saving || !form.billNo.trim()}>{saving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}{saving ? '保存中…' : '保存人工数据'}</button></div>
     </section>
   </div>;

@@ -286,7 +286,8 @@ export function parseYangmingTrackingResponses(
   const estimatedArrival = !summaryActualArrival && !actualArrivalEvent && summaryArrivalDate ? summaryArrivalDate : null;
   const dischargeEvent = events.find((event) => event.eventType === 'discharge' && event.actual);
   const postDischarge = events.some((event) => ['pickup', 'delivery', 'empty-return'].includes(event.eventType));
-  const arrival = summaryActualArrival || (actualArrivalEvent?.time ? new Date(actualArrivalEvent.time) : null) || estimatedArrival;
+  const actualArrival = summaryActualArrival || (actualArrivalEvent?.time ? new Date(actualArrivalEvent.time) : null);
+  const arrival = actualArrival || estimatedArrival;
   const discharge = dischargeEvent?.time ? new Date(dischargeEvent.time) : null;
   const trackingDetail: TrackingDetail = {
     carrierCode: 'YANGMING',
@@ -304,7 +305,8 @@ export function parseYangmingTrackingResponses(
       ? summaryDestination.dateTime
       : actualArrivalEvent?.timeText?.replace('（官网当地时间）', '')),
     arrivalKind: summaryActualArrival || actualArrivalEvent ? 'ATA' : estimatedArrival ? 'ETA' : null,
-    arrived: Boolean(arrival || discharge || postDischarge),
+    // ETA 只用于显示预计到港时间，不能把船只状态提前标成已到港。
+    arrived: Boolean(actualArrival || discharge || postDischarge),
     discharged: Boolean(dischargeEvent || postDischarge),
     dischargeTime: discharge,
     dischargeTimeText: dischargeEvent?.timeText || null,

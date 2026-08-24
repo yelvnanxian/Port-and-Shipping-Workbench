@@ -72,7 +72,7 @@ function normalizeEntry(value: unknown): ClearanceHistoryEntry | null {
 }
 
 async function writeJsonAtomic(filePath: string, value: unknown) {
-  const temporaryPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  const temporaryPath = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   try {
     await fs.writeFile(temporaryPath, JSON.stringify(value, null, 2), { mode: 0o600 });
     await fs.rename(temporaryPath, filePath);

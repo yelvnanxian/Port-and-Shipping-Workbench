@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import express from 'express';
-import { corsOrigin, createRateLimiter, securityHeaders } from '../security.js';
+import { corsOrigin, createRateLimiter, requestClientAddress, securityHeaders } from '../security.js';
 
 test('security headers include baseline browser protections', async () => {
   const app = express();
@@ -39,6 +39,24 @@ test('cors 允许浏览器扩展提交短期采集令牌', () => {
   assert.equal(corsOrigin('moz-extension://port-workbench'), 'moz-extension://port-workbench');
 });
 
+test('仅在信任反向代理时使用 Cloudflare 真实客户端地址', () => {
+  const previous = process.env.APP_TRUST_PROXY;
+  const request = {
+    get: (name: string) => name.toLowerCase() === 'cf-connecting-ip' ? '203.0.113.18' : undefined,
+    ip: '203.0.113.18',
+    socket: { remoteAddress: '127.0.0.1' },
+  } as never;
+  try {
+    process.env.APP_TRUST_PROXY = 'false';
+    assert.equal(requestClientAddress(request), '127.0.0.1');
+    process.env.APP_TRUST_PROXY = 'true';
+    assert.equal(requestClientAddress(request), '203.0.113.18');
+  } finally {
+    if (previous === undefined) delete process.env.APP_TRUST_PROXY;
+    else process.env.APP_TRUST_PROXY = previous;
+  }
+});
+
 test('rate limiter rejects requests over the configured window quota', async () => {
   const app = express();
   app.use(createRateLimiter({ windowMs: 60_000, max: 1, name: 'test' }));
@@ -52,6 +70,23 @@ test('rate limiter rejects requests over the configured window quota', async () 
     const blocked = await fetch(url);
     assert.equal(blocked.status, 429);
     assert.equal((await blocked.json()).message, '请求过于频繁，请稍后再试');
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('认证后限流可以按账号隔离同一来源地址的用户', async () => {
+  const app = express();
+  app.use(createRateLimiter({ windowMs: 60_000, max: 1, name: 'account-test', key: (req) => req.get('x-test-user') || 'anonymous' }));
+  app.get('/limited', (_req, res) => res.json({ ok: true }));
+  const server = app.listen(0);
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const url = `http://127.0.0.1:${address.port}/limited`;
+    assert.equal((await fetch(url, { headers: { 'x-test-user': 'user-a' } })).status, 200);
+    assert.equal((await fetch(url, { headers: { 'x-test-user': 'user-a' } })).status, 429);
+    assert.equal((await fetch(url, { headers: { 'x-test-user': 'user-b' } })).status, 200);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }

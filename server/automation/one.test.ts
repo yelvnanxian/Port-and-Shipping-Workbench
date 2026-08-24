@@ -39,6 +39,31 @@ test('ONE 解析官方到港事件并忽略预计卸船', () => {
   assert.equal(result.arrived, true);
 });
 
+test('ONE 只有预计到港时显示 ETA 但不标记已到港', () => {
+  const etaPayload = {
+    ...payload,
+    data: [{
+      ...payload.data[0],
+      cargoEvents: [{
+        matrixId: 'E087',
+        eventName: 'Vessel Arrival at Port of Discharge',
+        eventDate: '2026-08-27T09:00:00.000Z',
+        eventLocalPortDate: '2026-08-27T02:00:00.000Z',
+        triggerType: 'ESTIMATED',
+        copSequence: 4052,
+        location: { locationName: 'LOS ANGELES, CA' },
+      }],
+    }],
+  };
+
+  const result = parseOneTrackingResponse(etaPayload, 'SZPGD2137604', 'ONEU1925399');
+  assert.equal(result.arrivalKind, 'ETA');
+  assert.equal(result.arrivalTime?.toISOString(), '2026-08-27T09:00:00.000Z');
+  assert.equal(result.arrivalTimeText, '2026-08-27 02:00:00（官网当地时间）');
+  assert.equal(result.arrived, false);
+  assert.equal(result.discharged, false);
+});
+
 test('ONE 通过官网完整事件接口识别卸船并生成多式联运线路', () => {
   const result = parseOneTrackingResponse(payload, 'SZPGD2137604', 'ONEU1925399', eventPayload);
   assert.equal(result.arrivalKind, 'ATA');

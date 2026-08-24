@@ -3,9 +3,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { AutomationEngine, evidencePathFromNote, failureEvidencePathFromNote } from './engine.js';
+import { AutomationEngine, deriveManualVesselState, evidencePathFromNote, failureEvidencePathFromNote } from './engine.js';
 import type { TrackingProvider } from './tracker.js';
+import { trackingError } from './errors.js';
 import { WorkbookStore } from './workbook.js';
+import { SerialExecutionCoordinator } from './concurrency.js';
 
 async function waitFor(predicate: () => Promise<boolean>) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -14,6 +16,29 @@ async function waitFor(predicate: () => Promise<boolean>) {
   }
   throw new Error('等待运行进度更新超时');
 }
+
+test('等待其他账号任务时状态会显示排队数量', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-global-queue-'));
+  const coordinator = new SerialExecutionCoordinator();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const blocker = coordinator.run(() => gate);
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    const engine = new AutomationEngine(new WorkbookStore(root), undefined, { runCoordinator: coordinator });
+    const run = engine.run('manual').catch(() => undefined);
+    await waitFor(async () => (await engine.status()).queuedRuns === 1);
+    const status = await engine.status();
+    assert.equal(status.running, false);
+    assert.equal(status.queuedRuns, 1);
+    release();
+    await Promise.all([blocker, run]);
+  } finally {
+    release();
+    await blocker.catch(() => undefined);
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
 
 test('从成功备注中解析浏览器采集证据', () => {
   const evidencePath = '/api/browser-evidence/2026-08-19_MSC_MEDUPN815212_success.png';
@@ -297,6 +322,45 @@ test('查询失败时清理上一次自动结果，避免失败进度与旧状�
   }
 });
 
+test('同一船司触发风控后暂停剩余订单，但其他船司继续查询', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-carrier-circuit-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([
+      { billNo: 'OOLU0000000001', containerNo: 'OOCU0000001', carrierHint: '东方海外' },
+      { billNo: 'OOLU0000000002', containerNo: 'OOCU0000002', carrierHint: '东方海外' },
+      { billNo: 'HDUJGLA26BZ04040', containerNo: 'SEKU6633329', carrierHint: '合德' },
+    ]);
+    const engine = new AutomationEngine(store);
+    const calls: string[] = [];
+    Object.defineProperty(engine, 'provider', { value: () => ({
+      async query(input: { originalBillNo: string; rule: { code: string; url: string } }) {
+        calls.push(input.originalBillNo);
+        if (input.rule.code === 'OOCL') throw trackingError('验证码或风控', '模拟东方海外图形验证');
+        return {
+          arrivalTime: new Date('2026-08-20T00:00:00.000Z'),
+          arrivalKind: 'ATA' as const,
+          arrived: true,
+          dischargeTime: null,
+          rawSummary: '合德测试结果',
+          sourceUrl: input.rule.url,
+        };
+      },
+    }) });
+    const summary = await engine.run('manual');
+    assert.equal(summary.success, 1);
+    assert.equal(summary.failed, 2);
+    assert.deepEqual(calls, ['OOLU0000000001', 'HDUJGLA26BZ04040']);
+    const opened = await store.open();
+    const rows = store.readRecords(opened.sheet, opened.headerMap);
+    assert.match(rows[0].note, /模拟东方海外图形验证/);
+    assert.match(rows[1].note, /上一条东方海外记录已触发验证或风控/);
+    assert.equal(rows[2].progress, '已完成');
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('关闭跳过已完成选项时会重新查询已完成卸船记录', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-refresh-completed-'));
   try {
@@ -401,6 +465,58 @@ test('人工补录和人工修改会写回状态、时间并创建备份', async
     assert.equal(updated.record.dischargeTime, null);
     assert.match(updated.record.note, /人工修改/);
     assert.ok((await engine.store.listBackups()).length >= 1);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('人工时间状态按北京时间判断未来事件，不会提前标记已到港或已卸船', () => {
+  const now = new Date('2026-08-24T00:00:00.000Z'); // 北京时间 2026-08-24 08:00
+  assert.equal(
+    deriveManualVesselState('2026-08-29T10:00', null, '已到港未卸船', now),
+    '未到港未卸船',
+  );
+  assert.equal(
+    deriveManualVesselState('2026-08-23T10:00', null, '未到港未卸船', now),
+    '已到港未卸船',
+  );
+  assert.equal(
+    deriveManualVesselState('2026-08-23T10:00', '2026-08-29T10:00', '已到港已卸船', now),
+    '已到港未卸船',
+  );
+  assert.equal(
+    deriveManualVesselState(null, '2026-08-23T10:00', '未到港未卸船', now),
+    '已到港已卸船',
+  );
+  assert.equal(
+    deriveManualVesselState('2026-08-29T10:00', '2026-08-30T10:00', '已到港已卸船', now),
+    '未到港未卸船',
+  );
+  assert.equal(
+    deriveManualVesselState(null, null, '已到港已卸船', now),
+    '已到港已卸船',
+  );
+});
+
+test('人工补录保存时会重新校验未来时间对应的船只状态', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-manual-future-'));
+  try {
+    const engine = new AutomationEngine(new WorkbookStore(root));
+    await engine.manualAppend({
+      billNo: 'HDUJGLA26BZ04041',
+      arrivalTime: '2099-08-29T10:00',
+      dischargeTime: '2099-08-30T10:00',
+      vesselState: '已到港已卸船',
+    });
+    const opened = await engine.store.open();
+    assert.equal(opened.sheet.getCell(2, opened.headerMap.get('船只状态')!).text, '未到港未卸船');
+    await engine.manualUpdate(2, {
+      arrivalTime: '2099-09-01T10:00',
+      dischargeTime: '2099-09-02T10:00',
+      vesselState: '已到港已卸船',
+    });
+    const updated = await engine.store.open();
+    assert.equal(updated.sheet.getCell(2, updated.headerMap.get('船只状态')!).text, '未到港未卸船');
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

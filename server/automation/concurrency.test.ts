@@ -25,3 +25,16 @@ test('共享执行协调器会按进入顺序串行处理不同账号任务', as
   await Promise.all([first, second]);
   assert.deepEqual(events, ['admin:start', 'admin:end', 'user:start', 'user:end']);
 });
+
+test('同一调用链中的嵌套写操作复用锁且不会死锁', async () => {
+  const coordinator = new SerialExecutionCoordinator();
+  const events: string[] = [];
+  await coordinator.run(async () => {
+    events.push('outer:start');
+    await coordinator.run(async () => { events.push('inner'); });
+    events.push('outer:end');
+  });
+  assert.deepEqual(events, ['outer:start', 'inner', 'outer:end']);
+  assert.equal(coordinator.active, 0);
+  assert.equal(coordinator.waiting, 0);
+});

@@ -60,3 +60,15 @@ test('管理员可以创建、停用、重置和删除普通账号', async () =>
   assert.equal((await auth.deleteUser(created.id, 'user-admin')).length, 1);
   await fs.rm(dataDirectory, { recursive: true, force: true });
 });
+
+test('并发创建不同账号时不会覆盖账号列表', async () => {
+  const dataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'port-ops-auth-'));
+  const auth = new AuthService(dataDirectory);
+  await Promise.all([
+    auth.createUser({ username: 'operator-a', password: 'operator-password-a', role: 'user' }),
+    auth.createUser({ username: 'operator-b', password: 'operator-password-b', role: 'user' }),
+  ]);
+  const usernames = (await auth.listUsers()).map((user) => user.username).sort();
+  assert.deepEqual(usernames, ['admin-test', 'operator-a', 'operator-b']);
+  await fs.rm(dataDirectory, { recursive: true, force: true });
+});

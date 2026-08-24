@@ -115,6 +115,25 @@ test('阳明完整详情区分空重箱、复原线路并提取事实', () => {
   assert.match(result.rawPageText || '', /dcsaStatusInfo/);
 });
 
+test('阳明完整详情只有预计到港时不应标记为已到港', () => {
+  const estimatedSummary = structuredClone(summaryPayload);
+  estimatedSummary.blList[0].routingInfo.routingSchedule[0].dateQlfr = 'Estimated';
+  const loadedOnlyDetail = structuredClone(detailPayload);
+  loadedOnlyDetail.containerList[0].dcsaStatusInfo = [
+    detailPayload.containerList[0].dcsaStatusInfo.find((event) => /Load of Laden Equipment onto Vessel/i.test(event.eventDesc))!,
+  ];
+
+  const result = parseYangmingTrackingResponses(estimatedSummary, loadedOnlyDetail, 'YMJAW239076615', 'YMLU3562849', {
+    queryType: 'bill',
+    queryValue: 'YMJAW239076615',
+  });
+
+  assert.equal(result.arrivalKind, 'ETA');
+  assert.equal(result.arrivalTimeText, '2026/07/20 01:47（官网当地时间）');
+  assert.equal(result.arrived, false);
+  assert.equal(result.discharged, false);
+});
+
 test('阳明 Provider 用内部参考号二次调用公开柜号详情接口', async () => {
   const calls: string[] = [];
   const provider = new YangmingTrackingProvider(async (input) => {

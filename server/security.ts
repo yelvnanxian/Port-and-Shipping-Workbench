@@ -1,6 +1,24 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
+import { isIP } from 'node:net';
 
 type Bucket = { startedAt: number; count: number };
+
+function validAddress(value: string | undefined) {
+  const normalized = value?.split(',')[0]?.trim().replace(/^::ffff:/, '');
+  return normalized && isIP(normalized) ? normalized : '';
+}
+
+export function requestClientAddress(req: Request) {
+  // 只有显式信任本机反向代理时才读取 Cloudflare 提供的客户端地址，避免直接
+  // 暴露端口时攻击者伪造请求头绕过登录限流。
+  if (process.env.APP_TRUST_PROXY === 'true') {
+    const cloudflareAddress = validAddress(req.get('cf-connecting-ip'));
+    if (cloudflareAddress) return cloudflareAddress;
+    const forwardedAddress = validAddress(req.ip);
+    if (forwardedAddress) return forwardedAddress;
+  }
+  return validAddress(req.socket.remoteAddress) || 'unknown';
+}
 
 function configuredOrigins() {
   return new Set(
@@ -32,7 +50,7 @@ export function securityHeaders(_req: Request, res: Response, next: NextFunction
   next();
 }
 
-export function createRateLimiter(options: { windowMs: number; max: number; name: string }): RequestHandler {
+export function createRateLimiter(options: { windowMs: number; max: number; name: string; key?: (req: Request) => string }): RequestHandler {
   const buckets = new Map<string, Bucket>();
   let lastCleanup = Date.now();
 
@@ -46,7 +64,7 @@ export function createRateLimiter(options: { windowMs: number; max: number; name
       lastCleanup = now;
     }
 
-    const key = `${req.ip || req.socket.remoteAddress || 'unknown'}:${options.name}`;
+    const key = `${options.key?.(req) || requestClientAddress(req)}:${options.name}`;
     const current = buckets.get(key);
     const bucket = !current || now - current.startedAt >= options.windowMs
       ? { startedAt: now, count: 0 }

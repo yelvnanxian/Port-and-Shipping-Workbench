@@ -9,7 +9,7 @@ import { ALL_CARRIER_RULES, buildQueryBillNo, resolveCarrierRule } from './autom
 import { AutomationEngine } from './automation/engine.js';
 import { notifyWeComTest } from './automation/notifier.js';
 import { startScheduler } from './automation/scheduler.js';
-import { corsOrigin, createRateLimiter, securityHeaders } from './security.js';
+import { corsOrigin, createRateLimiter, requestClientAddress, securityHeaders } from './security.js';
 import { auditLog, auditMiddleware } from './audit.js';
 import { assertBodyObject, backupNamePattern, clearanceHistoryIdPattern, optionalString, optionalStringArray, recordIds, requiredString, runIdPattern, shipmentIdPattern, taskIdPattern, userIdPattern, RequestValidationError } from './validation.js';
 import { legacyEvidenceDirectory, safeSourceCode, sourceEvidenceDirectory } from './automation/source-storage.js';
@@ -106,8 +106,9 @@ app.use('/api', (req, res, next) => {
   next();
 });
 // 留出前端每秒轮询自动化进度的空间；登录和危险操作的更严格限流会在认证阶段单独增加。
-app.use(createRateLimiter({ windowMs: 5 * 60 * 1000, max: 1000, name: 'all' }));
-app.use('/api', createRateLimiter({ windowMs: 5 * 60 * 1000, max: 600, name: 'api' }));
+app.use(createRateLimiter({ windowMs: 5 * 60 * 1000, max: 3000, name: 'all' }));
+app.use('/api', createRateLimiter({ windowMs: 5 * 60 * 1000, max: 2000, name: 'api-client' }));
+app.use('/api/auth/login', createRateLimiter({ windowMs: 15 * 60 * 1000, max: 30, name: 'login' }));
 // 放在认证之前，连未授权和 CSRF 失败请求也能留下审计痕迹；响应结束时会读取已注入的 authUser。
 app.use('/api', auditMiddleware(engine.store.dataDirectory));
 
@@ -133,7 +134,7 @@ app.post('/api/auth/login', async (req, res, next) => {
     const username = typeof body.username === 'string' ? body.username.trim() : '';
     const password = typeof body.password === 'string' ? body.password : '';
     if (!username || !password) throw new Error('请输入用户名和密码');
-    const session = await auth.login(username, password, req.ip || 'unknown');
+    const session = await auth.login(username, password, requestClientAddress(req));
     auth.setSessionCookie(res, session.token);
     res.json({ enabled: true, authenticated: true, user: session.user, csrfToken: session.csrfToken });
   } catch (error) { next(error); }
@@ -300,6 +301,14 @@ app.post('/api/manual-collection/submit', manualCollectionUpload.single('screens
 
 // 除健康检查和登录接口外，所有业务 API 都要求有效 Session；写请求还要求 CSRF Token。
 app.use('/api', auth.requireSession);
+// 认证后按账号分别限流；即使多人位于同一公司网络或同一个 Cloudflare 出口，
+// 普通轮询和业务操作也不会互相消耗额度。
+app.use('/api', createRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  max: 900,
+  name: 'api-account',
+  key: (req) => req.authUser?.id || requestClientAddress(req),
+}));
 
 // 认证后的业务请求按账号选择工作区。账号管理和系统级设置仍由各自路由单独限制为管理员。
 
@@ -709,10 +718,12 @@ app.post('/api/backups/:name/restore', async (req, res, next) => {
     const name = requiredString(req.params.name, '备份文件名', 180);
     if (!backupNamePattern.test(name) || path.basename(name) !== name) throw new RequestValidationError('备份文件名不合法');
     const target = await activeEngine(req);
-    await target.store.restore(name);
-    await target.migrateClearedRecordsToHistory();
-    await target.syncDatabaseFromWorkbook();
-    const workbook = await target.store.metadata();
+    const workbook = await target.withWorkspaceWrite(async () => {
+      await target.store.restore(name);
+      await target.migrateClearedRecordsToHistory();
+      await target.syncDatabaseFromWorkbook();
+      return target.store.metadata();
+    });
     lastSync = new Date().toISOString();
     res.json({ workbook, backups: await target.store.listBackups(), dashboard: await dashboardPayload(target), automation: await target.status() });
   } catch (error) {
@@ -748,8 +759,11 @@ app.post('/api/intake', async (req, res, next) => {
     });
     if (normalized.some((entry) => !entry.billNo || entry.billNo.length > 64)) throw new RequestValidationError('提单号不能为空且不能超过 64 个字符');
     const target = await activeEngine(req);
-    const result = await target.store.appendRecords(normalized);
-    await target.syncDatabaseFromWorkbook();
+    const result = await target.withWorkspaceWrite(async () => {
+      const appended = await target.store.appendRecords(normalized);
+      await target.syncDatabaseFromWorkbook();
+      return appended;
+    });
     res.json({ ...result, dashboard: await dashboardPayload(target), automation: await target.status() });
   } catch (error) {
     next(error);
@@ -970,10 +984,12 @@ app.post('/api/workbooks/upload', upload.single('workbook'), async (req, res, ne
   try {
     if (!req.file) throw new Error('请选择 .xlsx 文件');
     const target = await activeEngine(req);
-    await target.store.install(req.file.path);
-    await target.migrateClearedRecordsToHistory();
-    await target.syncDatabaseFromWorkbook();
-    const workbook = await target.store.metadata();
+    const workbook = await target.withWorkspaceWrite(async () => {
+      await target.store.install(req.file!.path);
+      await target.migrateClearedRecordsToHistory();
+      await target.syncDatabaseFromWorkbook();
+      return target.store.metadata();
+    });
     res.json({ workbook, automation: await target.status(), dashboard: await dashboardPayload(target) });
   } catch (error) {
     next(error);

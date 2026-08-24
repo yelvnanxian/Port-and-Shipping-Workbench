@@ -1007,8 +1007,9 @@ async function waitForOutcomeAndVerification(page: Page, input: TrackingQuery, t
 }
 
 export class BrowserTrackingProvider implements TrackingProvider {
-  // 复用一个普通 Chrome 进程和按船司隔离的上下文；每次查询只关闭当前页面。
+  // 复用一个普通 Chrome 进程、按船司隔离的上下文和页面。
   private browser: Browser | null = null;
+  private carrierPages = new Map<string, Page>();
   private queue: Promise<void> = Promise.resolve();
   private closing: Promise<void> | null = null;
 
@@ -1129,13 +1130,39 @@ export class BrowserTrackingProvider implements TrackingProvider {
     await context.storageState({ path: statePath });
   }
 
+  private async getPage(context: BrowserContext, input: TrackingQuery) {
+    const existing = this.carrierPages.get(input.rule.code);
+    if (existing && !existing.isClosed()) return { page: existing, reused: true };
+    let expectedHost = '';
+    try { expectedHost = new URL(input.rule.url).hostname.replace(/^www\./i, '').toLowerCase(); } catch { /* 使用空主机名兜底 */ }
+    const page = context.pages().find((candidate) => {
+      if (candidate.isClosed()) return false;
+      if (!expectedHost) return false;
+      try {
+        const host = new URL(candidate.url()).hostname.replace(/^www\./i, '').toLowerCase();
+        return host === expectedHost || host.endsWith(`.${expectedHost}`);
+      } catch {
+        return false;
+      }
+    }) || await context.newPage();
+    page.setDefaultTimeout(this.timeoutMs);
+    this.carrierPages.set(input.rule.code, page);
+    return { page, reused: false };
+  }
+
+  private async reusableInput(page: Page) {
+    return firstVisibleInput(page);
+  }
+
   private async execute(input: TrackingQuery): Promise<TrackingResult> {
     const queryValue = input.queryType === 'container' ? input.containerNo.trim().toUpperCase() : input.queryBillNo.trim().toUpperCase();
     if (!queryValue) throw trackingError('订单号验证失败', `${input.rule.name}${input.queryType === 'container' ? '柜号' : '提单号'}为空`);
     const browser = await this.getBrowser();
     const context = await this.getContext(browser, input);
-    const page = await context.newPage();
-    page.setDefaultTimeout(this.timeoutMs);
+    const pageState = await this.getPage(context, input);
+    const page = pageState.page;
+    const existingInput = pageState.reused ? await this.reusableInput(page) : null;
+    const reusePage = Boolean(pageState.reused && existingInput);
     let sourceUrl = input.rule.url;
     let navigationWarning = '';
     let mscResponsePayload: unknown;
@@ -1160,18 +1187,20 @@ export class BrowserTrackingProvider implements TrackingProvider {
       });
     }
     try {
-      if (input.rule.code === 'MSC') {
+      if (input.rule.code === 'MSC' && !pageState.reused) {
         // 仅清理 MSC 自己的 Cookie，不关闭 Chrome，也不影响其他船司的人机验证会话。
         await context.clearCookies({ domain: /(?:^|\.)msccargo\.cn$/ }).catch(() => undefined);
       }
-      try {
-        const navigationUrl = input.rule.code === 'MAERSK' ? new URL(input.rule.url) : probeUrl(input);
-        await page.goto(navigationUrl.toString(), { waitUntil: 'domcontentloaded', timeout: this.timeoutMs });
-      } catch (error) {
-        if (error instanceof Error && /timeout/i.test(`${error.name} ${error.message}`)) navigationWarning = '页面导航超时后继续检查已加载内容';
-        else throw error;
+      if (!reusePage) {
+        try {
+          const navigationUrl = input.rule.code === 'MAERSK' ? new URL(input.rule.url) : probeUrl(input);
+          await page.goto(navigationUrl.toString(), { waitUntil: 'domcontentloaded', timeout: this.timeoutMs });
+        } catch (error) {
+          if (error instanceof Error && /timeout/i.test(`${error.name} ${error.message}`)) navigationWarning = '页面导航超时后继续检查已加载内容';
+          else throw error;
+        }
       }
-      if (input.rule.code === 'MSC') {
+      if (input.rule.code === 'MSC' && !pageState.reused) {
         // MSC 的前端会把上一次失败的空查询状态缓存到 local/sessionStorage；
         // 清理当前站点状态并在同一个 Chrome 页面刷新，不关闭浏览器进程，
         // 避免 macOS 出现“Chrome 未正确关闭”的恢复提示。
@@ -1185,12 +1214,14 @@ export class BrowserTrackingProvider implements TrackingProvider {
       await waitForCarrierReady(page, input, this.verificationCallbacks);
       const cookies = await context.cookies(sourceUrl);
       let acceptedCookies = await dismissCookieDialog(page);
-      await waitForRenderedOutcome(
-        page,
-        queryValue,
-        input.rule.code === 'COSCO' || input.rule.code === 'MSC' ? 8_000 : 1_500,
-        input,
-      );
+      if (!reusePage) {
+        await waitForRenderedOutcome(
+          page,
+          queryValue,
+          input.rule.code === 'COSCO' || input.rule.code === 'MSC' ? 8_000 : 1_500,
+          input,
+        );
+      }
       if (!acceptedCookies) acceptedCookies = await dismissCookieDialog(page);
       if (!acceptedCookies && input.rule.code === 'COSCO' && !cookies.some((cookie) => cookie.name === 'cookieClause')) {
         acceptedCookies = await dismissCookieDialog(page, 2_000);
@@ -1312,7 +1343,7 @@ export class BrowserTrackingProvider implements TrackingProvider {
       throw trackingError(failure.category, `${failure.reason}${navigationWarning ? `；${navigationWarning}` : ''}`, { evidencePath, sourceUrl });
     } finally {
       await this.saveState(context, input).catch(() => undefined);
-      await page.close().catch(() => undefined);
+      if (page.isClosed()) this.carrierPages.delete(input.rule.code);
       // 验证提示保持到本条查询已取得结果或明确结束，避免官网短暂重绘时提示反复出现。
       this.verificationCallbacks?.onResolved?.();
     }
@@ -1325,6 +1356,7 @@ export class BrowserTrackingProvider implements TrackingProvider {
         // 保留持久化 Chrome；只在进程退出时由操作系统回收浏览器。
         // 直接 browser.close() 会让 Chrome 下次启动弹出恢复页面。
         this.browser = null;
+        this.carrierPages.clear();
       })();
     }
     await this.closing;

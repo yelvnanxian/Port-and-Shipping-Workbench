@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import JSZip from 'jszip';
 import path from 'node:path';
 import type { ManualMark, QueryProgress, TrackingTime, VesselState, WorkbookRecord } from './types.js';
+import { SerialExecutionCoordinator } from './concurrency.js';
 
 const LEGACY_REQUIRED_HEADERS = ['船司', '到港时间', '提单号', '柜号', '卸船时间', '船只状态', '最后更新时间', '备注', '进度'] as const;
 export const REQUIRED_HEADERS = ['船司', '到港时间', '提单号', '柜号', '卸船时间', '船只状态', '人工标记', '最后更新时间', '备注', '进度'] as const;
@@ -74,6 +75,7 @@ export class WorkbookStore {
   readonly currentPath: string;
   readonly backupDirectory: string;
   readonly uploadDirectory: string;
+  private readonly writeCoordinator = new SerialExecutionCoordinator();
 
   constructor(rootDirectory = process.cwd(), dataDirectoryOverride?: string) {
     // 普通用户工作区可以传入独立目录；保留默认行为以兼容管理员工作区和现有调用方。
@@ -81,6 +83,10 @@ export class WorkbookStore {
     this.currentPath = path.join(this.dataDirectory, 'current.xlsx');
     this.backupDirectory = path.join(this.dataDirectory, 'backups');
     this.uploadDirectory = path.join(this.dataDirectory, 'uploads');
+  }
+
+  withWriteLock<T>(task: () => Promise<T>) {
+    return this.writeCoordinator.run(task);
   }
 
   async initialize() {
@@ -101,6 +107,7 @@ export class WorkbookStore {
   }
 
   async install(uploadedPath: string) {
+    return this.withWriteLock(async () => {
     await this.initialize();
     try {
       const stat = await fs.stat(uploadedPath);
@@ -119,9 +126,11 @@ export class WorkbookStore {
     } finally {
       await fs.rm(uploadedPath, { force: true }).catch(() => undefined);
     }
+    });
   }
 
   async backup(reason = '自动更新') {
+    return this.withWriteLock(async () => {
     if (!(await this.exists())) return null;
     const baseName = `船期数据_${timestampForFile()}`;
     let target = path.join(this.backupDirectory, `${baseName}.xlsx`);
@@ -138,6 +147,7 @@ export class WorkbookStore {
     await fs.copyFile(this.currentPath, target);
     await fs.writeFile(`${target}.json`, JSON.stringify({ reason, createdAt: new Date().toISOString() }, null, 2));
     return target;
+    });
   }
 
   async open() {
@@ -228,14 +238,16 @@ export class WorkbookStore {
   }
 
   async save(workbook: ExcelJS.Workbook) {
+    return this.withWriteLock(async () => {
     await this.initialize();
-    const temporaryPath = `${this.currentPath}.tmp-${process.pid}-${Date.now()}`;
+    const temporaryPath = `${this.currentPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     try {
       await workbook.xlsx.writeFile(temporaryPath);
       await fs.rename(temporaryPath, this.currentPath);
     } finally {
       await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
     }
+    });
   }
 
   async metadata() {
@@ -276,21 +288,26 @@ export class WorkbookStore {
   }
 
   async restore(name: string) {
+    return this.withWriteLock(async () => {
     const backupPath = this.backupPath(name);
     await fs.access(backupPath);
     if (await this.exists()) await this.backup('恢复备份前自动备份');
     await fs.copyFile(backupPath, this.currentPath);
     return this.metadata();
+    });
   }
 
   async deleteBackup(name: string) {
+    return this.withWriteLock(async () => {
     const backupPath = this.backupPath(name);
     await fs.access(backupPath);
     await fs.rm(backupPath);
     await fs.rm(`${backupPath}.json`, { force: true });
+    });
   }
 
   async appendRecords(entries: Array<{ billNo: string; containerNo?: string; carrierHint?: string; arrivalTime?: TrackingTime; dischargeTime?: TrackingTime; vesselState?: VesselState; manualMark?: ManualMark; note?: string; progress?: QueryProgress }>) {
+    return this.withWriteLock(async () => {
     await this.initialize();
     let workbook: ExcelJS.Workbook;
     let sheet: ExcelJS.Worksheet;
@@ -345,9 +362,11 @@ export class WorkbookStore {
     }
     await this.save(workbook);
     return { metadata: await this.metadata(), added, duplicates };
+    });
   }
 
   async deleteRecords(rowNumbers: number[]) {
+    return this.withWriteLock(async () => {
     const requested = [...new Set(rowNumbers.filter((rowNumber) => Number.isInteger(rowNumber) && rowNumber >= 2))];
     if (!requested.length) throw new Error('请选择要删除的船期记录');
     const opened = await this.open();
@@ -357,9 +376,11 @@ export class WorkbookStore {
     requested.sort((left, right) => right - left).forEach((rowNumber) => opened.sheet.spliceRows(rowNumber, 1));
     await this.save(opened.workbook);
     return { deleted: requested.length, metadata: await this.metadata() };
+    });
   }
 
   async archiveRecord(rowNumber: number, historyId: string) {
+    return this.withWriteLock(async () => {
     if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new Error('船期记录编号不合法');
     const opened = await this.open();
     const record = this.readRecords(opened.sheet, opened.headerMap).find((item) => item.rowNumber === rowNumber);
@@ -371,9 +392,11 @@ export class WorkbookStore {
     row.height = 0;
     await this.save(opened.workbook);
     return { record, metadata: await this.metadata() };
+    });
   }
 
   async restoreRecord(entry: Omit<WorkbookRecord, 'rowNumber'>, options?: { preferredRowNumber?: number; historyId?: string }) {
+    return this.withWriteLock(async () => {
     const opened = await this.open();
     const records = this.readRecords(opened.sheet, opened.headerMap);
     const normalizedBill = entry.billNo.trim().toUpperCase();
@@ -425,6 +448,7 @@ export class WorkbookStore {
       containerNo: normalizedContainer,
       manualMark: '' as const,
     };
+    });
   }
 
   async exportRecords(rowNumbers: number[]) {
