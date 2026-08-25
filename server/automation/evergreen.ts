@@ -34,7 +34,7 @@ function hiddenValue(html: string, name: string) {
 }
 
 function formatEvergreenDate(value: string) {
-  const match = value.trim().match(/^([A-Z]{3})-(\d{2})-(\d{4})$/i);
+  const match = value.trim().match(/^([A-Z]{3})-(\d{1,2})-(\d{4})$/i);
   if (!match) return '';
   const month = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'].indexOf(match[1].toUpperCase()) + 1;
   return month ? `${match[3]}-${String(month).padStart(2, '0')}-${match[2]}` : '';
@@ -42,8 +42,10 @@ function formatEvergreenDate(value: string) {
 
 function evergreenEta(billHtml: string) {
   const text = visibleHtmlText(billHtml);
-  const destinationEta = text.match(/预计抵达目的地时间\s*[:：]?\s*([A-Z]{3}-\d{2}-\d{4})/i)?.[1] ||
-    text.match(/预计到达日期\s+[^\n]{0,120}?\b([A-Z]{3}-\d{2}-\d{4})\b/i)?.[1] || '';
+  const datePattern = '([A-Z]{3}-\\d{1,2}-\\d{4})';
+  const destinationEta = text.match(new RegExp(`预计抵达目的地时间\\s*[:：]?\\s*${datePattern}`, 'i'))?.[1] ||
+    text.match(new RegExp(`(?:预计到达日期|预计抵达目的港时间|预计到港日期)\\s*[:：]?\\s*${datePattern}`, 'i'))?.[1] ||
+    text.match(new RegExp(`(?:ETA|Estimated\\s+Arrival(?:\\s+Date)?)\\s*[:：]?\\s*${datePattern}`, 'i'))?.[1] || '';
   const date = formatEvergreenDate(destinationEta);
   return date ? `${date}（官网仅提供日期）` : '';
 }
@@ -214,13 +216,16 @@ export function parseEvergreenTrackingHtml(
   const routeText = routeStops.map((stop) => stop.name).join(' → ');
   return {
     arrivalTime: null,
-    arrivalTimeText: arrival?.timeText || (!discharge ? etaText || null : null),
-    arrivalKind: arrival ? 'ATA' : (!discharge && etaText ? 'ETA' : null),
+    // 长荣有时只返回实际卸船事件，不单独返回“船舶到港”事件；此时仍
+    // 保留官网 ETA，不能因为已卸船就把到港字段清空。字段类型由
+    // arrivalKind 区分，前端和备注仍会明确显示这是 ETA 而不是 ATA。
+    arrivalTimeText: arrival?.timeText || etaText || null,
+    arrivalKind: arrival ? 'ATA' : (etaText ? 'ETA' : null),
     arrived: Boolean(arrival || discharge || events.some((event) => ['pickup', 'delivery', 'empty-return'].includes(event.eventType))),
     discharged: Boolean(discharge),
     dischargeTime: null,
     dischargeTimeText: dischargeDate || null,
-    rawSummary: `长荣官方提单与货柜动态解析成功；柜号=${containerNo || '未提供'}；已核验完整轨迹 ${events.length} 条；当前事件=${current?.event || '未提供'}${arrival ? `；实际到港=${arrival.timeText}` : etaText && !discharge ? `；预计到港=${etaText}` : ''}${dischargeDate ? `；官网确认 ${dischargeDate} 已卸船，但未提供具体时刻` : '；未发现卸船完成事件'}`,
+    rawSummary: `长荣官方提单与货柜动态解析成功；柜号=${containerNo || '未提供'}；已核验完整轨迹 ${events.length} 条；当前事件=${current?.event || '未提供'}${arrival ? `；实际到港=${arrival.timeText}` : etaText ? `；预计到港=${etaText}` : ''}${dischargeDate ? `；官网确认 ${dischargeDate} 已卸船，但未提供具体时刻` : '；未发现卸船完成事件'}`,
     sourceUrl: EVERGREEN_ENDPOINT,
     routeText,
     trackingDetail,

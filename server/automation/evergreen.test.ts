@@ -70,6 +70,20 @@ test('长荣保留官网仅提供日期的卸船精度', () => {
   assert.match(result.rawSummary, /未提供具体时刻/);
 });
 
+test('长荣已有实际卸船但没有单独到港事件时仍保留 ETA', () => {
+  const result = parseEvergreenTrackingHtml(
+    etaBillHtml,
+    movementHtml,
+    '146600523956',
+    'DFSU7042655',
+  );
+  assert.equal(result.arrivalKind, 'ETA');
+  assert.equal(result.arrivalTimeText, '2026-08-27（官网仅提供日期）');
+  assert.equal(result.dischargeTimeText, '2026-08-11（官网仅提供日期）');
+  assert.equal(result.arrived, true);
+  assert.equal(result.discharged, true);
+});
+
 test('长荣柜号不一致时拒绝写入其他货柜结果', () => {
   assert.throws(
     () => parseEvergreenTrackingHtml(billHtml, movementHtml, '146600523956', 'WRONG1234567'),
