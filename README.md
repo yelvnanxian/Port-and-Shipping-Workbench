@@ -47,6 +47,8 @@ npm run setup
 
 `npm run setup` 只会在没有 `.env` 时创建配置文件，并自动生成一组随机管理员密码；已有 `.env` 不会被覆盖。
 
+终端会显示一次管理员密码，请立即保存。`.env`、`data/`、真实订单 Excel、浏览器 Cookie 和验证 Profile 都只保存在本机，不要复制到其他电脑或提交到 GitHub。
+
 ### 3. 检查本地环境
 
 ```bash
@@ -104,6 +106,8 @@ DATABASE_SSL=false
 
 不配置 `DATABASE_URL` 时，项目会继续使用本地文件保存数据。
 
+单机单用户可以不安装 PostgreSQL；需要多实例或集中式数据存储时再配置 PostgreSQL。
+
 真实订单 Excel、浏览器 Profile、截图证据、账号和运行记录都属于本机运行数据，不要提交到 GitHub。仓库只保留脱敏模板；首次使用请在工作台中导入自己的 `.xlsx` 文件。
 
 通过 Cloudflare Tunnel 开放访问时，服务仍应只监听本机，并信任本机反向代理传入的真实客户端地址：
@@ -133,6 +137,12 @@ npm start
 http://127.0.0.1:8787
 ```
 
+首次使用时，登录管理员账号后请先下载模板或上传自己的 `.xlsx` 文件，再选择一条真实记录测试。仓库不包含业务订单数据，Excel 表头应保持：
+
+```text
+船司｜到港时间｜提单号｜柜号｜卸船时间｜船只状态｜最后更新时间｜备注｜进度
+```
+
 开发模式启动前后端：
 
 ```bash
@@ -150,9 +160,52 @@ npm run dev:api
 
 ```bash
 git pull
-npm install
+npm ci
+npm run preflight
 npm run build
 npm start
 ```
+
+## 新电脑完整配置流程
+
+macOS/Linux：
+
+```bash
+git clone https://github.com/yelvnanxian/Port-and-Shipping-Workbench.git
+cd Port-and-Shipping-Workbench
+npm ci
+npm run setup
+npm run preflight
+npm run dev
+```
+
+Windows PowerShell 使用相同的 Git、Node.js 和 npm 命令即可。生产模式启动前执行：
+
+```bash
+npm run preflight
+npm test
+npm run build
+npm start
+```
+
+开发模式访问 `http://127.0.0.1:5173`，生产模式访问 `http://127.0.0.1:8787`。
+
+## 首次人工验证
+
+以星、东方海外和万海首次遇到安全验证时，在 `.env` 中设置：
+
+```dotenv
+BROWSER_HEADLESS=false
+BROWSER_HUMAN_VERIFY=true
+BROWSER_HUMAN_VERIFY_TIMEOUT_MS=180000
+```
+
+重启服务后，在打开的浏览器窗口中完成验证。验证状态会保存在本机 `data/browser-profile/`，后续查询会复用同一会话。不同电脑必须分别验证，不要共享 Profile 或 Cookie。
+
+达飞和赫伯罗特使用普通 Chrome/Edge 加扩展采集：打开 `chrome://extensions`，开启“开发者模式”，选择项目中的 `browser-extension` 目录加载，然后在单号详情中点击“普通浏览器采集”。
+
+## 多用户和运行数据
+
+管理员登录后可在系统设置中创建普通账号。普通用户使用独立工作区；不要让多个用户共享同一个 `data` 目录，也不要提交 `.env`、`data/`、真实订单 Excel、备份、截图证据、账号文件或浏览器 Profile。
 
 系统不包含固定的 09:00、11:00、17:30 后台任务。需要定时更新时，请登录工作台，在“自动化任务”中自行创建任务并设置执行时间。
