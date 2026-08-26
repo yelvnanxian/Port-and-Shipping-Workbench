@@ -1,42 +1,60 @@
 # 港航工作台
 
-根据提单号、柜号查询船司官网数据，整理到港时间、卸船时间、船只状态和完整运输线路，并保存到 Excel。
+## 1、项目介绍
 
-## 主要功能
+港航工作台是一个本地运行的船期数据工作台。它根据提单号或柜号访问船司公开网站，整理到港、卸船、船只状态和完整运输线路，并同步到 Excel。
 
-- 支持 15 家船司的提单号、柜号识别与查询
-- 官方公开接口优先，失败时可使用 Chrome 网页模拟查询
-- 提取 ATA、ETA、实际卸船时间、货柜事件和完整线路
-- 展示线路图、查询记录和采集证据
-- Excel 导入、导出、备份、恢复与删除
-- 单条更新、选中更新、批量更新和人工补录
-- 自定义自动化任务及运行记录
-- 登录、管理员/普通用户权限和独立用户工作区；同一账号采用单设备登录
-- 多账号抓取进入全局队列，避免自动化浏览器并发冲突
-- PostgreSQL 数据存储（可选，不配置时使用本地文件）
-- 企业微信任务汇总通知（可选）
+当前支持 15 家船司：
 
-达飞和赫伯罗特采用“普通 Chrome/Edge + 浏览器扩展采集”。工作台不会为这两家启动自动化 Chrome：用户在普通浏览器完成官网验证和查询后，由扩展把当前结果页和截图交给对应解析器。
+海洋网联、马士基、地中海、长荣、东方海外、万海、以星、美森、阳明、森罗、达飞、中远海运、赫伯罗特、合德、韩新海运。
 
-## 本地配置
+主要功能：
 
-### 1. 安装环境
+- ATA/ETA 区分：有实际到港时优先使用 ATA，否则使用 ETA；
+- 区分最终目的港与中转港，提取当前港口、预计到达港口和预计到达时间；
+- 识别实际卸船、后续提货/配送事件和多地点、多次卸船；
+- 显示完整路线、事件详情、官网来源和采集证据；
+- Excel 导入、导出、备份、恢复、删除和历史归档；
+- 单条、选中、批量更新，以及人工补录和人工修改时间/状态；
+- 自定义自动化任务、执行时间、任务队列和运行记录；
+- 登录、Session、管理员/普通用户权限和独立工作区；
+- PostgreSQL 结构化存储，业务表按 `workspace_id` 隔离；
+- 可选企业微信汇总通知。
 
-需要安装：
+官方接口优先使用公开数据，必要时使用浏览器自动化。达飞和赫伯罗特使用普通 Chrome/Edge 加浏览器扩展采集，遇到验证码或风控时仍可能需要人工完成验证。
 
-- Git
-- Node.js 20 或更高版本，推荐 Node.js 22 LTS
-- Google Chrome
-- PostgreSQL 16（可选）
+仓库不包含真实订单、账号密码、Cookie、浏览器 Profile、截图证据或运行数据。当前版本没有演示模式，首次使用必须导入自己的真实 Excel。
 
-macOS 可以使用 Homebrew：
+## 2、部署要求
+
+### 软件
+
+- macOS、Windows 或 Linux；
+- Git；
+- Node.js 20 或更高版本，推荐 Node.js 22 LTS；
+- Google Chrome 或 Microsoft Edge；
+- PostgreSQL 16，建议正式启用；多用户或多实例部署时应使用 PostgreSQL；
+- 可选：pgAdmin4，用于图形化查看数据库；
+- 可选：Cloudflare Tunnel，用于不开放本机端口的公网访问。
+
+macOS 安装示例：
 
 ```bash
-brew install git node@22
+brew install git node@22 postgresql@16
 brew install --cask google-chrome
+brew services start postgresql@16
 ```
 
-### 2. 下载项目
+### 资源和网络
+
+- 最低建议 2 核 CPU、4 GB 内存；多人使用建议 4 核、8 GB 内存；
+- 本机需要能够访问各船司官网；
+- 生产端口：后端 `8787`；开发前端：`5173`；PostgreSQL：`5432`；
+- 浏览器自动化会占用额外内存，任务应按船司串行执行，不要同时启动多个后端实例共享同一个 Excel 目录。
+
+## 3、操作步骤
+
+### 3.1 下载并安装依赖
 
 ```bash
 git clone https://github.com/yelvnanxian/Port-and-Shipping-Workbench.git
@@ -45,86 +63,96 @@ npm ci
 npm run setup
 ```
 
-`npm run setup` 只会在没有 `.env` 时创建配置文件，并自动生成一组随机管理员密码；已有 `.env` 不会被覆盖。
+`npm run setup` 会创建本地 `.env`、生成运行目录和随机管理员密码。密码只在首次创建 `.env` 时显示，请立即保存；已有 `.env` 不会被覆盖。
 
-终端会显示一次管理员密码，请立即保存。`.env`、`data/`、真实订单 Excel、浏览器 Cookie 和验证 Profile 都只保存在本机，不要复制到其他电脑或提交到 GitHub。
+### 3.2 创建 PostgreSQL 数据库
 
-### 3. 检查本地环境
+macOS Homebrew 示例：
 
 ```bash
-npm run preflight
+brew services start postgresql@16
+createuser port_ops
+createdb -O port_ops port_ops
 ```
 
-检查失败时先按终端提示修复，不要直接启动服务。
+如果提示用户或数据库已存在，可以跳过对应命令。
 
-### 4. 修改配置文件
+在项目根目录 `.env` 中确认：
 
-至少确认管理员账号和密码：
+```dotenv
+DATABASE_URL=postgresql://port_ops@127.0.0.1:5432/port_ops
+DATABASE_SSL=false
+DB_POOL_MAX=10
+```
+
+首次启动会自动创建表并执行迁移。旧版本数据会归入 `admin` 工作区，普通账号使用 `user-账号ID` 工作区。
+
+### 3.3 配置登录和浏览器
+
+至少确认以下配置：
 
 ```dotenv
 PORT=8787
 APP_HOST=127.0.0.1
 AUTH_ENABLED=true
 AUTH_ADMIN_USERNAME=admin
-AUTH_ADMIN_PASSWORD=请替换为至少16位的随机强密码
+AUTH_ADMIN_PASSWORD=替换为至少16位随机强密码
+BROWSER_HEADLESS=true
+BROWSER_HUMAN_VERIFY=true
 ```
 
-需要打开 Chrome 完成人工验证时，增加或修改：
+首次处理以星、东方海外或万海的人工验证时，改为：
 
 ```dotenv
-BROWSER_EXECUTABLE_PATH=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
 BROWSER_HEADLESS=false
-BROWSER_HUMAN_VERIFY=true
 BROWSER_HUMAN_VERIFY_TIMEOUT_MS=180000
 ```
 
-以星、东方海外和万海的验证会保存在本机 `data/browser-profile/` 中，不会提交到 GitHub，也不要在不同电脑之间复制。新电脑首次查询时请使用有界面浏览器完成验证，之后继续使用同一个本地 Profile。
+验证完成后继续使用同一台电脑的 `data/browser-profile/`，不要复制 Cookie 或 Profile 到其他电脑。
 
-Windows 的 Chrome 路径通常为：
+达飞和赫伯罗特需要安装浏览器扩展：
 
-```dotenv
-BROWSER_EXECUTABLE_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe
+1. Chrome 打开 `chrome://extensions`；
+2. 开启“开发者模式”；
+3. 点击“加载已解压的扩展程序”；
+4. 选择项目中的 `browser-extension` 目录；
+5. 在记录详情中点击“普通浏览器采集”，完成官网查询后用扩展提交当前结果页。
+
+### 3.4 导入和使用数据
+
+1. 启动项目并登录管理员账号；
+2. 在工作台上传真实 `.xlsx` 文件；
+3. 检查船司、提单号和柜号是否正确；
+4. 先使用单条更新验证结果，再执行选中或批量更新；
+5. 在“自动化任务”中创建任务并设置执行时间；
+6. 在“系统设置”中创建普通账号；
+7. 需要人工修正时，在记录详情中修改到港时间、卸船时间和船只状态。
+
+Excel 表头应保持以下顺序或至少包含这些列：
+
+```text
+船司｜到港时间｜提单号｜柜号｜卸船时间｜船只状态｜人工标记｜最后更新时间｜备注｜进度
 ```
 
-达飞、赫伯罗特不使用上面的自动化浏览器配置。首次使用时打开 `chrome://extensions`，开启“开发者模式”，点击“加载已解压的扩展程序”，选择项目中的 `browser-extension` 目录。之后在单号详情点击“普通浏览器采集”，按页面提示操作即可。
+### 3.5 使用 pgAdmin4 查看数据库
 
-如需 PostgreSQL，可安装并创建数据库：
+注册本地服务器时填写：
+
+```text
+Host：127.0.0.1
+Port：5432
+Maintenance database：port_ops
+Username：port_ops
+```
+
+连接后打开 `Databases → port_ops → Schemas → public → Tables`。常用表为 `shipments`、`auth_users`、`automation_tasks`、`automation_runs` 和 `automation_settings`。
+
+## 4、启动项目
+
+### 4.1 生产模式
 
 ```bash
-brew install postgresql@16
-brew services start postgresql@16
-createuser port_ops
-createdb -O port_ops port_ops
-```
-
-然后在 `.env` 中配置：
-
-```dotenv
-DATABASE_URL=postgresql://port_ops@127.0.0.1:5432/port_ops
-DATABASE_SSL=false
-```
-
-不配置 `DATABASE_URL` 时，项目会继续使用本地文件保存数据。
-
-单机单用户可以不安装 PostgreSQL；需要多实例或集中式数据存储时再配置 PostgreSQL。
-
-真实订单 Excel、浏览器 Profile、截图证据、账号和运行记录都属于本机运行数据，不要提交到 GitHub。仓库只保留脱敏模板；首次使用请在工作台中导入自己的 `.xlsx` 文件。
-
-通过 Cloudflare Tunnel 开放访问时，服务仍应只监听本机，并信任本机反向代理传入的真实客户端地址：
-
-```dotenv
-APP_HOST=127.0.0.1
-APP_TRUST_PROXY=true
-```
-
-不要在直接暴露端口到公网时开启 `APP_TRUST_PROXY`，否则攻击者可能伪造来源地址绕过按 IP 的登录限流。
-
-## 启动项目
-
-生产方式启动：
-
-```bash
-npm ci
+cd /Users/dc-ext-09/personal/work_table
 npm run preflight
 npm test
 npm run build
@@ -137,26 +165,24 @@ npm start
 http://127.0.0.1:8787
 ```
 
-首次使用时，登录管理员账号后请先下载模板或上传自己的 `.xlsx` 文件，再选择一条真实记录测试。仓库不包含业务订单数据，Excel 表头应保持：
+### 4.2 开发模式
 
-```text
-船司｜到港时间｜提单号｜柜号｜卸船时间｜船只状态｜最后更新时间｜备注｜进度
-```
-
-开发模式启动前后端：
+前端和后端一起启动：
 
 ```bash
 npm run dev
 ```
 
-前端和后端也可以分别启动：
+分别启动：
 
 ```bash
 npm run dev:web
 npm run dev:api
 ```
 
-拉取新版代码后重新启动：
+开发前端地址：`http://127.0.0.1:5173`。
+
+拉取新版代码后：
 
 ```bash
 git pull
@@ -166,46 +192,133 @@ npm run build
 npm start
 ```
 
-## 新电脑完整配置流程
+### 4.3 使用 Cloudflare Tunnel 公网访问
 
-macOS/Linux：
+Cloudflare Tunnel 会把公网请求转发到本机服务，不需要直接开放 `8787` 端口。
+
+#### 临时 Tunnel（测试）
+
+macOS 安装：
 
 ```bash
-git clone https://github.com/yelvnanxian/Port-and-Shipping-Workbench.git
-cd Port-and-Shipping-Workbench
-npm ci
-npm run setup
-npm run preflight
-npm run dev
+brew install cloudflared
 ```
 
-Windows PowerShell 使用相同的 Git、Node.js 和 npm 命令即可。生产模式启动前执行：
+Windows PowerShell 可以使用：
+
+```powershell
+winget install --id Cloudflare.cloudflared
+```
+
+先启动项目：
 
 ```bash
-npm run preflight
-npm test
-npm run build
 npm start
 ```
 
-开发模式访问 `http://127.0.0.1:5173`，生产模式访问 `http://127.0.0.1:8787`。
+再打开第二个终端运行临时 Tunnel：
 
-## 首次人工验证
-
-以星、东方海外和万海首次遇到安全验证时，在 `.env` 中设置：
-
-```dotenv
-BROWSER_HEADLESS=false
-BROWSER_HUMAN_VERIFY=true
-BROWSER_HUMAN_VERIFY_TIMEOUT_MS=180000
+```bash
+cloudflared tunnel --url http://127.0.0.1:8787
 ```
 
-重启服务后，在打开的浏览器窗口中完成验证。验证状态会保存在本机 `data/browser-profile/`，后续查询会复用同一会话。不同电脑必须分别验证，不要共享 Profile 或 Cookie。
+命令输出的 `https://xxxx.trycloudflare.com` 就是临时访问地址。临时地址每次启动可能变化，适合测试和少量临时使用。
 
-达飞和赫伯罗特使用普通 Chrome/Edge 加扩展采集：打开 `chrome://extensions`，开启“开发者模式”，选择项目中的 `browser-extension` 目录加载，然后在单号详情中点击“普通浏览器采集”。
+#### 固定域名 Tunnel（长期使用）
 
-## 多用户和运行数据
+先在 Cloudflare 账号中添加已经拥有的域名，然后在终端登录并创建 Named Tunnel：
 
-管理员登录后可在系统设置中创建普通账号。普通用户使用独立工作区；不要让多个用户共享同一个 `data` 目录，也不要提交 `.env`、`data/`、真实订单 Excel、备份、截图证据、账号文件或浏览器 Profile。
+```bash
+cloudflared tunnel login
+cloudflared tunnel create port-ops
+cloudflared tunnel route dns port-ops work.example.com
+```
 
-系统不包含固定的 09:00、11:00、17:30 后台任务。需要定时更新时，请登录工作台，在“自动化任务”中自行创建任务并设置执行时间。
+`cloudflared tunnel create` 会输出 Tunnel UUID 和凭据文件路径。创建
+`~/.cloudflared/config.yml`（Windows 通常为 `%USERPROFILE%\\.cloudflared\\config.yml`）：
+
+```yaml
+tunnel: <TUNNEL_UUID>
+credentials-file: /Users/你的用户名/.cloudflared/<TUNNEL_UUID>.json
+
+ingress:
+  - hostname: work.example.com
+    service: http://127.0.0.1:8787
+  - service: http_status:404
+```
+
+把 `work.example.com`、`<TUNNEL_UUID>` 和凭据文件路径替换成实际值后，启动项目并运行 Tunnel：
+
+```bash
+npm start
+cloudflared tunnel run port-ops
+```
+
+固定域名场景的 `.env` 示例：
+
+```dotenv
+APP_HOST=127.0.0.1
+APP_ORIGIN=https://work.example.com
+APP_TRUST_PROXY=true
+APP_HTTPS=true
+AUTH_ENABLED=true
+```
+
+Cloudflare 只负责转发流量，项目后端和 PostgreSQL 仍运行在本机。需要后台常驻时，使用操作系统的服务管理器运行 `cloudflared tunnel run port-ops`，不要重复启动多个 Tunnel 指向同一个端口。
+
+## 5、注意事项
+
+### 数据真实性
+
+- 官网返回 ETA 时，不能当作实际 ATA；
+- 中转港到港/卸船不能覆盖最终目的港字段；
+- 预计卸船不能写入实际卸船时间；
+- 官网只确认“已卸船”但没有精确时间时，状态可以是已卸船，但不会伪造时间；
+- 查询失败会清理本次自动结果，避免把旧数据误认为本次成功结果；
+- 自动解析结果应通过官网来源、截图、原始页面文本和路线详情复核。
+
+### 人工修改
+
+- 时间没有时区时按北京时间处理；
+- 未来到港时间不会提前标记为已到港；
+- 未来卸船时间不会提前标记为已卸船；
+- 人工修改目前只修改时间和船只状态，不修改当前港口、预计到达港口和路线详情；
+- 后续重新执行自动查询时，官网结果可能覆盖人工修改；
+- 人工修改和导入替换前会自动创建 Excel 备份。
+
+### PostgreSQL 和工作区
+
+- PostgreSQL 启用后，业务表按 `workspace_id` 隔离；
+- `admin` 是管理员工作区，普通账号使用独立工作区；
+- 账号、任务和船期数据不能通过前端参数互相访问；
+- PostgreSQL 物理数据目录不能直接修改或删除；
+- 升级前可以创建数据库备份：
+
+```bash
+./scripts/backup_postgres.sh
+```
+
+- 恢复数据库前必须确认目标数据库，恢复操作会覆盖同名表：
+
+```bash
+CONFIRM_RESTORE=YES ./scripts/restore_postgres.sh data/db-backups/port_ops_YYYYMMDD-HHMMSS.dump
+```
+
+### 公网和安全
+
+- 不要把 `8787` 或 `5432` 直接暴露到公网；
+- 公网访问必须保持 `AUTH_ENABLED=true`，并使用强管理员密码；
+- 只有确认请求经过本机 Cloudflare Tunnel 或可信反向代理时，才设置 `APP_TRUST_PROXY=true`；
+- `.env`、真实 Excel、`data/`、备份、截图、Cookie 和浏览器 Profile 不得提交到 GitHub；
+- 同一账号在新设备登录会撤销旧 Session；多人使用时应为每个人创建独立账号；
+- 系统任务会进入队列，船司查询按顺序执行，遇到验证码或官网风控时可能暂停该船司后续记录；
+- 达飞、赫伯罗特的浏览器扩展默认只允许连接本机工作台地址，异地用户不能直接代替本机完成人工采集；
+- Cloudflare 临时 Tunnel 地址不固定，不适合长期生产使用；长期使用请配置固定域名和 Named Tunnel。
+
+遇到启动、数据库或接口问题，先执行：
+
+```bash
+npm run preflight
+```
+
+再查看后端终端日志，不要只依据前端的“模块数据加载失败”判断真实原因。

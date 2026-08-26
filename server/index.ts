@@ -29,11 +29,16 @@ const host = process.env.APP_HOST || '127.0.0.1';
 const database = createAppDatabase();
 await database.migrate();
 const globalRunCoordinator = new SerialExecutionCoordinator();
-const engine = new AutomationEngine(new WorkbookStore(), database, { runCoordinator: globalRunCoordinator });
+const engine = new AutomationEngine(new WorkbookStore(), database, { workspaceId: 'admin', runCoordinator: globalRunCoordinator });
 await engine.store.initialize();
 await engine.cleanupClearanceHistory();
 await engine.migrateClearedRecordsToHistory();
 await engine.syncDatabaseFromWorkbook();
+// 启动时立即把旧版本地设置、任务和运行记录迁移到管理员工作区，
+// 不必等到下一分钟的定时检查才完成迁移。
+await engine.settings();
+await engine.listTasks();
+await engine.listRuns();
 const auth = new AuthService(engine.store.dataDirectory, database);
 const manualCollections = new ManualCollectionRegistry();
 if (auth.enabled && (await auth.listUsers()).length === 0) {
@@ -48,7 +53,8 @@ if (!auth.enabled && (host !== '127.0.0.1' && host !== '::1' && host !== 'localh
 const workspaceRoot = path.join(engine.store.dataDirectory, 'workspaces');
 const workspaceEngines = new WorkspaceRegistry<AutomationEngine>(async (safeUserId) => {
   const workspaceDirectory = path.join(engine.store.dataDirectory, 'workspaces', safeUserId);
-  const workspace = new AutomationEngine(new WorkbookStore(process.cwd(), workspaceDirectory), undefined, {
+  const workspace = new AutomationEngine(new WorkbookStore(process.cwd(), workspaceDirectory), database, {
+    workspaceId: safeUserId,
     defaultWechatWebhookUrl: '',
     runCoordinator: globalRunCoordinator,
   });
@@ -56,6 +62,11 @@ const workspaceEngines = new WorkspaceRegistry<AutomationEngine>(async (safeUser
   await workspace.cleanupClearanceHistory();
   await workspace.migrateClearedRecordsToHistory();
   await workspace.syncDatabaseFromWorkbook();
+  // 普通账号的旧版本地文件也在初始化时迁移，且始终写入该账号的
+  // workspace_id，不会进入管理员或其他账号的命名空间。
+  await workspace.settings();
+  await workspace.listTasks();
+  await workspace.listRuns();
   return workspace;
 });
 async function activeEngine(req: express.Request) {

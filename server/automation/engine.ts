@@ -212,13 +212,18 @@ export class AutomationEngine {
   private browserEvidenceProvider: BrowserTrackingProvider | null = null;
   private verificationSkipRequested = false;
   private readonly database?: AppDatabase;
+  /** PostgreSQL namespace for this Excel workspace (admin or user-<id>). */
+  readonly workspaceId: string;
   private readonly defaultWechatWebhookUrl?: string;
   private readonly runCoordinator: SerialExecutionCoordinator;
   private waitingForRunCoordinator = false;
 
-  constructor(store = new WorkbookStore(), database?: AppDatabase, options?: { defaultWechatWebhookUrl?: string; runCoordinator?: SerialExecutionCoordinator }) {
+  constructor(store = new WorkbookStore(), database?: AppDatabase, options?: { defaultWechatWebhookUrl?: string; runCoordinator?: SerialExecutionCoordinator; workspaceId?: string }) {
     this.store = store;
     this.database = database?.enabled ? database : undefined;
+    const workspaceId = options?.workspaceId?.trim() || 'admin';
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(workspaceId)) throw new Error('工作区编号不合法');
+    this.workspaceId = workspaceId;
     this.defaultWechatWebhookUrl = options?.defaultWechatWebhookUrl;
     this.runCoordinator = options?.runCoordinator || new SerialExecutionCoordinator();
     this.runLogPath = path.join(store.dataDirectory, 'runs.json');
@@ -323,12 +328,12 @@ export class AutomationEngine {
     const { sheet, headerMap } = await this.store.open();
     const records = this.store.readRecords(sheet, headerMap);
     await this.database.transaction(async (client) => {
-      await client.query('DELETE FROM shipments');
+      await client.query('DELETE FROM shipments WHERE workspace_id = $1', [this.workspaceId]);
       for (const record of records) {
         await client.query(
-          `INSERT INTO shipments (source_row, carrier_hint, bill_no, container_no, arrival_time, discharge_time, vessel_state, manual_mark, last_updated, note, progress, synced_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())`,
-          [record.rowNumber, record.carrierHint, record.billNo, record.containerNo, publicTime(record.arrivalTime), publicTime(record.dischargeTime), record.vesselState, record.manualMark, record.lastUpdated, record.note, record.progress],
+          `INSERT INTO shipments (workspace_id, source_row, carrier_hint, bill_no, container_no, arrival_time, discharge_time, vessel_state, manual_mark, last_updated, note, progress, synced_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())`,
+          [this.workspaceId, record.rowNumber, record.carrierHint, record.billNo, record.containerNo, publicTime(record.arrivalTime), publicTime(record.dischargeTime), record.vesselState, record.manualMark, record.lastUpdated, record.note, record.progress],
         );
       }
     });
@@ -379,7 +384,7 @@ export class AutomationEngine {
 
   async listRuns(): Promise<RunSummary[]> {
     if (this.database) {
-      const result = await this.database.query<{ payload: RunSummary }>('SELECT payload FROM automation_runs ORDER BY finished_at DESC LIMIT 30');
+      const result = await this.database.query<{ payload: RunSummary }>('SELECT payload FROM automation_runs WHERE workspace_id = $1 ORDER BY finished_at DESC LIMIT 30', [this.workspaceId]);
       if (result.rows.length) {
         return result.rows.map(({ payload }) => ({ ...payload, failedBills: payload.failedBills || [], failedDetails: payload.failedDetails || [] }));
       }
@@ -392,8 +397,8 @@ export class AutomationEngine {
         await this.database.transaction(async (client) => {
           for (const run of normalized.slice(0, 30)) {
             await client.query(
-              `INSERT INTO automation_runs (id, payload, started_at, finished_at) VALUES ($1, $2::jsonb, $3, $4) ON CONFLICT (id) DO NOTHING`,
-              [run.id, JSON.stringify(run), run.startedAt, run.finishedAt],
+              `INSERT INTO automation_runs (id, workspace_id, payload, started_at, finished_at) VALUES ($1, $2, $3::jsonb, $4, $5) ON CONFLICT (id) DO NOTHING`,
+              [run.id, this.workspaceId, JSON.stringify(run), run.startedAt, run.finishedAt],
             );
           }
         });
@@ -408,7 +413,7 @@ export class AutomationEngine {
     return this.withWorkspaceWrite(async () => {
     const requested = new Set(ids.filter(Boolean));
     if (this.database && requested.size) {
-      await this.database.query('DELETE FROM automation_runs WHERE id = ANY($1::text[])', [[...requested]]);
+      await this.database.query('DELETE FROM automation_runs WHERE workspace_id = $1 AND id = ANY($2::text[])', [this.workspaceId, [...requested]]);
       return this.listRuns();
     }
     const runs = await this.listRuns();
@@ -421,7 +426,7 @@ export class AutomationEngine {
 
   async listTasks(): Promise<AutomationTask[]> {
     if (this.database) {
-      const result = await this.database.query<{ payload: AutomationTask }>('SELECT payload FROM automation_tasks ORDER BY created_at');
+      const result = await this.database.query<{ payload: AutomationTask }>('SELECT payload FROM automation_tasks WHERE workspace_id = $1 ORDER BY created_at', [this.workspaceId]);
       if (result.rows.length) return result.rows.map(({ payload }) => ({ ...payload, scheduleTime: payload.scheduleTime || null }));
     }
     try {
@@ -439,11 +444,11 @@ export class AutomationEngine {
     await writeJsonAtomic(this.tasksPath, tasks);
     if (this.database) {
       await this.database.transaction(async (client) => {
-        await client.query('DELETE FROM automation_tasks');
+        await client.query('DELETE FROM automation_tasks WHERE workspace_id = $1', [this.workspaceId]);
         for (const task of tasks) {
           await client.query(
-            `INSERT INTO automation_tasks (id, payload, created_at, updated_at) VALUES ($1, $2::jsonb, $3, $4)`,
-            [task.id, JSON.stringify(task), task.createdAt, task.updatedAt],
+            `INSERT INTO automation_tasks (id, workspace_id, payload, created_at, updated_at) VALUES ($1, $2, $3::jsonb, $4, $5)`,
+            [task.id, this.workspaceId, JSON.stringify(task), task.createdAt, task.updatedAt],
           );
         }
       });
@@ -809,7 +814,7 @@ export class AutomationEngine {
       wechatWebhookUrl: this.defaultWechatWebhookUrl ?? (process.env.WECHAT_WEBHOOK_URL?.trim() || ''),
     };
     if (this.database) {
-      const result = await this.database.query<{ payload: AutomationSettings }>('SELECT payload FROM automation_settings WHERE id = 1');
+      const result = await this.database.query<{ payload: AutomationSettings }>('SELECT payload FROM automation_settings WHERE workspace_id = $1 AND id = 1', [this.workspaceId]);
       if (result.rows[0]?.payload) return { ...fallback, ...result.rows[0].payload, schedule: [], wechatWebhookUrl: result.rows[0].payload.wechatWebhookUrl ?? fallback.wechatWebhookUrl };
     }
     try {
@@ -827,12 +832,12 @@ export class AutomationEngine {
 
   private async saveSettings(settings: AutomationSettings) {
     await this.store.initialize();
-      await writeJsonAtomic(this.settingsPath, settings);
+    await writeJsonAtomic(this.settingsPath, settings);
     if (this.database) {
       await this.database.query(
-        `INSERT INTO automation_settings (id, payload, updated_at) VALUES (1, $1::jsonb, NOW())
-         ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
-        [JSON.stringify(settings)],
+        `INSERT INTO automation_settings (workspace_id, id, payload, updated_at) VALUES ($1, 1, $2::jsonb, NOW())
+         ON CONFLICT (workspace_id, id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
+        [this.workspaceId, JSON.stringify(settings)],
       );
     }
   }
@@ -855,11 +860,11 @@ export class AutomationEngine {
     await this.store.initialize();
     if (this.database) {
       await this.database.query(
-        `INSERT INTO automation_runs (id, payload, started_at, finished_at) VALUES ($1, $2::jsonb, $3, $4)
+        `INSERT INTO automation_runs (id, workspace_id, payload, started_at, finished_at) VALUES ($1, $2, $3::jsonb, $4, $5)
          ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, finished_at = EXCLUDED.finished_at`,
-        [summary.id, JSON.stringify(summary), summary.startedAt, summary.finishedAt],
+        [summary.id, this.workspaceId, JSON.stringify(summary), summary.startedAt, summary.finishedAt],
       );
-      await this.database.query(`DELETE FROM automation_runs WHERE id NOT IN (SELECT id FROM automation_runs ORDER BY finished_at DESC LIMIT 30)`);
+      await this.database.query(`DELETE FROM automation_runs WHERE workspace_id = $1 AND id NOT IN (SELECT id FROM automation_runs WHERE workspace_id = $1 ORDER BY finished_at DESC LIMIT 30)`, [this.workspaceId]);
       const runs = await this.listRuns();
       await writeJsonAtomic(this.runLogPath, runs);
       return;

@@ -57,7 +57,11 @@ class PostgresDatabase implements AppDatabase {
   }
 
   async migrate() {
-    await this.query(`
+    // 多个后端实例可能同时启动；事务级 advisory lock 保证字段迁移不会
+    // 在 DROP/ADD 主键约束之间互相竞争。
+    await this.transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock($1)', [734921508]);
+      await client.query(`
       CREATE TABLE IF NOT EXISTS auth_users (
         id TEXT PRIMARY KEY,
         username TEXT NOT NULL UNIQUE,
@@ -69,24 +73,29 @@ class PostgresDatabase implements AppDatabase {
         password_hash TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS automation_settings (
-        id SMALLINT PRIMARY KEY CHECK (id = 1),
+        workspace_id TEXT NOT NULL DEFAULT 'admin',
+        id SMALLINT NOT NULL CHECK (id = 1),
         payload JSONB NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (workspace_id, id)
       );
       CREATE TABLE IF NOT EXISTS automation_tasks (
         id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL DEFAULT 'admin',
         payload JSONB NOT NULL,
         created_at TIMESTAMPTZ NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL
       );
       CREATE TABLE IF NOT EXISTS automation_runs (
         id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL DEFAULT 'admin',
         payload JSONB NOT NULL,
         started_at TIMESTAMPTZ NOT NULL,
         finished_at TIMESTAMPTZ NOT NULL
       );
       CREATE INDEX IF NOT EXISTS automation_runs_finished_at_idx ON automation_runs (finished_at DESC);
       CREATE TABLE IF NOT EXISTS shipments (
+        workspace_id TEXT NOT NULL DEFAULT 'admin',
         source_row INTEGER PRIMARY KEY,
         carrier_hint TEXT NOT NULL DEFAULT '',
         bill_no TEXT NOT NULL,
@@ -102,7 +111,30 @@ class PostgresDatabase implements AppDatabase {
       );
       CREATE INDEX IF NOT EXISTS shipments_bill_no_idx ON shipments (bill_no);
       CREATE INDEX IF NOT EXISTS shipments_container_no_idx ON shipments (container_no);
-    `);
+
+      -- Older installations predate workspace isolation.  Existing rows are
+      -- intentionally assigned to the administrator's workspace so no data
+      -- disappears during the upgrade.  The statements are idempotent and
+      -- can safely run on every application start.
+      ALTER TABLE automation_settings ADD COLUMN IF NOT EXISTS workspace_id TEXT NOT NULL DEFAULT 'admin';
+      ALTER TABLE automation_tasks ADD COLUMN IF NOT EXISTS workspace_id TEXT NOT NULL DEFAULT 'admin';
+      ALTER TABLE automation_runs ADD COLUMN IF NOT EXISTS workspace_id TEXT NOT NULL DEFAULT 'admin';
+      ALTER TABLE shipments ADD COLUMN IF NOT EXISTS workspace_id TEXT NOT NULL DEFAULT 'admin';
+
+      ALTER TABLE automation_settings DROP CONSTRAINT IF EXISTS automation_settings_pkey;
+      ALTER TABLE automation_settings DROP CONSTRAINT IF EXISTS automation_settings_workspace_pkey;
+      ALTER TABLE automation_settings ADD CONSTRAINT automation_settings_workspace_pkey PRIMARY KEY (workspace_id, id);
+
+      ALTER TABLE shipments DROP CONSTRAINT IF EXISTS shipments_pkey;
+      ALTER TABLE shipments DROP CONSTRAINT IF EXISTS shipments_workspace_pkey;
+      ALTER TABLE shipments ADD CONSTRAINT shipments_workspace_pkey PRIMARY KEY (workspace_id, source_row);
+
+      CREATE INDEX IF NOT EXISTS automation_tasks_workspace_created_idx ON automation_tasks (workspace_id, created_at);
+      CREATE INDEX IF NOT EXISTS automation_runs_workspace_finished_idx ON automation_runs (workspace_id, finished_at DESC);
+      CREATE INDEX IF NOT EXISTS shipments_workspace_bill_no_idx ON shipments (workspace_id, bill_no);
+      CREATE INDEX IF NOT EXISTS shipments_workspace_container_no_idx ON shipments (workspace_id, container_no);
+      `);
+    });
   }
 
   async close() {
