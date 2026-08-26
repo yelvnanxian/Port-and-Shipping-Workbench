@@ -120,6 +120,12 @@ function normalizedReference(value: string) {
   return value.toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
+function sameLocation(left: string | null | undefined, right: string | null | undefined) {
+  const a = normalizedReference(left || '');
+  const b = normalizedReference(right || '');
+  return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
+}
+
 function attribute(tag: string, name: string) {
   const match = tag.match(new RegExp(`\\b${name}\\s*=\\s*(["'])(.*?)\\1`, 'i'));
   return match ? decodeHtml(match[2]).trim() : '';
@@ -300,7 +306,7 @@ function uniqueTrackingEvents(events: TrackingEventDetail[]) {
   return [...unique.values()].sort((left, right) => (left.timeText || '').localeCompare(right.timeText || ''));
 }
 
-function scheduleRoute(columns: HmmScheduleColumn[], events: TrackingEventDetail[]) {
+function scheduleRoute(columns: HmmScheduleColumn[], events: TrackingEventDetail[], destination = '') {
   const stops: TrackingRouteStop[] = [];
   for (const column of columns) {
     if (!column.location) continue;
@@ -309,14 +315,21 @@ function scheduleRoute(columns: HmmScheduleColumn[], events: TrackingEventDetail
       if (column.role === 'loading' || column.role === 'discharge') previous.role = column.role;
       continue;
     }
-    stops.push({ name: column.location, role: column.role });
+    const role = destination && sameLocation(column.location, destination) && (column.role === 'discharge' || column.role === 'delivery')
+      ? 'discharge'
+      : column.role === 'discharge' && destination
+        ? 'transshipment'
+        : column.role;
+    stops.push({ name: column.location, role });
   }
   if (stops.length < 2) {
     for (const event of events) {
       if (!event.location || stops.some((stop) => stop.name.toUpperCase() === event.location!.toUpperCase())) continue;
       stops.push({
         name: event.location,
-        role: event.eventType === 'arrival' || event.eventType === 'discharge' ? 'discharge' : stops.length ? 'transshipment' : 'loading',
+        role: destination && sameLocation(event.location, destination)
+          ? 'discharge'
+          : stops.length ? 'transshipment' : 'loading',
       });
     }
   }
@@ -457,9 +470,11 @@ export function parseHmmTrackingHtml(html: string, expectedBillNo: string, expec
   const rawEvents = shipmentEvents(html);
   const schedule = hmmSchedule(html);
   const events = uniqueTrackingEvents([...structuredHistoryEvents(rawEvents), ...scheduleEvents(schedule)]);
-  const arrivalEvent = rawEvents.find((event) => isArrivalAtPod(event.status));
-  const berthEvent = rawEvents.find((event) => /vessel berthing at pod/i.test(event.status));
-  const dischargeEvent = rawEvents.find((event) => isActualDischarge(event.status));
+  const destination = [...schedule].reverse().find((column) => (column.role === 'discharge' || column.role === 'delivery') && column.location)?.location || '';
+  const destinationRawEvents = rawEvents.filter((event) => !destination || sameLocation(event.location, destination));
+  const arrivalEvent = destinationRawEvents.find((event) => isArrivalAtPod(event.status));
+  const berthEvent = destinationRawEvents.find((event) => /vessel berthing at pod/i.test(event.status));
+  const dischargeEvent = destinationRawEvents.find((event) => isActualDischarge(event.status));
   const scheduleActualArrival = [...schedule].reverse().find((column) => column.arrival && column.arrivalActual && (column.role === 'discharge' || column.role === 'delivery'));
   const scheduleEstimatedArrival = [...schedule].reverse().find((column) => column.arrival && !column.arrivalActual && (column.role === 'discharge' || column.role === 'delivery'));
   const legacyDestinationArrival = destinationArrival(html);
@@ -473,7 +488,7 @@ export function parseHmmTrackingHtml(html: string, expectedBillNo: string, expec
   }
 
   const latest = rawEvents[0];
-  const routeStops = scheduleRoute(schedule, events);
+  const routeStops = scheduleRoute(schedule, events, destination);
   const routeText = routeStops.map((stop) => stop.name).join(' → ') || null;
   const facts = uniqueFacts([
     { label: '官网提单号', value: returnedBill },
@@ -488,6 +503,7 @@ export function parseHmmTrackingHtml(html: string, expectedBillNo: string, expec
     arrivalTime: null,
     arrivalTimeText,
     arrivalKind,
+    estimatedArrivalTimeText: estimatedArrivalText ? localTime(estimatedArrivalText) : null,
     arrived: Boolean(actualArrivalText || dischargeEvent),
     discharged: Boolean(dischargeEvent),
     dischargeTime: null,
@@ -502,6 +518,9 @@ export function parseHmmTrackingHtml(html: string, expectedBillNo: string, expec
       capturedAt: new Date().toISOString(),
       routeStops,
       events,
+      currentPort: [...events].reverse().find((event) => event.actual && event.location)?.location || null,
+      estimatedArrivalPort: destination || null,
+      estimatedArrivalTimeText: estimatedArrivalText ? localTime(estimatedArrivalText) : null,
       facts,
     },
     rawPageText: html,

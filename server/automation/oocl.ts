@@ -174,20 +174,31 @@ function ooclTimelineEvents(lines: string[]) {
   return [...unique.values()].sort((left, right) => (left.time ? new Date(left.time).getTime() : 0) - (right.time ? new Date(right.time).getTime() : 0));
 }
 
-function ooclRouteStops(events: TrackingEventDetail[]): TrackingRouteStop[] {
+function normalizedPort(value: string | null | undefined) {
+  return (value || '').toUpperCase().replace(/[^A-Z0-9\u4e00-\u9fff]/g, '');
+}
+
+function samePort(left: string | null | undefined, right: string | null | undefined) {
+  const a = normalizedPort(left);
+  const b = normalizedPort(right);
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+function ooclRouteStops(events: TrackingEventDetail[], destination = ''): TrackingRouteStop[] {
   const stops: TrackingRouteStop[] = [];
   for (const event of events) {
     const name = event.facility || event.location;
     if (!name) continue;
     const key = name.toUpperCase().replace(/[^A-Z0-9\u4e00-\u9fff]/g, '');
     if (stops.some((stop) => stop.name.toUpperCase().replace(/[^A-Z0-9\u4e00-\u9fff]/g, '') === key)) continue;
-    const role: TrackingRouteStop['role'] = event.eventType === 'discharge' || event.eventType === 'arrival'
+    const role: TrackingRouteStop['role'] = destination && samePort(name, destination)
       ? 'discharge'
       : event.eventType === 'pickup' || event.eventType === 'empty-return'
         ? 'delivery'
         : stops.length === 0
           ? 'origin'
-          : 'loading';
+          : 'transshipment';
     stops.push({ name, role });
   }
   return stops;
@@ -227,7 +238,12 @@ export function parseOoclControlTowerText(pageText: string, input: TrackingQuery
   const estimatedArrival = [...events].reverse().find((event) => event.eventType === 'arrival' && !event.actual);
   const discharge = [...events].reverse().find((event) => event.eventType === 'discharge' && event.actual);
   if (!arrival && !estimatedArrival && !discharge) throw trackingError('解析失败', '东方海外结果页没有可核验的实际到港、预计到达或卸货事件');
-  const routeStops = ooclRouteStops(events);
+  // Control Tower 未单独返回 POD 字段时，优先使用预计到达港，其次使用
+  // 最新实际到港/卸货港作为线路终点；中间事件只标为中转港。
+  const estimatedArrivalPort = estimatedArrival?.location || arrival?.location || discharge?.location || null;
+  const routeStops = ooclRouteStops(events, estimatedArrivalPort || '');
+  const currentPort = [...events].filter((event) => event.actual && event.location).at(-1)?.location || null;
+  const estimatedArrivalTimeText = estimatedArrival?.timeText || null;
   const vesselVoyage = lines.find((line) => /^[A-Z][A-Z0-9 .'-]{2,}\s*\/\s*[A-Z0-9-]{2,}$/i.test(line)) || '';
   const facts = [
     ['提单号', expectedBill],
@@ -246,6 +262,7 @@ export function parseOoclControlTowerText(pageText: string, input: TrackingQuery
     arrivalTime: (arrival || estimatedArrival)?.time ? new Date((arrival || estimatedArrival)!.time!) : null,
     arrivalTimeText: arrival?.timeText || estimatedArrival?.timeText || null,
     arrivalKind: arrival ? 'ATA' : estimatedArrival ? 'ETA' : null,
+    estimatedArrivalTimeText,
     arrived: Boolean(arrival || discharge),
     discharged: Boolean(discharge),
     dischargeTime: discharge?.time ? new Date(discharge.time) : null,
@@ -260,6 +277,9 @@ export function parseOoclControlTowerText(pageText: string, input: TrackingQuery
       capturedAt: new Date().toISOString(),
       routeStops,
       events,
+      currentPort,
+      estimatedArrivalPort,
+      estimatedArrivalTimeText,
       facts,
     },
     rawPageText: compactText,

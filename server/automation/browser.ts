@@ -523,7 +523,17 @@ function parseCoscoTrackingDetail(lines: string[], input: TrackingQuery): Tracki
   // 将这些事件地点补入线路节点，避免多港、多次卸船时只显示一个目的港。
   for (const event of events) {
     if (!event.location || routeStops.some((stop) => coscoSameLocation(stop.name, event.location!))) continue;
-    routeStops.push({ name: event.location, role: coscoRoleForEvent(event.eventType) });
+    const destination = routeStops.find((stop) => stop.role === 'discharge')?.name || '';
+    routeStops.push({
+      name: event.location,
+      // 只有能和官方目的港节点对应时才标记为 discharge；其余事件地点
+      // 可能是中转港或场站，保守保留为 transshipment，避免路线角色误判。
+      role: destination && coscoSameLocation(event.location, destination)
+        ? 'discharge'
+        : coscoRoleForEvent(event.eventType) === 'discharge'
+          ? 'transshipment'
+          : coscoRoleForEvent(event.eventType),
+    });
   }
 
   return {
@@ -637,10 +647,28 @@ export function parseRenderedTrackingText(text: string, input: TrackingQuery): T
     ? coscoDestinationDischargeEvent?.timeText || findLabeledDateText(lines, dischargeLabel, /estimated|expected|planned|预计|计划/i)
     : null;
   const resolvedDischargeTimeText = dischargeTimeText;
+  const currentPort = coscoDetail
+    ? [...coscoDetail.events].reverse().find((event) => event.actual && event.location)?.location || null
+    : null;
+  const estimatedArrivalPort = coscoDetail?.routeStops.find((stop) => stop.role === 'discharge')?.name || null;
+  const estimatedArrivalEvent = coscoDetail?.events
+    .filter((event) => event.eventType === 'arrival' && !event.actual && (!estimatedArrivalPort || sameCoscoLocation(event.location, estimatedArrivalPort)))
+    .at(-1);
+  const estimatedArrivalTimeText = coscoDetail
+    ? estimatedArrivalEvent?.timeText
+      ? `${estimatedArrivalEvent.timeText}（官网当地时间）`
+      : estimatedArrival ? `${findLabeledDateText(lines, /\bETA\b|estimated(?: time of)? arrival|expected arrival|预计到港|预计抵达/i, undefined, true) || ''}（官网当地时间）` : null
+    : null;
+  if (coscoDetail) {
+    coscoDetail.currentPort = currentPort;
+    coscoDetail.estimatedArrivalPort = estimatedArrivalPort;
+    coscoDetail.estimatedArrivalTimeText = estimatedArrivalTimeText;
+  }
   return {
     arrivalTime: arrivalTimeText ? null : arrivalTime,
     arrivalTimeText: arrivalTimeText ? `${arrivalTimeText}（官网当地时间）` : undefined,
     arrivalKind,
+    estimatedArrivalTimeText,
     arrived: Boolean(actualArrival || discharge || coscoCompletion),
     discharged: Boolean(discharge || coscoCompletion),
     dischargeTime: resolvedDischargeTimeText ? null : discharge,

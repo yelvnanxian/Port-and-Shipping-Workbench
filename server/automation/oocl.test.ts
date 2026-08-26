@@ -161,6 +161,9 @@ United States: Accepted
   assert.equal(result.trackingDetail?.events.at(-1)?.cargoState, 'laden');
   assert.equal(result.trackingDetail?.events.at(-1)?.transportMode, 'ocean');
   assert.equal(result.trackingDetail?.routeStops.length, 3);
+  assert.equal(result.trackingDetail?.currentPort, 'Los Angeles');
+  assert.equal(result.trackingDetail?.estimatedArrivalPort, 'Los Angeles');
+  assert.equal(result.trackingDetail?.estimatedArrivalTimeText, null);
   assert.match(result.routeText || '', /Ningbo Meishan-Island/);
   assert.match(result.routeText || '', /Everport Terminal Services/);
 });
@@ -240,4 +243,7 @@ Vessel
   assert.equal(result.arrived, false);
   assert.equal(result.arrivalTimeText, '27 Aug 2026 10:00 PDT（官网当地时间）');
   assert.equal(result.trackingDetail?.events.at(-1)?.actual, false);
+  assert.equal(result.trackingDetail?.currentPort, null);
+  assert.equal(result.trackingDetail?.estimatedArrivalPort, 'Los Angeles');
+  assert.equal(result.trackingDetail?.estimatedArrivalTimeText, '27 Aug 2026 10:00 PDT（官网当地时间）');
 });

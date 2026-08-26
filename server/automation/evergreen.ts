@@ -101,11 +101,14 @@ function evergreenEvents(rows: ReturnType<typeof eventRows>) {
   });
 }
 
-function sameLocation(left: string, right: string) {
-  return left.toUpperCase().replace(/[^A-Z0-9]/g, '') === right.toUpperCase().replace(/[^A-Z0-9]/g, '');
+function sameLocation(left: string | null | undefined, right: string | null | undefined) {
+  const a = (left || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const b = (right || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
 }
 
-function evergreenRouteStops(events: TrackingEventDetail[]): TrackingRouteStop[] {
+function evergreenRouteStops(events: TrackingEventDetail[], destination = ''): TrackingRouteStop[] {
   const segments: Array<{ name: string; events: TrackingEventDetail[] }> = [];
   for (const event of events) {
     const location = event.location?.trim();
@@ -115,13 +118,13 @@ function evergreenRouteStops(events: TrackingEventDetail[]): TrackingRouteStop[]
     else segments.push({ name: location, events: [event] });
   }
   return segments.map((segment, index) => {
-    const role: TrackingRouteStop['role'] = index === 0
+    const role: TrackingRouteStop['role'] = destination && sameLocation(segment.name, destination)
+      ? 'discharge'
+      : index === 0
       ? 'origin'
-      : segment.events.some((event) => event.eventType === 'discharge' || event.eventType === 'arrival')
-        ? 'discharge'
-        : segment.events.some((event) => ['pickup', 'delivery', 'empty-return'].includes(event.eventType)) || index === segments.length - 1
-          ? 'delivery'
-          : 'transshipment';
+      : segment.events.some((event) => ['pickup', 'delivery', 'empty-return'].includes(event.eventType)) || index === segments.length - 1
+        ? 'delivery'
+        : 'transshipment';
     return { name: segment.name, role };
   });
 }
@@ -198,12 +201,16 @@ export function parseEvergreenTrackingHtml(
     }
     : null;
   const events = estimatedArrival ? [...parsedEvents, estimatedArrival] : parsedEvents;
-  const routeStops = evergreenRouteStops(events);
-  const discharge = events.find((event) => event.eventType === 'discharge' && event.actual);
-  const arrival = events.find((event) => event.eventType === 'arrival' && event.actual);
+  const isDestinationEvent = (event: TrackingEventDetail) => !destination || sameLocation(event.location, destination);
+  const routeStops = evergreenRouteStops(events, destination);
+  const discharge = events.find((event) => event.eventType === 'discharge' && event.actual && isDestinationEvent(event));
+  const arrival = events.find((event) => event.eventType === 'arrival' && event.actual && isDestinationEvent(event));
+  const destinationEvents = events.filter(isDestinationEvent);
   const dischargeDate = discharge?.timeText || '';
   const current = rows.at(-1);
   const containerNo = expected || returnedContainers[0] || '';
+  const currentPort = current?.location || [...events].reverse().find((event) => event.actual && event.location)?.location || null;
+  const estimatedArrivalTimeText = etaText || null;
   const trackingDetail: TrackingDetail = {
     carrierCode: 'EVERGREEN',
     queryType: context.queryType,
@@ -211,6 +218,9 @@ export function parseEvergreenTrackingHtml(
     capturedAt: new Date().toISOString(),
     routeStops,
     events,
+    currentPort,
+    estimatedArrivalPort: destination || null,
+    estimatedArrivalTimeText,
     facts: evergreenFacts(billHtml, bill, containerNo, etaText),
   };
   const routeText = routeStops.map((stop) => stop.name).join(' → ');
@@ -221,7 +231,8 @@ export function parseEvergreenTrackingHtml(
     // arrivalKind 区分，前端和备注仍会明确显示这是 ETA 而不是 ATA。
     arrivalTimeText: arrival?.timeText || etaText || null,
     arrivalKind: arrival ? 'ATA' : (etaText ? 'ETA' : null),
-    arrived: Boolean(arrival || discharge || events.some((event) => ['pickup', 'delivery', 'empty-return'].includes(event.eventType))),
+    estimatedArrivalTimeText,
+    arrived: Boolean(arrival || discharge || destinationEvents.some((event) => ['pickup', 'delivery', 'empty-return'].includes(event.eventType))),
     discharged: Boolean(discharge),
     dischargeTime: null,
     dischargeTimeText: dischargeDate || null,

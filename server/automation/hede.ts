@@ -112,7 +112,7 @@ function namedPort(values: string[]) {
   return values.length > 1 ? `${values[0]} (${values[1]})` : values[0];
 }
 
-function routeFromDetail(detailHtml: string, events: TrackingEventDetail[]) {
+function routeFromDetail(detailHtml: string, events: TrackingEventDetail[], destination = '') {
   const loading = namedPort(detailValues(detailHtml, '装货港')) || namedPort(detailValues(detailHtml, '起运港'));
   const discharge = namedPort(detailValues(detailHtml, '卸货港')) || namedPort(detailValues(detailHtml, '目的港'));
   const stops: TrackingRouteStop[] = [];
@@ -123,7 +123,7 @@ function routeFromDetail(detailHtml: string, events: TrackingEventDetail[]) {
     if (discharge && sameLocation(discharge, location)) continue;
     stops.push({
       name: location,
-      role: event.eventType === 'arrival' || event.eventType === 'discharge' ? 'discharge' : 'transshipment',
+      role: destination && sameLocation(location, destination) ? 'discharge' : 'transshipment',
     });
   }
   if (discharge && !stops.some((stop) => sameLocation(stop.name, discharge))) stops.push({ name: discharge, role: 'discharge' });
@@ -284,9 +284,13 @@ export function parseHedeTrackingHtml(
     ...parsedDynamic.events,
     ...summaryEvents(row, detailHtml),
   ]);
-  const discharge = [...events].reverse().find((event) => event.eventType === 'discharge' && event.actual);
-  const subsequent = [...events].reverse().find((event) => event.actual && (event.eventType === 'pickup' || event.eventType === 'empty-return') && event.cargoState !== 'empty');
-  const stops = routeFromDetail(detailHtml, events);
+  const destination = namedPort(detailValues(detailHtml, '卸货港')) || namedPort(detailValues(detailHtml, '目的港'));
+  const isDestinationEvent = (event: TrackingEventDetail) => !destination || (event.location ? sameLocation(event.location, destination) : ['discharge', 'pickup'].includes(event.eventType));
+  const destinationEvents = events.filter(isDestinationEvent);
+  const arrival = [...destinationEvents].reverse().find((event) => event.eventType === 'arrival' && event.actual);
+  const discharge = [...destinationEvents].reverse().find((event) => event.eventType === 'discharge' && event.actual);
+  const subsequent = [...destinationEvents].reverse().find((event) => event.actual && (event.eventType === 'pickup' || event.eventType === 'empty-return') && event.cargoState !== 'empty');
+  const stops = routeFromDetail(detailHtml, events, destination);
   const routeText = stops.map((stop) => stop.name).join(' → ') || null;
   const queryValue = queryType === 'container' ? row.containerNo : row.billNo;
   const rawPageText = [
@@ -298,8 +302,9 @@ export function parseHedeTrackingHtml(
 
   return {
     arrivalTime: null,
-    arrivalTimeText: localTime(row.eta),
-    arrivalKind: row.eta ? 'ETA' : null,
+    arrivalTimeText: arrival?.timeText || localTime(row.eta),
+    arrivalKind: arrival ? 'ATA' : row.eta ? 'ETA' : null,
+    estimatedArrivalTimeText: row.eta ? localTime(row.eta) : null,
     arrived: Boolean(discharge || subsequent),
     discharged: Boolean(discharge || subsequent),
     dischargeTime: null,
@@ -314,6 +319,9 @@ export function parseHedeTrackingHtml(
       capturedAt: new Date().toISOString(),
       routeStops: stops,
       events,
+      currentPort: [...events].reverse().find((event) => event.actual && event.location)?.location || null,
+      estimatedArrivalPort: destination || null,
+      estimatedArrivalTimeText: row.eta ? localTime(row.eta) : null,
       facts: detailFacts(row, detailHtml, parsedDynamic.totalRows),
     },
     rawPageText,

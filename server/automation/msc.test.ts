@@ -49,12 +49,34 @@ test('地中海官方 JSON 解析完整多港线路并保留官网日期原文',
   assert.equal(result.dischargeTimeText, '2026-07-29（官网仅提供日期，未标注具体时刻）');
   assert.equal(result.arrived, true);
   assert.equal(result.discharged, true);
+  assert.equal(result.trackingDetail?.currentPort, 'NEW YORK, US');
+  assert.equal(result.trackingDetail?.estimatedArrivalPort, 'NEW YORK, US');
+  assert.equal(result.trackingDetail?.estimatedArrivalTimeText, null);
   assert.equal(result.routeText, 'PHNOM PENH, KH → VUNG TAU, VN → NEW YORK, US');
   assert.equal(result.trackingDetail?.events.filter((event) => event.eventType === 'discharge').length, 2);
   assert.equal(result.trackingDetail?.events.find((event) => event.label === 'Full Transshipment Discharged')?.cargoState, 'laden');
   assert.equal(result.trackingDetail?.events.at(-1)?.cargoState, 'empty');
   assert.equal(result.trackingDetail?.facts?.some((fact) => /IMO 9198587/.test(fact.value)), true);
   assert.match(result.rawPageText || '', /TrackingInfo 官方响应/);
+});
+
+test('地中海中转港卸船不会被当成最终目的港卸船', () => {
+  const transshipmentOnly = structuredClone(payload);
+  const container = transshipmentOnly.Data.BillOfLadings[0].ContainersInfo[0];
+  container.Delivered = false;
+  container.LatestMove = 'VUNG TAU, VN';
+  transshipmentOnly.Data.BillOfLadings[0].Delivered = false;
+  transshipmentOnly.Data.BillOfLadings[0].GeneralTrackingInfo.FinalPodEtaDate = '30/08/2026';
+  container.Events = container.Events.filter((event) => event.Location !== 'NEW YORK, US');
+
+  const result = parseMscTrackingPayload(transshipmentOnly, query);
+  assert.equal(result.arrivalKind, 'ETA');
+  assert.equal(result.arrivalTimeText, '2026-08-30（官网仅提供日期，未标注具体时刻）');
+  assert.equal(result.dischargeTimeText, null);
+  assert.equal(result.arrived, false);
+  assert.equal(result.discharged, false);
+  assert.equal(result.trackingDetail?.estimatedArrivalPort, 'NEW YORK, US');
+  assert.equal(result.trackingDetail?.currentPort, 'VUNG TAU, VN');
 });
 
 test('地中海提单结果未包含输入柜号时拒绝误用其他柜', () => {

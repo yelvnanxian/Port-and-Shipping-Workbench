@@ -8,6 +8,67 @@ function normalizedReference(value: string) {
   return value.toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
+function normalizedPort(value: string | null | undefined) {
+  return (value || '').toUpperCase().replace(/[^A-Z0-9\u4e00-\u9fff]/g, '');
+}
+
+/**
+ * 以星有时把港口写成“城市 + 国家”，有时只返回城市或港口代码。
+ * 只在两边有足够的港口文本时做包含匹配，避免把中转港事件误判成最终 POD。
+ */
+function samePort(left: string | null | undefined, right: string | null | undefined) {
+  const a = normalizedPort(left);
+  const b = normalizedPort(right);
+  if (!a || !b) return false;
+  if (a === b || a.includes(b) || b.includes(a)) return true;
+  const aHead = normalizedPort((left || '').split(',')[0]);
+  const bHead = normalizedPort((right || '').split(',')[0]);
+  return Boolean(aHead && bHead && (aHead === bHead || aHead.includes(bHead) || bHead.includes(aHead)));
+}
+
+function latestLocatedEvent(events: TrackingEventDetail[]) {
+  const located = events.filter((event) => event.actual && event.location);
+  const withTime = located.filter((event) => event.time).sort((left, right) => new Date(right.time!).getTime() - new Date(left.time!).getTime());
+  return withTime[0] || located.at(-1) || null;
+}
+
+function rawEventTime(event: TrackingEventDetail | null) {
+  return event?.timeText?.replace(/（官网当地时间）$/, '').trim() || '';
+}
+
+function eventAtPort(event: TrackingEventDetail, destinationPort: string) {
+  if (!destinationPort) return true;
+  if (event.location && samePort(event.location, destinationPort)) return true;
+  return /(?:port of discharge|destination|pod|final port)/i.test(event.label);
+}
+
+function routeStopsFromEvents(
+  loading: string,
+  discharge: string,
+  events: TrackingEventDetail[],
+  routeLegs: JsonObject[] = [],
+) {
+  const stops: TrackingRouteStop[] = [];
+  const add = (name: string, role: TrackingRouteStop['role']) => {
+    const trimmed = name.trim();
+    if (!trimmed || stops.some((stop) => samePort(stop.name, trimmed))) return;
+    stops.push({ name: trimmed, role });
+  };
+  add(loading, 'loading');
+  for (const leg of routeLegs) {
+    const from = [textValue(leg.portNameFrom), textValue(leg.countryNameFrom)].filter(Boolean).join(', ');
+    const to = [textValue(leg.portNameTo), textValue(leg.countryNameTo)].filter(Boolean).join(', ');
+    if (from && !samePort(from, loading) && !samePort(from, discharge)) add(from, 'transshipment');
+    if (to && !samePort(to, loading) && !samePort(to, discharge)) add(to, 'transshipment');
+  }
+  for (const event of events) {
+    if (!event.location || samePort(event.location, loading) || samePort(event.location, discharge)) continue;
+    if (['arrival', 'departure', 'discharge', 'transshipment'].includes(event.eventType)) add(event.location, 'transshipment');
+  }
+  add(discharge, 'discharge');
+  return stops;
+}
+
 function linesOf(value: string) {
   return value
     .replace(/\u00a0/g, ' ')
@@ -82,16 +143,20 @@ function zimLocationNear(lines: string[], index: number) {
 function zimEvents(lines: string[]) {
   const events: TrackingEventDetail[] = [];
   for (let index = 0; index < lines.length; index += 1) {
+    // 路线摘要中的 Port of Discharge/Loading 不是柜动态，不能因为它带有
+    // “discharge” 字样就被当成实际卸船事件。
+    if (/^Port of (?:Loading|Discharge)\b/i.test(lines[index])) continue;
     const definition = zimEventDefinition(lines[index]);
     if (!definition) continue;
     const timeText = zimDateNear(lines, index);
     if (!timeText) continue;
     const label = lines[index];
+    const parsedTime = new Date(timeText).getTime();
     events.push({
       label,
       eventType: definition.eventType,
       location: zimLocationNear(lines, index),
-      time: null,
+      time: Number.isNaN(parsedTime) ? null : new Date(parsedTime).toISOString(),
       timeText: localTime(timeText),
       actual: true,
       cargoState: definition.cargoState,
@@ -107,7 +172,7 @@ function zimEvents(lines: string[]) {
   return [...unique.values()].sort((left, right) => (left.timeText || '').localeCompare(right.timeText || ''));
 }
 
-function zimRoute(lines: string[], events: TrackingEventDetail[]) {
+function zimRouteValues(lines: string[]) {
   const routeValue = (name: 'Loading' | 'Discharge', abbreviation: 'POL' | 'POD') => {
     const withAbbreviation = new RegExp(`^Port of ${name}\\s*\\(${abbreviation}\\)\\s*[:：]?\\s*(.+)$`, 'i');
     const plain = new RegExp(`^Port of ${name}\\s*[:：]?\\s+(.+)$`, 'i');
@@ -119,18 +184,12 @@ function zimRoute(lines: string[], events: TrackingEventDetail[]) {
     }
     return '';
   };
-  const loading = routeValue('Loading', 'POL');
-  const discharge = routeValue('Discharge', 'POD');
-  const stops: TrackingRouteStop[] = [];
-  if (loading) stops.push({ name: loading, role: 'loading' });
-  if (discharge && discharge !== loading) stops.push({ name: discharge, role: 'discharge' });
-  if (stops.length < 2) {
-    for (const event of events) {
-      if (!event.location || stops.some((stop) => stop.name === event.location)) continue;
-      stops.push({ name: event.location, role: event.eventType === 'arrival' || event.eventType === 'discharge' ? 'discharge' : 'loading' });
-    }
-  }
-  return stops;
+  return { loading: routeValue('Loading', 'POL'), discharge: routeValue('Discharge', 'POD') };
+}
+
+function zimRoute(lines: string[], events: TrackingEventDetail[]) {
+  const { loading, discharge } = zimRouteValues(lines);
+  return routeStopsFromEvents(loading, discharge, events);
 }
 
 type JsonObject = Record<string, unknown>;
@@ -194,7 +253,10 @@ function parseZimCompleteResult(payload: JsonObject, input: TrackingQuery): Trac
     const description = textValue(activity.activityDesc) || textValue(activity.activityCode) || '未知动态';
     const definition = activityDefinition(textValue(activity.activityCode), description);
     const rawTime = textValue(activity.activityDateTz) || textValue(activity.activityDate);
-    const locationParts = [textValue(activity.placeFromDesc), textValue(activity.countryFromName)].filter(Boolean);
+    const locationParts = [
+      textValue(activity.placeFromDesc) || textValue(activity.placeFromName) || textValue(activity.locationDesc) || textValue(activity.placeDesc),
+      textValue(activity.countryFromName) || textValue(activity.countryName),
+    ].filter(Boolean);
     return {
       label: description,
       eventType: definition.eventType,
@@ -207,25 +269,35 @@ function parseZimCompleteResult(payload: JsonObject, input: TrackingQuery): Trac
       sourceLine: description,
     };
   }).sort((left, right) => (left.time ? new Date(left.time).getTime() : 0) - (right.time ? new Date(right.time).getTime() : 0));
-  const routeLeg = objectArray(isObject(consignment.blRouteLeg) ? consignment.blRouteLeg.vpBrl : [])[0];
+  const routeLegs = objectArray(isObject(consignment.blRouteLeg) ? consignment.blRouteLeg.vpBrl : []);
+  const firstRouteLeg = routeLegs[0];
+  const lastRouteLeg = routeLegs.at(-1);
   const loading = [textValue(details.consPolDesc), textValue(details.consPolCountryName)].filter(Boolean).join(', ')
-    || (routeLeg ? [textValue(routeLeg.portNameFrom), textValue(routeLeg.countryNameFrom)].filter(Boolean).join(', ') : '');
+    || (firstRouteLeg ? [textValue(firstRouteLeg.portNameFrom), textValue(firstRouteLeg.countryNameFrom)].filter(Boolean).join(', ') : '');
   const dischargePort = [textValue(details.consPodDesc), textValue(details.consPodCountryName)].filter(Boolean).join(', ')
-    || (routeLeg ? [textValue(routeLeg.portNameTo), textValue(routeLeg.countryNameTo)].filter(Boolean).join(', ') : '');
-  const routeStops: TrackingRouteStop[] = [];
-  if (loading) routeStops.push({ name: loading, role: 'loading' });
-  if (dischargePort && dischargePort !== loading) routeStops.push({ name: dischargePort, role: 'discharge' });
-  const dischargeEvent = [...events].reverse().find((event) => event.eventType === 'discharge' && event.actual);
-  const arrivalEvent = [...events].reverse().find((event) => event.eventType === 'arrival' && event.actual);
-  const arrivalIndicator = routeLeg ? textValue(routeLeg.arrivalInd).toUpperCase() : '';
-  const routeArrival = routeLeg ? textValue(routeLeg.arrivalDateDt) : '';
+    || (lastRouteLeg ? [textValue(lastRouteLeg.portNameTo), textValue(lastRouteLeg.countryNameTo)].filter(Boolean).join(', ') : '');
+  // vpBrl 可能包含“起运港→中转港”和“中转港→目的港”两段，不能固定取第 1 段作为最终港口。
+  const destinationRouteLeg = [...routeLegs].reverse().find((leg) => {
+    const legDestination = [textValue(leg.portNameTo), textValue(leg.countryNameTo)].filter(Boolean).join(', ');
+    return Boolean(dischargePort && samePort(legDestination, dischargePort));
+  }) || routeLegs.at(-1);
+  const destinationDischargeEvent = [...events].reverse().find((event) => event.eventType === 'discharge' && event.actual && eventAtPort(event, dischargePort));
+  const destinationArrivalEvent = [...events].reverse().find((event) => event.eventType === 'arrival' && event.actual && eventAtPort(event, dischargePort));
+  const routeArrival = destinationRouteLeg ? textValue(destinationRouteLeg.arrivalDateDt) : '';
   const finalEta = isObject(consignment.finalEta) ? textValue(consignment.finalEta.etaPodDate) : '';
-  const arrivalText = arrivalEvent?.timeText || (routeArrival ? `${routeArrival}（官网返回时区）` : finalEta ? `${finalEta}（官网返回时区）` : null);
-  const arrivalKind = arrivalEvent || arrivalIndicator === 'ATA' ? 'ATA' : arrivalText ? 'ETA' : null;
-  if (!arrivalText && !dischargeEvent) return null;
-  const vesselVoyage = routeLeg
-    ? `${textValue(routeLeg.vesselName)} / ${[textValue(routeLeg.voyage), textValue(routeLeg.leg)].filter(Boolean).join('/')}`.replace(/\s+\/\s*$/, '')
+  const estimatedArrivalText = finalEta || routeArrival;
+  const arrivalIndicator = destinationRouteLeg ? textValue(destinationRouteLeg.arrivalInd).toUpperCase() : '';
+  const routeArrivalIsActual = /^(?:ATA|ACTUAL|A)$/i.test(arrivalIndicator);
+  const arrivalText = destinationArrivalEvent?.timeText
+    || (routeArrivalIsActual && routeArrival ? `${routeArrival}（官网返回时区）` : estimatedArrivalText ? `${estimatedArrivalText}（官网返回时区）` : null);
+  const arrivalKind = destinationArrivalEvent || routeArrivalIsActual ? 'ATA' : arrivalText ? 'ETA' : null;
+  if (!arrivalText && !destinationDischargeEvent) return null;
+  const vesselVoyage = destinationRouteLeg
+    ? `${textValue(destinationRouteLeg.vesselName)} / ${[textValue(destinationRouteLeg.voyage), textValue(destinationRouteLeg.leg)].filter(Boolean).join('/')}`.replace(/\s+\/\s*$/, '')
     : '';
+  const routeStops = routeStopsFromEvents(loading, dischargePort, events, routeLegs);
+  const currentPort = latestLocatedEvent(events)?.location || null;
+  const estimatedArrivalTimeText = estimatedArrivalText ? `${estimatedArrivalText}（官网返回时区）` : null;
   const facts = [
     ['提单号', textValue(consignment.referenceNo)],
     ['柜号', container ? `${textValue(container.unitPrefix)}${textValue(container.unitNo)}`.trim() : input.containerNo],
@@ -234,18 +306,19 @@ function parseZimCompleteResult(payload: JsonObject, input: TrackingQuery): Trac
     ['起运港代码', textValue(details.consPol)],
     ['目的港代码', textValue(details.consPod)],
     ['Original ETA', isObject(consignment.agreedEta) ? textValue(consignment.agreedEta.etaDate) : ''],
-    ['Current ETA', finalEta || routeArrival],
+    ['Current ETA', estimatedArrivalText],
     ['周期状态', textValue(consignment.consCycleStatusDesc)],
   ].flatMap(([label, value]) => value ? [{ label, value }] : []);
   return {
     arrivalTime: null,
     arrivalTimeText: arrivalText,
     arrivalKind,
-    arrived: Boolean(arrivalEvent || arrivalIndicator === 'ATA' || dischargeEvent),
-    discharged: Boolean(dischargeEvent),
+    estimatedArrivalTimeText,
+    arrived: Boolean(destinationArrivalEvent || routeArrivalIsActual || destinationDischargeEvent),
+    discharged: Boolean(destinationDischargeEvent),
     dischargeTime: null,
-    dischargeTimeText: dischargeEvent?.timeText || null,
-    rawSummary: `以星官方完整结果接口解析成功；已核验 ${events.length} 条柜动态${dischargeEvent ? '；已发现实际卸船事件' : '；未发现实际卸船事件'}`,
+    dischargeTimeText: destinationDischargeEvent?.timeText || null,
+    rawSummary: `以星官方完整结果接口解析成功；已核验 ${events.length} 条柜动态；最终目的港=${dischargePort || '未提供'}${destinationDischargeEvent ? '；已发现最终目的港实际卸船事件' : '；未发现最终目的港实际卸船事件'}`,
     sourceUrl: ZIM_SOURCE,
     routeText: routeStops.map((stop) => stop.name).join(' → ') || null,
     trackingDetail: {
@@ -255,6 +328,9 @@ function parseZimCompleteResult(payload: JsonObject, input: TrackingQuery): Trac
       capturedAt: new Date().toISOString(),
       routeStops,
       events,
+      currentPort,
+      estimatedArrivalPort: dischargePort || null,
+      estimatedArrivalTimeText,
       facts,
     },
     rawPageText: JSON.stringify(payload),
@@ -288,22 +364,28 @@ export function parseZimTrackingText(text: string, input: TrackingQuery): Tracki
     if (parsed) return { ...parsed, rawPageText: text };
   }
 
-  const actualArrival = eventDate(
+  const events = zimEvents(lines);
+  const { loading, discharge: destinationPort } = zimRouteValues(lines);
+  const destinationEvents = destinationPort ? events.filter((event) => eventAtPort(event, destinationPort)) : events;
+  const destinationArrivalEvent = [...destinationEvents].reverse().find((event) => event.eventType === 'arrival' && event.actual) || null;
+  const destinationDischargeEvent = [...destinationEvents].reverse().find((event) => event.eventType === 'discharge' && event.actual) || null;
+  const actualArrival = rawEventTime(destinationArrivalEvent) || (destinationPort ? '' : eventDate(
     lines,
     /actual(?: time of)? arrival|arrived at|\bATA\b|vessel arrival at (?:pod|port of discharge)/i,
     /estimated|expected|original|current|planned/i,
-  );
-  const estimatedArrival = eventDate(lines, /current ETA|estimated time of arrival|\bETA\b|arrival\b/i, /actual|arrived|discharged/i)
+  ));
+  const estimatedArrival = eventDate(lines, /current ETA|current estimated arrival|estimated time of arrival|\bETA\b/i, /actual|arrived|discharged/i)
     || eventDate(lines, /original ETA/i);
-  const discharge = eventDate(lines, /(?:discharged|discharge completed|discharged from vessel|unloaded from vessel|container discharge)/i, /estimated|expected|planned/i);
+  const discharge = rawEventTime(destinationDischargeEvent) || (destinationPort ? '' : eventDate(lines, /(?:discharged|discharge completed|discharged from vessel|unloaded from vessel|container discharge)/i, /estimated|expected|planned|^Port of Discharge/i));
   const arrivalText = actualArrival || estimatedArrival;
   if (!arrivalText && !discharge) {
     throw trackingError('解析失败', '以星官网已返回订单结果，但没有可验证的 ATA、ETA 或实际卸船时间');
   }
 
-  const events = zimEvents(lines);
-  const routeStops = zimRoute(lines, events);
+  const routeStops = routeStopsFromEvents(loading, destinationPort, events);
   const routeText = routeStops.map((stop) => stop.name).join(' → ') || null;
+  const currentPort = latestLocatedEvent(events)?.location || null;
+  const estimatedArrivalTimeText = estimatedArrival ? localTime(estimatedArrival) : null;
   const facts = [
     ['提单号', input.originalBillNo],
     ['柜号', input.containerNo],
@@ -318,6 +400,7 @@ export function parseZimTrackingText(text: string, input: TrackingQuery): Tracki
     arrivalTime: null,
     arrivalTimeText: localTime(arrivalText),
     arrivalKind: actualArrival ? 'ATA' : estimatedArrival ? 'ETA' : null,
+    estimatedArrivalTimeText,
     arrived: Boolean(actualArrival || discharge),
     discharged: Boolean(discharge),
     dischargeTime: null,
@@ -332,6 +415,9 @@ export function parseZimTrackingText(text: string, input: TrackingQuery): Tracki
       capturedAt: new Date().toISOString(),
       routeStops,
       events,
+      currentPort,
+      estimatedArrivalPort: destinationPort || null,
+      estimatedArrivalTimeText,
       facts,
     },
     rawPageText: compactText,

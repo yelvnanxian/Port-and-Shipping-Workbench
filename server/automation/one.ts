@@ -30,6 +30,20 @@ function sameReference(left: string, right: string) {
     === right.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
+function normalizedLocation(value: string) {
+  return value.toUpperCase().replace(/[^A-Z0-9\u4e00-\u9fff]/g, '');
+}
+
+function sameLocation(left: string | null | undefined, right: string | null | undefined) {
+  const a = normalizedLocation(left || '');
+  const b = normalizedLocation(right || '');
+  if (!a || !b) return false;
+  if (a === b || a.includes(b) || b.includes(a)) return true;
+  const aHead = normalizedLocation((left || '').split(',')[0]);
+  const bHead = normalizedLocation((right || '').split(',')[0]);
+  return Boolean(aHead && bHead && (aHead === bHead || aHead.includes(bHead) || bHead.includes(aHead)));
+}
+
 function eventName(event: JsonObject) {
   const name = text(event.eventName) || text(event.name) || text(event.description);
   if (name) return name;
@@ -178,6 +192,7 @@ function oneStructuredEvents(events: JsonObject[]) {
 }
 
 function oneRouteStops(events: TrackingEventDetail[], row: JsonObject): TrackingRouteStop[] {
+  const destination = text(object(row.pod).locationName);
   const locations: string[] = [];
   const add = (value: string) => {
     const normalized = value.toUpperCase().replace(/[^A-Z0-9\u4e00-\u9fff]/g, '');
@@ -189,7 +204,9 @@ function oneRouteStops(events: TrackingEventDetail[], row: JsonObject): Tracking
   return locations.map((name, index) => {
     const locationEvents = events.filter((event) => event.location === name);
     let role: TrackingRouteStop['role'] = index === 0 ? 'origin' : index === locations.length - 1 ? 'delivery' : 'transshipment';
-    if (locationEvents.some((event) => event.eventType === 'discharge' || event.eventType === 'arrival')) role = 'discharge';
+    // 只有 POD 才能标为目的港；中转港的 arrival/discharge 仍保留在事件中，
+    // 但线路节点必须显示为 transshipment，避免详情页产生映射歧义。
+    if (destination && sameLocation(name, destination)) role = 'discharge';
     return { name, role };
   });
 }
@@ -266,12 +283,14 @@ export function parseOneTrackingResponse(
     throw trackingError('解析失败', `海洋网联已找到订单 ${returnedBill || expectedBillNo}，但完整事件接口没有返回可核验的运行节点`);
   }
   const events = fullEvents.length ? fullEvents : Array.isArray(row.cargoEvents) ? row.cargoEvents.map(object) : [];
-  const destinationEvents = events.filter((event) => isDestinationArrival(eventName(event)) && eventDate(event));
+  const destination = text(object(row.pod).locationName);
+  const isDestinationEvent = (event: JsonObject) => !destination || sameLocation(eventLocation(event), destination);
+  const destinationEvents = events.filter((event) => isDestinationArrival(eventName(event)) && eventDate(event) && isDestinationEvent(event));
   const actualArrivalEvent = destinationEvents.filter(isActual).sort((a, b) => eventDate(b)!.getTime() - eventDate(a)!.getTime())[0];
   const estimatedArrivalEvent = destinationEvents
     .filter((event) => !isActual(event))
     .sort((a, b) => eventDate(b)!.getTime() - eventDate(a)!.getTime())[0];
-  const dischargeEvent = events.filter((event) => isDischarge(eventName(event)) && isActual(event) && eventDate(event))
+  const dischargeEvent = events.filter((event) => isDischarge(eventName(event)) && isActual(event) && eventDate(event) && isDestinationEvent(event))
     .sort((a, b) => eventDate(b)!.getTime() - eventDate(a)!.getTime())[0];
   const actualArrival = actualArrivalEvent ? eventDate(actualArrivalEvent) : null;
   const estimatedArrival = !actualArrival && estimatedArrivalEvent ? eventDate(estimatedArrivalEvent) : null;
@@ -283,6 +302,11 @@ export function parseOneTrackingResponse(
   const arrivalKind: ArrivalKind = actualArrival ? 'ATA' : estimatedArrival ? 'ETA' : null;
   const routeText = routeFromEvents(events);
   const structuredEvents = oneStructuredEvents(events);
+  const currentPort = text(object(row.latestEvent).locationName)
+    || [...structuredEvents].reverse().find((event) => event.actual && event.location)?.location
+    || text(object(row.place).locationName)
+    || null;
+  const estimatedArrivalTimeText = estimatedArrivalEvent ? localEventTime(estimatedArrivalEvent) : null;
   const trackingDetail: TrackingDetail = {
     carrierCode: 'ONE',
     queryType: context?.queryType || (expectedBillNo ? 'bill' : 'container'),
@@ -290,12 +314,16 @@ export function parseOneTrackingResponse(
     capturedAt: new Date().toISOString(),
     routeStops: oneRouteStops(structuredEvents, row),
     events: structuredEvents,
+    currentPort,
+    estimatedArrivalPort: destination || null,
+    estimatedArrivalTimeText,
     facts: oneFacts(row, returnedBill || expectedBillNo, returnedContainer || expectedContainerNo),
   };
   return {
     arrivalTime,
     arrivalTimeText: actualArrivalEvent ? localEventTime(actualArrivalEvent) : estimatedArrivalEvent ? localEventTime(estimatedArrivalEvent) : null,
     arrivalKind,
+    estimatedArrivalTimeText,
     arrived: Boolean(actualArrival || discharge),
     discharged: Boolean(discharge),
     dischargeTime: discharge,

@@ -190,7 +190,13 @@ function matsonEvents(booking: JsonObject, equipment: JsonObject) {
   return entries.sort((left, right) => left.sortAt - right.sortAt).map(({ event }) => event);
 }
 
-function matsonRouteStops(events: TrackingEventDetail[]): TrackingRouteStop[] {
+function sameLocation(left: string | null | undefined, right: string | null | undefined) {
+  const a = normalizedReference(left || '');
+  const b = normalizedReference(right || '');
+  return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
+}
+
+function matsonRouteStops(events: TrackingEventDetail[], destination = ''): TrackingRouteStop[] {
   const segments: Array<{ name: string; events: TrackingEventDetail[] }> = [];
   for (const event of events) {
     const location = event.location?.trim();
@@ -203,9 +209,11 @@ function matsonRouteStops(events: TrackingEventDetail[]): TrackingRouteStop[] {
     const hasDischarge = segment.events.some((event) => event.eventType === 'discharge' || event.eventType === 'arrival');
     const hasLoading = segment.events.some((event) => event.eventType === 'departure' && event.cargoState === 'laden');
     const hasDelivery = segment.events.some((event) => ['pickup', 'delivery', 'empty-return'].includes(event.eventType));
-    const role: TrackingRouteStop['role'] = index === 0
+    const role: TrackingRouteStop['role'] = destination && sameLocation(segment.name, destination)
+      ? 'discharge'
+      : index === 0
       ? 'origin'
-      : hasDischarge
+      : hasDischarge && !destination
         ? 'discharge'
         : hasLoading
           ? 'loading'
@@ -247,9 +255,13 @@ function detailTrackingResult(
   const { booking, equipment } = selectDetailBooking(detailPayload, summary.bookingNumber, summary.returnedContainer);
   const events = matsonEvents(booking, equipment);
   if (!events.length) throw trackingError('解析失败', '美森详情已返回，但没有可核验的货柜轨迹事件');
-  const routeStops = matsonRouteStops(events);
-  const dischargeEvent = events.find((event) => event.eventType === 'discharge' && event.actual && event.timeText);
-  const actualArrivalEvent = events.find((event) => event.eventType === 'arrival' && event.actual && event.timeText);
+  const destination = firstText(booking, ['portOfDischarge', 'destination']);
+  const isDestinationEvent = (event: TrackingEventDetail) => !destination || sameLocation(event.location, destination);
+  const routeStops = matsonRouteStops(events, destination);
+  // 只有最终目的港的事件才能写入总览 ATA/卸船字段；中转港卸船仍保留在完整事件和线路中。
+  const destinationEvents = events.filter(isDestinationEvent);
+  const dischargeEvent = destinationEvents.find((event) => event.eventType === 'discharge' && event.actual && event.timeText);
+  const actualArrivalEvent = destinationEvents.find((event) => event.eventType === 'arrival' && event.actual && event.timeText);
   const estimatedArrivalText = firstText(summary.booking, ['arrivalDate', 'eta']) || text(booking.currentVesselETA);
   const actualArrival = actualArrivalEvent ? parseDate(actualArrivalEvent.timeText || '') : null;
   const estimatedArrival = !actualArrival ? parseDate(estimatedArrivalText) : null;
@@ -261,6 +273,9 @@ function detailTrackingResult(
     capturedAt: new Date().toISOString(),
     routeStops,
     events,
+    currentPort: [...events].reverse().find((event) => event.actual && event.location)?.location || null,
+    estimatedArrivalPort: destination || null,
+    estimatedArrivalTimeText: localTime(estimatedArrivalText),
     facts: facts(booking, equipment, expectedBillNo),
   };
   const routeText = routeStops.map((stop) => stop.name).join(' → ');
@@ -268,6 +283,7 @@ function detailTrackingResult(
     arrivalTime: actualArrival || estimatedArrival,
     arrivalTimeText: localTime(actualArrivalEvent?.timeText || estimatedArrivalText),
     arrivalKind: actualArrival ? 'ATA' : estimatedArrival ? 'ETA' : null,
+    estimatedArrivalTimeText: localTime(estimatedArrivalText),
     arrived: Boolean(actualArrival || discharge || events.some((event) => ['discharge', 'pickup', 'delivery', 'empty-return'].includes(event.eventType))),
     discharged: Boolean(dischargeEvent),
     dischargeTime: discharge,

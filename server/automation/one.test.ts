@@ -81,6 +81,37 @@ test('ONE 通过官网完整事件接口识别卸船并生成多式联运线路'
   assert.match(result.rawPageText || '', /copSequence/);
 });
 
+test('ONE 中转港到港和卸船不会覆盖最终 POD 的预计信息', () => {
+  const transshipmentPayload = {
+    ...payload,
+    data: [{
+      ...payload.data[0],
+      por: { locationName: 'YANTIAN, GUANGDONG' },
+      pod: { locationName: 'LOS ANGELES, CA' },
+    }],
+  };
+  const transshipmentEvents = {
+    status: 200,
+    code: 1,
+    data: [
+      { matrixId: 'E087', eventName: 'Vessel Arrival at Port of Discharge', eventDate: '2026-08-01T09:00:00.000Z', eventLocalPortDate: '2026-08-01T17:00:00.000Z', triggerType: 'ACTUAL', copSequence: 4052, location: { locationName: 'BUSAN, KR' } },
+      { matrixId: 'E090', eventName: 'Unloaded from Vessel at Port of Discharging', eventDate: '2026-08-02T09:00:00.000Z', eventLocalPortDate: '2026-08-02T17:00:00.000Z', triggerType: 'ACTUAL', copSequence: 6053, location: { locationName: 'BUSAN, KR' } },
+      { matrixId: 'E087', eventName: 'Vessel Arrival at Port of Discharge', eventDate: '2026-08-27T09:00:00.000Z', eventLocalPortDate: '2026-08-27T02:00:00.000Z', triggerType: 'ESTIMATED', copSequence: 7052, location: { locationName: 'LOS ANGELES, CA' } },
+    ],
+  };
+  const result = parseOneTrackingResponse(transshipmentPayload, 'SZPGD2137604', 'ONEU1925399', transshipmentEvents);
+  assert.equal(result.arrivalKind, 'ETA');
+  assert.equal(result.arrivalTime?.toISOString(), '2026-08-27T09:00:00.000Z');
+  assert.equal(result.dischargeTime, null);
+  assert.equal(result.arrived, false);
+  assert.equal(result.discharged, false);
+  assert.equal(result.trackingDetail?.currentPort, 'BUSAN, KR');
+  assert.equal(result.trackingDetail?.estimatedArrivalPort, 'LOS ANGELES, CA');
+  assert.equal(result.trackingDetail?.estimatedArrivalTimeText, '2026-08-27 02:00:00（官网当地时间）');
+  assert.equal(result.trackingDetail?.routeStops.find((stop) => stop.name === 'BUSAN, KR')?.role, 'transshipment');
+  assert.equal(result.trackingDetail?.routeStops.find((stop) => stop.name === 'LOS ANGELES, CA')?.role, 'discharge');
+});
+
 test('ONE Provider 使用官网公开搜索接口和去前缀提单号', async () => {
   const requests: string[] = [];
   const provider = new OneTrackingProvider(async (input, init) => {

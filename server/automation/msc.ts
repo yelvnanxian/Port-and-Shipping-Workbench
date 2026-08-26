@@ -29,6 +29,16 @@ function normalizedLocation(value: string) {
   return value.toUpperCase().replace(/[^A-Z0-9\u4e00-\u9fff]/g, '');
 }
 
+function sameLocation(left: string | null | undefined, right: string | null | undefined) {
+  const a = normalizedLocation(left || '');
+  const b = normalizedLocation(right || '');
+  if (!a || !b) return false;
+  if (a === b || a.includes(b) || b.includes(a)) return true;
+  const aHead = normalizedLocation((left || '').split(',')[0]);
+  const bHead = normalizedLocation((right || '').split(',')[0]);
+  return Boolean(aHead && bHead && (aHead === bHead || aHead.includes(bHead) || bHead.includes(aHead)));
+}
+
 function officialDate(value: unknown) {
   const matched = text(value).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
   return matched ? `${matched[3]}-${matched[2]}-${matched[1]}（官网仅提供日期，未标注具体时刻）` : null;
@@ -92,6 +102,7 @@ function structuredEvents(container: JsonRecord) {
 }
 
 function routeStops(general: JsonRecord, events: TrackingEventDetail[]) {
+  const destination = text(general.PortOfDischarge) || text(general.ShippedTo);
   const candidates: Array<{ name: string; role: TrackingRouteStop['role'] }> = [
     { name: text(general.ShippedFrom), role: 'origin' },
     { name: text(general.PortOfLoad), role: 'loading' },
@@ -109,14 +120,14 @@ function routeStops(general: JsonRecord, events: TrackingEventDetail[]) {
     }
     stops.push(candidate);
   }
-  if (stops.length < 2) {
-    for (const event of events) {
-      if (!event.location || stops.some((stop) => normalizedLocation(stop.name) === normalizedLocation(event.location!))) continue;
-      stops.push({
-        name: event.location,
-        role: event.eventType === 'arrival' || event.eventType === 'discharge' ? 'discharge' : stops.length ? 'transshipment' : 'loading',
-      });
-    }
+  for (const event of events) {
+    if (!event.location || stops.some((stop) => normalizedLocation(stop.name) === normalizedLocation(event.location!))) continue;
+    stops.push({
+      name: event.location,
+      role: destination && sameLocation(event.location, destination)
+        ? 'discharge'
+        : stops.length ? 'transshipment' : 'loading',
+    });
   }
   return stops;
 }
@@ -195,9 +206,10 @@ export function parseMscTrackingPayload(payload: unknown, input: TrackingQuery, 
   const general = record(bill.GeneralTrackingInfo);
   const events = structuredEvents(container);
   const destination = text(general.PortOfDischarge) || text(general.ShippedTo);
-  const sameDestination = (event: TrackingEventDetail) => !destination || (event.location && normalizedLocation(event.location) === normalizedLocation(destination));
-  const finalDischarge = [...events].reverse().find((event) => event.actual && event.eventType === 'discharge' && sameDestination(event))
-    || [...events].reverse().find((event) => event.actual && event.eventType === 'discharge');
+  const sameDestination = (event: TrackingEventDetail) => !destination || sameLocation(event.location, destination);
+  // 有明确 POD 时，禁止用中转港卸船事件兜底填充最终卸船时间。
+  // 只有响应没有提供 POD 的旧格式，才允许按事件本身判断。
+  const finalDischarge = [...events].reverse().find((event) => event.actual && event.eventType === 'discharge' && sameDestination(event));
   const explicitArrival = [...events].reverse().find((event) => event.actual && event.eventType === 'arrival' && sameDestination(event));
   const estimatedArrival = officialDate(general.FinalPodEtaDate) || officialDate(container.PodEtaDate);
   const actualArrival = explicitArrival?.timeText || finalDischarge?.timeText || null;
@@ -209,10 +221,13 @@ export function parseMscTrackingPayload(payload: unknown, input: TrackingQuery, 
   const routeText = stops.map((stop) => stop.name).join(' → ') || null;
   const facts = factsForResult(data, bill, container, events);
   const queryValue = input.queryType === 'container' ? input.containerNo : input.queryBillNo;
+  const currentPort = text(container.LatestMove) || [...events].reverse().find((event) => event.actual && event.location)?.location || null;
+  const estimatedArrivalTimeText = estimatedArrival;
   return {
     arrivalTime: null,
     arrivalTimeText: actualArrival || estimatedArrival,
     arrivalKind: actualArrival ? 'ATA' : estimatedArrival ? 'ETA' : null,
+    estimatedArrivalTimeText,
     arrived: Boolean(actualArrival || finalDischarge || delivered),
     discharged: Boolean(finalDischarge || delivered),
     dischargeTime: null,
@@ -227,6 +242,9 @@ export function parseMscTrackingPayload(payload: unknown, input: TrackingQuery, 
       capturedAt: new Date().toISOString(),
       routeStops: stops,
       events,
+      currentPort,
+      estimatedArrivalPort: destination || null,
+      estimatedArrivalTimeText,
       facts,
     },
     rawPageText: [

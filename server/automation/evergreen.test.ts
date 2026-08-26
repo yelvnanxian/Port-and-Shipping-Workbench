@@ -50,6 +50,8 @@ test('长荣从提单摘要读取预计到港时间并标记 ETA', () => {
   assert.equal(result.discharged, false);
   assert.equal(result.trackingDetail?.events.at(-1)?.actual, false);
   assert.equal(result.trackingDetail?.events.at(-1)?.timeText, '2026-08-27（官网仅提供日期）');
+  assert.equal(result.trackingDetail?.estimatedArrivalPort, 'LOS ANGELES, CA (US)');
+  assert.equal(result.trackingDetail?.estimatedArrivalTimeText, '2026-08-27（官网仅提供日期）');
   assert.match(result.routeText || '', /LOS ANGELES, CA/);
   assert.match(result.rawSummary, /预计到港=2026-08-27（官网仅提供日期）/);
 });
@@ -67,13 +69,15 @@ test('长荣保留官网仅提供日期的卸船精度', () => {
   assert.equal(result.trackingDetail?.facts?.find((fact) => fact.label === '船舶/航次')?.value, 'EVER FAST 1272-030E');
   assert.match(result.rawPageText || '', /movementHtml/);
   assert.equal(result.routeText, 'XIAMEN, CHINA → NEW YORK, NY');
+  assert.equal(result.trackingDetail?.currentPort, 'NEW YORK, NY');
+  assert.equal(result.trackingDetail?.estimatedArrivalPort, 'NEW YORK, NY (US)');
   assert.match(result.rawSummary, /未提供具体时刻/);
 });
 
 test('长荣已有实际卸船但没有单独到港事件时仍保留 ETA', () => {
   const result = parseEvergreenTrackingHtml(
     etaBillHtml,
-    movementHtml,
+    movementHtml.replaceAll('NEW YORK, NY', 'LOS ANGELES, CA'),
     '146600523956',
     'DFSU7042655',
   );

@@ -47,6 +47,12 @@ export interface TrackingDetail {
   capturedAt: string;
   routeStops: TrackingRouteStop[];
   events: TrackingEventDetail[];
+  /** 最新一条可识别的实际港口事件地点（中转港也只保留在这里，不写入 ATA/卸船字段）。 */
+  currentPort?: string | null;
+  /** 最终目的港（POD），与中转港严格区分。 */
+  estimatedArrivalPort?: string | null;
+  /** 官网 Current ETA/最终目的港 ETA 原文。 */
+  estimatedArrivalTimeText?: string | null;
   facts?: TrackingFact[];
 }
 export type TrackingFailureCategory =
@@ -99,6 +105,8 @@ export interface TrackingResult {
   discharged?: boolean;
   dischargeTime: Date | null;
   dischargeTimeText?: string | null;
+  /** 官网最终目的港 ETA 原文；不包含中转港预计时间。 */
+  estimatedArrivalTimeText?: string | null;
   rawSummary: string;
   sourceUrl: string;
   evidencePath?: string;

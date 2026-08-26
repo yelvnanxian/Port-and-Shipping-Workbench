@@ -81,6 +81,13 @@ function normalizedLocation(value: string) {
   return value.toUpperCase().replace(/[^A-Z0-9\u4e00-\u9fff]/g, '');
 }
 
+function sameLocation(left: string | null | undefined, right: string | null | undefined) {
+  const a = normalizedLocation(left || '');
+  const b = normalizedLocation(right || '');
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
 function routeStopsFromOfficial(routes: Array<Record<string, unknown>>, events: TrackingEventDetail[]) {
   const orderedRoutes = [...routes].sort((left, right) => Number(text(left.rn) || text(left.vslSeq) || 0) - Number(text(right.rn) || text(right.vslSeq) || 0));
   const stops: TrackingRouteStop[] = [];
@@ -99,11 +106,17 @@ function routeStopsFromOfficial(routes: Array<Record<string, unknown>>, events: 
     append(loading, index === 0 ? 'loading' : 'transshipment');
     append(discharge, index === orderedRoutes.length - 1 ? 'discharge' : 'transshipment');
   });
-  if (stops.length < 2) {
-    for (const event of events) {
-      if (!event.location || stops.some((stop) => normalizedLocation(stop.name) === normalizedLocation(event.location!))) continue;
-      append(event.location, event.eventType === 'arrival' || event.eventType === 'discharge' ? 'discharge' : stops.length ? 'transshipment' : 'loading');
+  // 官方航段接口有时只返回起运港和最终目的港，中转港只出现在事件接口。
+  // 无论已有多少航段，都要把事件中的新地点补进线路，并严格把它标记为中转港，
+  // 不能因为事件类型是 arrival/discharge 就误标成最终目的港。
+  const destination = stops.findLast((stop) => stop.role === 'discharge')?.name || '';
+  for (const event of events) {
+    if (!event.location || stops.some((stop) => normalizedLocation(stop.name) === normalizedLocation(event.location!))) continue;
+    if (destination && sameLocation(event.location, destination)) {
+      append(event.location, 'discharge');
+      continue;
     }
+    append(event.location, stops.length ? 'transshipment' : 'loading');
   }
   return stops;
 }
@@ -167,10 +180,18 @@ export function parseSmLineTrackingResponses(
     return true;
   });
   const route = routes.at(-1) || {};
-  const actualArrivalEvent = [...events].reverse().find((event) => text(event.actTpCd).toUpperCase() === 'A' && isArrivalEvent(event));
-  const estimatedArrivalEvent = [...events].reverse().find((event) => text(event.actTpCd).toUpperCase() !== 'A' && isArrivalEvent(event));
-  const actualDischargeEvent = [...events].reverse().find((event) => text(event.actTpCd).toUpperCase() === 'A' && isDischargeEvent(event));
-  const estimatedDischargeEvent = [...events].reverse().find((event) => text(event.actTpCd).toUpperCase() !== 'A' && isDischargeEvent(event));
+  const destination = text(route.podNm) || text(route.portOfDischargeNm) || text(route.pldNm) || text(route.placeOfDeliveryNm) || '';
+  const isDestinationEvent = (event: Record<string, unknown>) => {
+    const location = text(event.placeNm);
+    if (!destination) return true;
+    if (location) return sameLocation(location, destination);
+    return /port of discharg|destination|final/i.test(statusName(event));
+  };
+  const destinationEvents = events.filter(isDestinationEvent);
+  const actualArrivalEvent = [...destinationEvents].reverse().find((event) => text(event.actTpCd).toUpperCase() === 'A' && isArrivalEvent(event));
+  const estimatedArrivalEvent = [...destinationEvents].reverse().find((event) => text(event.actTpCd).toUpperCase() !== 'A' && isArrivalEvent(event));
+  const actualDischargeEvent = [...destinationEvents].reverse().find((event) => text(event.actTpCd).toUpperCase() === 'A' && isDischargeEvent(event));
+  const estimatedDischargeEvent = [...destinationEvents].reverse().find((event) => text(event.actTpCd).toUpperCase() !== 'A' && isDischargeEvent(event));
   const routeArrivalText = officialTime(route.eta);
   const actualArrivalText = officialTime(actualArrivalEvent?.eventDt);
   const estimatedArrivalText = officialTime(estimatedArrivalEvent?.eventDt);
@@ -204,6 +225,7 @@ export function parseSmLineTrackingResponses(
     arrivalTime: null,
     arrivalTimeText,
     arrivalKind,
+    estimatedArrivalTimeText: estimatedArrivalText || routeArrivalText || null,
     arrived: Boolean(actualArrivalText || dischargeTimeText || (routeMarkedActual && routeArrivalText)),
     discharged: Boolean(dischargeTimeText),
     dischargeTime: null,
@@ -218,6 +240,9 @@ export function parseSmLineTrackingResponses(
       capturedAt: new Date().toISOString(),
       routeStops,
       events: trackingEvents,
+      currentPort: [...trackingEvents].reverse().find((event) => event.actual && event.location)?.location || text(selected.placeNm) || null,
+      estimatedArrivalPort: destination || null,
+      estimatedArrivalTimeText: estimatedArrivalText || routeArrivalText || null,
       facts,
     },
     rawPageText: JSON.stringify({ searchPayload, routePayload, eventPayload }, null, 2),

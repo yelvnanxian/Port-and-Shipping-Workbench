@@ -169,7 +169,13 @@ function normalizedLocation(value: string) {
   return value.toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
-function yangmingRouteStops(events: TrackingEventDetail[]): TrackingRouteStop[] {
+function sameLocation(left: string | null | undefined, right: string | null | undefined) {
+  const a = normalizedLocation(left || '');
+  const b = normalizedLocation(right || '');
+  return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
+}
+
+function yangmingRouteStops(events: TrackingEventDetail[], destination = ''): TrackingRouteStop[] {
   const segments: Array<{ name: string; events: TrackingEventDetail[] }> = [];
   for (const event of events) {
     const location = event.location?.trim();
@@ -182,9 +188,11 @@ function yangmingRouteStops(events: TrackingEventDetail[]): TrackingRouteStop[] 
     const hasDischarge = segment.events.some((event) => event.eventType === 'discharge' || event.eventType === 'arrival');
     const hasDeparture = segment.events.some((event) => event.eventType === 'departure' || event.eventType === 'transshipment');
     const hasDelivery = segment.events.some((event) => ['pickup', 'delivery', 'empty-return'].includes(event.eventType));
-    const role: TrackingRouteStop['role'] = index === 0
+    const role: TrackingRouteStop['role'] = destination && sameLocation(segment.name, destination)
+      ? 'discharge'
+      : index === 0
       ? 'origin'
-      : hasDischarge
+      : hasDischarge && !destination
         ? 'discharge'
         : hasDeparture
           ? 'transshipment'
@@ -253,6 +261,7 @@ function summaryResult(payload: unknown, expectedBillNo: string, expectedContain
     arrivalTime: actualArrival || estimatedArrival,
     arrivalTimeText: localTime(destination.dateTime),
     arrivalKind: actualArrival ? 'ATA' : estimatedArrival ? 'ETA' : null,
+    estimatedArrivalTimeText: estimatedArrival ? localTime(destination.dateTime) : null,
     arrived: Boolean(actualArrival || discharge || postDischarge),
     discharged: Boolean(discharge || postDischarge),
     dischargeTime: discharge,
@@ -278,17 +287,23 @@ export function parseYangmingTrackingResponses(
   const containerNo = text(detail.queryTrackNo) || text(detail.returnTrackNo) || expectedContainerNo;
   const events = yangmingEvents(detail);
   if (!events.length) throw trackingError('解析失败', `阳明官网已返回柜号 ${containerNo}，但完整事件接口没有可核验的轨迹记录`);
-  const routeStops = yangmingRouteStops(events);
   const summaryDestination = selectedBill ? destinationSchedule(selectedBill.bill) : {};
+  const basic = object(selectedBill?.bill.basicInfo);
+  const destination = text(basic.discharge) || text(basic.delivery) || text(summaryDestination.placeName);
+  const routeStops = yangmingRouteStops(events, destination);
   const summaryArrivalDate = parseDate(summaryDestination.dateTime);
   const summaryActualArrival = /actual/i.test(text(summaryDestination.dateQlfr)) ? summaryArrivalDate : null;
-  const actualArrivalEvent = [...events].reverse().find((event) => event.eventType === 'arrival' && event.actual);
+  const isDestinationEvent = (event: TrackingEventDetail) => !destination
+    || [event.location, event.facility].some((location) => location && sameLocation(location, destination));
+  const destinationEvents = events.filter(isDestinationEvent);
+  const actualArrivalEvent = [...destinationEvents].reverse().find((event) => event.eventType === 'arrival' && event.actual);
   const estimatedArrival = !summaryActualArrival && !actualArrivalEvent && summaryArrivalDate ? summaryArrivalDate : null;
-  const dischargeEvent = events.find((event) => event.eventType === 'discharge' && event.actual);
-  const postDischarge = events.some((event) => ['pickup', 'delivery', 'empty-return'].includes(event.eventType));
+  const dischargeEvent = [...destinationEvents].reverse().find((event) => event.eventType === 'discharge' && event.actual);
+  const postDischarge = destinationEvents.some((event) => ['pickup', 'delivery', 'empty-return'].includes(event.eventType));
   const actualArrival = summaryActualArrival || (actualArrivalEvent?.time ? new Date(actualArrivalEvent.time) : null);
   const arrival = actualArrival || estimatedArrival;
   const discharge = dischargeEvent?.time ? new Date(dischargeEvent.time) : null;
+  const estimatedArrivalTimeText = !summaryActualArrival && summaryDestination.dateTime ? localTime(summaryDestination.dateTime) : null;
   const trackingDetail: TrackingDetail = {
     carrierCode: 'YANGMING',
     queryType: context.queryType,
@@ -296,6 +311,9 @@ export function parseYangmingTrackingResponses(
     capturedAt: new Date().toISOString(),
     routeStops,
     events,
+    currentPort: [...events].reverse().find((event) => event.actual && event.location)?.location || null,
+    estimatedArrivalPort: destination || null,
+    estimatedArrivalTimeText,
     facts: yangmingFacts(selectedBill?.bill || null, detail, selectedBill?.returnedBill || expectedBillNo, containerNo),
   };
   const routeText = routeStops.map((stop) => stop.name).join(' → ');
@@ -305,6 +323,7 @@ export function parseYangmingTrackingResponses(
       ? summaryDestination.dateTime
       : actualArrivalEvent?.timeText?.replace('（官网当地时间）', '')),
     arrivalKind: summaryActualArrival || actualArrivalEvent ? 'ATA' : estimatedArrival ? 'ETA' : null,
+    estimatedArrivalTimeText,
     // ETA 只用于显示预计到港时间，不能把船只状态提前标成已到港。
     arrived: Boolean(actualArrival || discharge || postDischarge),
     discharged: Boolean(dischargeEvent || postDischarge),

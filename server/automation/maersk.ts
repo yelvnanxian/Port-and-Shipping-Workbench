@@ -13,6 +13,16 @@ function normalizedLocation(value: string) {
   return value.toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
+function sameLocation(left: string | null | undefined, right: string | null | undefined) {
+  const a = normalizedLocation(left || '');
+  const b = normalizedLocation(right || '');
+  if (!a || !b) return false;
+  if (a === b || a.includes(b) || b.includes(a)) return true;
+  const aHead = normalizedLocation((left || '').split(',')[0]);
+  const bHead = normalizedLocation((right || '').split(',')[0]);
+  return Boolean(aHead && bHead && (aHead === bHead || aHead.includes(bHead) || bHead.includes(aHead)));
+}
+
 function pageLines(value: string) {
   return value
     .replace(/\u00a0/g, ' ')
@@ -191,7 +201,7 @@ function maerskRouteStops(events: TrackingEventDetail[], headerRoute: string | n
     name,
     role: index === 0
       ? 'origin'
-      : normalizedLocation(name) === normalizedLocation(destination) || index === locations.length - 1
+      : sameLocation(name, destination) || index === locations.length - 1
         ? 'discharge'
         : 'transshipment',
   }));
@@ -277,7 +287,7 @@ export function parseMaerskTrackingText(text: string, input: TrackingQuery): Tra
     ? trackingDetail.routeStops.map((stop) => stop.name).join(' → ')
     : headerRoute;
   const destinationLines = destinationTimeline(lines, destination);
-  const destinationEvents = trackingDetail.events.filter((event) => !destination || normalizedLocation(event.location || '') === normalizedLocation(destination));
+  const destinationEvents = trackingDetail.events.filter((event) => !destination || sameLocation(event.location, destination));
   const structuredDischarge = [...destinationEvents].reverse().find((event) => event.actual && event.eventType === 'discharge' && event.cargoState === 'laden' && event.timeText);
   const structuredArrival = [...destinationEvents].reverse().find((event) => event.actual && event.eventType === 'arrival' && event.timeText);
   const structuredEta = [...destinationEvents].reverse().find((event) => !event.actual && event.eventType === 'arrival' && event.timeText);
@@ -294,10 +304,17 @@ export function parseMaerskTrackingText(text: string, input: TrackingQuery): Tra
   const arrivalKind = actualArrivalTime ? 'ATA' as const : etaTime ? 'ETA' as const : null;
   const arrivalTimeText = localTime(actualArrivalTime || etaTime);
   const dischargeTimeText = localTime(dischargeTime);
+  const currentPort = [...trackingDetail.events].reverse().find((event) => event.actual && event.location)?.location || null;
+  const estimatedArrivalPort = destination || trackingDetail.routeStops.find((stop) => stop.role === 'discharge')?.name || null;
+  const estimatedArrivalTimeText = etaTime ? localTime(etaTime) : null;
+  trackingDetail.currentPort = currentPort;
+  trackingDetail.estimatedArrivalPort = estimatedArrivalPort;
+  trackingDetail.estimatedArrivalTimeText = estimatedArrivalTimeText;
   return {
     arrivalTime: null,
     arrivalTimeText,
     arrivalKind,
+    estimatedArrivalTimeText,
     arrived: Boolean(actualArrivalTime || dischargeTime),
     discharged: Boolean(dischargeTime),
     dischargeTime: null,

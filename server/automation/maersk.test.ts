@@ -62,6 +62,9 @@ test('马士基专用解析器只读取目的港事件并保留当地时间', ()
   assert.equal(result.dischargeTimeText, '05 Aug 2026 20:09（官网当地时间）');
   assert.equal(result.arrived, true);
   assert.equal(result.discharged, true);
+  assert.equal(result.trackingDetail?.currentPort, 'MIAMI');
+  assert.equal(result.trackingDetail?.estimatedArrivalPort, 'MIAMI');
+  assert.equal(result.trackingDetail?.estimatedArrivalTimeText, null);
   assert.equal(result.routeText, 'SHANGHAI → CARTAGENA → MIAMI');
   assert.equal(result.trackingDetail?.events.length, 11);
   assert.equal(result.trackingDetail?.events.filter((event) => event.eventType === 'discharge').length, 2);
@@ -102,4 +105,6 @@ test('马士基未到港页面只把明确的预计抵达写成 ETA', () => {
   assert.equal(result.arrived, false);
   assert.equal(result.arrivalTimeText, '25 Aug 2026 09:30（官网当地时间）');
   assert.equal(result.dischargeTimeText, null);
+  assert.equal(result.trackingDetail?.estimatedArrivalPort, 'MIAMI');
+  assert.equal(result.trackingDetail?.estimatedArrivalTimeText, '25 Aug 2026 09:30（官网当地时间）');
 });

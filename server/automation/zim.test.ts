@@ -81,3 +81,50 @@ test('以星优先解析官网 complete-result 接口的时区、路线和完整
   assert.equal(result.trackingDetail?.events[0].time, '2026-07-05T23:47:00.000Z');
   assert.equal(result.trackingDetail?.facts?.find((fact) => fact.label === '船舶/航次')?.value, 'ZIM MOUNT EVEREST / 14/E');
 });
+
+test('以星中转港事件不能覆盖最终目的港到港和卸船字段', () => {
+  const transshipmentQuery: TrackingQuery = {
+    ...query,
+    originalBillNo: 'ZIMUQIN4437762',
+    queryBillNo: 'ZIMUQIN4437762',
+    containerNo: 'MMPU5016990',
+  };
+  const payload = {
+    consgListItem: [{
+      referenceNo: 'ZIMUQIN4437762',
+      blRouteLeg: { vpBrl: [
+        { portNameFrom: 'QINGDAO', countryNameFrom: 'CHINA', portNameTo: 'SHANGHAI', countryNameTo: 'CHINA', arrivalDateDt: '2026-07-14T00:00:00+08:00', arrivalInd: 'ATA' },
+        { portNameFrom: 'SHANGHAI', countryNameFrom: 'CHINA', portNameTo: 'HOUSTON', countryNameTo: 'U.S.A.', arrivalDateDt: '2026-08-27T00:00:00-05:00', arrivalInd: 'ETA' },
+      ] },
+      consDetails: {
+        consPol: 'CNTAO', consPolDesc: 'QINGDAO', consPolCountryName: 'CHINA',
+        consPod: 'USHOU', consPodDesc: 'HOUSTON', consPodCountryName: 'U.S.A.',
+        consContainers: { consContainersItem: [{
+          unitPrefix: 'MMPU', unitNo: '5016990',
+          unitActivities: { unitActivitiesItem: [
+            { activityCode: 'CNT_VESSEL_ARRIVAL', activityDesc: 'Vessel arrival to Transshipment Port', activityDateTz: '2026-07-06T10:00:00+08:00', placeFromDesc: 'SHANGHAI', countryFromName: 'CHINA' },
+            { activityCode: 'DISC', activityDesc: 'Container was discharged at Transshipment Port', activityDateTz: '2026-07-14T10:00:00+08:00', placeFromDesc: 'SHANGHAI', countryFromName: 'CHINA' },
+            { activityCode: 'CNT_VESSEL_DEPARTURE', activityDesc: 'Vessel departure from Transshipment Port', activityDateTz: '2026-07-24T10:00:00+08:00', placeFromDesc: 'SHANGHAI', countryFromName: 'CHINA' },
+            { activityCode: 'OTHER', activityDesc: 'Carrier Release', activityDateTz: '2026-08-20T10:00:00-05:00', placeFromDesc: 'HOUSTON', countryFromName: 'U.S.A.' },
+          ] },
+        }] },
+      },
+      finalEta: { etaPodDate: '2026-08-27T00:00:00-05:00' },
+    }],
+  };
+  const result = parseZimTrackingText(`ZIMUQIN4437762\nMMPU5016990\n[ZIM API https://apigw.zimchina.com/digital/TrackShipment/v2/complete-result?reference=ZIMUQIN4437762]\n${JSON.stringify(payload)}`, transshipmentQuery);
+
+  assert.equal(result.arrivalKind, 'ETA');
+  assert.equal(result.arrivalTimeText, '2026-08-27T00:00:00-05:00（官网返回时区）');
+  assert.equal(result.dischargeTimeText, null);
+  assert.equal(result.arrived, false);
+  assert.equal(result.discharged, false);
+  assert.equal(result.trackingDetail?.currentPort, 'HOUSTON, U.S.A.');
+  assert.equal(result.trackingDetail?.estimatedArrivalPort, 'HOUSTON, U.S.A.');
+  assert.equal(result.trackingDetail?.estimatedArrivalTimeText, '2026-08-27T00:00:00-05:00（官网返回时区）');
+  assert.deepEqual(result.trackingDetail?.routeStops.map((stop) => [stop.name, stop.role]), [
+    ['QINGDAO, CHINA', 'loading'],
+    ['SHANGHAI, CHINA', 'transshipment'],
+    ['HOUSTON, U.S.A.', 'discharge'],
+  ]);
+});

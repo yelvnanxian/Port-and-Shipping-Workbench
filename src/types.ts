@@ -46,6 +46,9 @@ export interface Shipment {
       transportMode?: 'ocean' | 'rail' | 'truck' | 'terminal' | 'unknown';
       sourceLine?: string;
     }>;
+    currentPort?: string | null;
+    estimatedArrivalPort?: string | null;
+    estimatedArrivalTimeText?: string | null;
     facts?: Array<{ label: string; value: string }>;
   };
   trackingDetailUrl?: string;

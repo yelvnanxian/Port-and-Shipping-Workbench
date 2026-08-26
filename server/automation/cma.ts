@@ -10,6 +10,12 @@ function normalizedReference(value: string) {
   return value.toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
+function sameLocation(left: string | null | undefined, right: string | null | undefined) {
+  const a = normalizedReference(left || '');
+  const b = normalizedReference(right || '');
+  return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
+}
+
 function linesOf(value: string) {
   return value
     .replace(/\u00a0/g, ' ')
@@ -136,7 +142,7 @@ function cmaEvents(lines: string[]) {
   return [...unique.values()];
 }
 
-function cmaRoute(lines: string[], events: TrackingEventDetail[]) {
+function cmaRoute(lines: string[], events: TrackingEventDetail[], destination = '') {
   const definitions: Array<{ label: RegExp; role: TrackingRouteStop['role'] }> = [
     { label: /place of receipt|origin/i, role: 'origin' },
     { label: /port of loading|\bPOL\b/i, role: 'loading' },
@@ -160,8 +166,10 @@ function cmaRoute(lines: string[], events: TrackingEventDetail[]) {
   });
   for (const event of chronologicalEvents) {
     if (!event.location || stops.some((stop) => stop.name.toUpperCase() === event.location!.toUpperCase())) continue;
-    const role = event.eventType === 'arrival' || event.eventType === 'discharge'
+    const role = destination && sameLocation(event.location, destination)
       ? 'discharge'
+      : event.eventType === 'arrival' || event.eventType === 'discharge'
+        ? 'transshipment'
       : event.eventType === 'departure' || event.eventType === 'origin'
         ? 'loading'
         : 'transshipment';
@@ -189,14 +197,20 @@ export function parseCmaTrackingText(text: string, input: TrackingQuery): Tracki
   if (input.containerNo && !normalizedText.includes(normalizedReference(input.containerNo))) {
     throw trackingError('订单号验证失败', `达飞页面未显示输入柜号 ${input.containerNo}`);
   }
-  const actualArrival = eventDate(lines, /actual(?: time of)? arrival|arrived at|vessel arrived|arrival at (?:pod|destination)/i, /estimated|expected|current eta/i);
-  const estimatedArrival = eventDate(lines, /estimated(?: time of)? arrival|expected arrival|current eta|\bETA\b/i, /actual|arrived|discharg/i);
-  const discharge = eventDate(lines, /discharg|unload|import\s+discharged|unloaded from vessel/i, /estimated|expected|planned/i);
   const events = cmaEvents(lines);
+  const destination = valueAfterRouteLabel(lines, /port of discharge|\bPOD\b/i);
+  const isDestinationEvent = (event: TrackingEventDetail) => !destination || (event.location ? sameLocation(event.location, destination) : false);
+  const destinationEvents = events.filter(isDestinationEvent);
+  const actualArrival = [...destinationEvents].reverse().find((event) => event.eventType === 'arrival' && event.actual)?.timeText
+    || eventDate(lines, /actual(?: time of)? arrival|arrived at|vessel arrived|arrival at (?:pod|destination)/i, /estimated|expected|current eta/i);
+  const estimatedArrival = [...destinationEvents].reverse().find((event) => event.eventType === 'arrival' && !event.actual)?.timeText
+    || eventDate(lines, /estimated(?: time of)? arrival|expected arrival|current eta|\bETA\b/i, /actual|arrived|discharg/i);
+  const discharge = [...destinationEvents].reverse().find((event) => event.eventType === 'discharge' && event.actual)?.timeText
+    || eventDate(lines, /discharg|unload|import\s+discharged|unloaded from vessel/i, /estimated|expected|planned/i);
   if (!actualArrival && !estimatedArrival && !discharge && !events.length) {
     throw trackingError('解析失败', '达飞官网已返回查询页面，但没有可验证的到港、卸船或运输事件');
   }
-  const routeStops = cmaRoute(lines, events);
+  const routeStops = cmaRoute(lines, events, destination);
   const routeText = routeStops.map((stop) => stop.name).join(' → ') || null;
   const facts = [
     ['提单号', input.originalBillNo],
@@ -211,8 +225,9 @@ export function parseCmaTrackingText(text: string, input: TrackingQuery): Tracki
     arrivalTime: null,
     arrivalTimeText: actualArrival || estimatedArrival || null,
     arrivalKind: actualArrival ? 'ATA' : estimatedArrival ? 'ETA' : null,
-    arrived: Boolean(actualArrival || discharge || events.some((event) => event.actual && event.eventType === 'arrival')),
-    discharged: Boolean(discharge || events.some((event) => event.actual && event.eventType === 'discharge')),
+    estimatedArrivalTimeText: estimatedArrival || null,
+    arrived: Boolean(actualArrival || discharge || destinationEvents.some((event) => event.actual && event.eventType === 'arrival')),
+    discharged: Boolean(discharge || destinationEvents.some((event) => event.actual && event.eventType === 'discharge')),
     dischargeTime: null,
     dischargeTimeText: discharge || null,
     rawSummary: `达飞官网浏览器查询解析成功；查询号码=${queryValue}；柜号=${input.containerNo || '未提供'}${actualArrival ? `；实际到港=${actualArrival}` : estimatedArrival ? `；预计到港=${estimatedArrival}` : ''}${discharge ? `；实际卸船=${discharge}` : '；未发现实际卸船事件'}；已解析 ${events.length} 条事件`,
@@ -225,6 +240,9 @@ export function parseCmaTrackingText(text: string, input: TrackingQuery): Tracki
       capturedAt: new Date().toISOString(),
       routeStops,
       events,
+      currentPort: [...events].reverse().find((event) => event.actual && event.location)?.location || null,
+      estimatedArrivalPort: destination || null,
+      estimatedArrivalTimeText: estimatedArrival || null,
       facts,
     },
     rawPageText: compactText,

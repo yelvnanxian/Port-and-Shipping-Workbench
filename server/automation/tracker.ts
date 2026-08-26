@@ -95,18 +95,48 @@ export class CarrierRoutingTrackingProvider implements TrackingProvider {
 }
 
 export function mergeTrackingResults(primary: TrackingResult, secondary: TrackingResult): TrackingResult {
-  if (primary.dischargeTime && !secondary.dischargeTime) return { ...primary, routeText: primary.routeText || secondary.routeText || null, rawSummary: `${primary.rawSummary}；已合并柜号查询` };
-  if (secondary.dischargeTime && !primary.dischargeTime) return { ...secondary, routeText: secondary.routeText || primary.routeText || null, rawSummary: `${secondary.rawSummary}；已合并提单号查询` };
-  const moreRecentArrival = [primary, secondary]
-    .filter((item) => item.arrivalTime)
-    .sort((a, b) => b.arrivalTime!.getTime() - a.arrivalTime!.getTime())[0];
+  const hasDischarge = (item: TrackingResult) => Boolean(item.dischargeTime || item.dischargeTimeText || item.discharged);
+  const mergeDetail = (preferred: TrackingResult, fallback: TrackingResult) => {
+    if (!preferred.trackingDetail && !fallback.trackingDetail) return undefined;
+    if (!preferred.trackingDetail) return fallback.trackingDetail;
+    if (!fallback.trackingDetail) return preferred.trackingDetail;
+    return {
+      ...fallback.trackingDetail,
+      ...preferred.trackingDetail,
+      // 以同一查询结果的完整轨迹为主；仅在主结果缺字段时补齐另一查询的字段。
+      routeStops: preferred.trackingDetail.routeStops.length >= fallback.trackingDetail.routeStops.length
+        ? preferred.trackingDetail.routeStops
+        : fallback.trackingDetail.routeStops,
+      events: preferred.trackingDetail.events.length >= fallback.trackingDetail.events.length
+        ? preferred.trackingDetail.events
+        : fallback.trackingDetail.events,
+      currentPort: preferred.trackingDetail.currentPort || fallback.trackingDetail.currentPort || null,
+      estimatedArrivalPort: preferred.trackingDetail.estimatedArrivalPort || fallback.trackingDetail.estimatedArrivalPort || null,
+      estimatedArrivalTimeText: preferred.trackingDetail.estimatedArrivalTimeText || fallback.trackingDetail.estimatedArrivalTimeText || null,
+      facts: preferred.trackingDetail.facts?.length ? preferred.trackingDetail.facts : fallback.trackingDetail.facts,
+    };
+  };
+  const preferred = hasDischarge(primary) && !hasDischarge(secondary)
+    ? primary
+    : hasDischarge(secondary) && !hasDischarge(primary)
+      ? secondary
+      : [primary, secondary]
+        .filter((item) => item.arrivalTime)
+        .sort((a, b) => b.arrivalTime!.getTime() - a.arrivalTime!.getTime())[0] || primary;
+  const fallback = preferred === primary ? secondary : primary;
+  const mergeSuffix = preferred === primary ? '已合并柜号查询' : '已合并提单号查询';
   return {
-    ...(moreRecentArrival || primary),
+    ...preferred,
+    arrivalTimeText: preferred.arrivalTimeText || fallback.arrivalTimeText || null,
+    arrivalKind: preferred.arrivalKind || fallback.arrivalKind,
+    estimatedArrivalTimeText: preferred.estimatedArrivalTimeText || fallback.estimatedArrivalTimeText || null,
     dischargeTime: primary.dischargeTime || secondary.dischargeTime,
+    dischargeTimeText: preferred.dischargeTimeText || fallback.dischargeTimeText || null,
     arrived: primary.arrived || secondary.arrived,
-    discharged: primary.discharged || secondary.discharged || Boolean(primary.dischargeTime || secondary.dischargeTime),
-    routeText: primary.routeText || secondary.routeText || null,
-    rawSummary: `${primary.rawSummary}；${secondary.rawSummary}；提单号与柜号结果已合并`,
+    discharged: primary.discharged || secondary.discharged || Boolean(primary.dischargeTime || secondary.dischargeTime || primary.dischargeTimeText || secondary.dischargeTimeText),
+    routeText: preferred.routeText || fallback.routeText || null,
+    trackingDetail: mergeDetail(preferred, fallback),
+    rawSummary: `${preferred.rawSummary}；${mergeSuffix}`,
   };
 }
 

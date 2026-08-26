@@ -19,6 +19,8 @@ test('森罗航线接口的起运港和目的港写入运行线路', () => {
   const result = parseSmLineTrackingResponses(search, route, { TRANS_RESULT_KEY: 'S', list: [] }, 'SMCU1312616', 'SMLMNJBD6A755700');
   assert.equal(result.routeText, 'NINGBO,ZHEJIANG,CHINA → PORTLAND,OR,UNITED STATES');
   assert.equal(result.trackingDetail?.routeStops.length, 2);
+  assert.equal(result.trackingDetail?.estimatedArrivalPort, 'PORTLAND,OR,UNITED STATES');
+  assert.equal(result.trackingDetail?.estimatedArrivalTimeText, '2026-08-20 17:00（官网当地时间）');
   assert.match(result.rawPageText || '', /routePayload/);
 });
 
@@ -55,6 +57,27 @@ test('森罗发现实际卸船事件后标记为已卸船', () => {
   assert.equal(result.dischargeTime, null);
   assert.equal(result.dischargeTimeText, '2026-08-20 21:30（官网当地时间）');
   assert.equal(result.trackingDetail?.events.length, 2);
+});
+
+test('森罗中转港事件不会覆盖最终目的港到港和卸船字段', () => {
+  const transshipmentRoute = {
+    TRANS_RESULT_KEY: 'S', count: '1', list: [{ ...route.list[0], podNm: 'LOS ANGELES,CA,UNITED STATES', eta: '2026-08-30 17:00' }],
+  };
+  const events = {
+    TRANS_RESULT_KEY: 'S', count: '3', list: [
+      { eventDt: '2026-08-10 10:00', actTpCd: 'A', placeNm: 'BUSAN,KOREA', statusNm: 'Arrival at Port of Discharging' },
+      { eventDt: '2026-08-11 10:00', actTpCd: 'A', placeNm: 'BUSAN,KOREA', statusNm: 'Unloaded at Port of Discharging' },
+      { eventDt: '2026-08-30 17:00', actTpCd: 'E', placeNm: 'LOS ANGELES,CA,UNITED STATES', statusNm: 'Arrival at Port of Discharging' },
+    ],
+  };
+  const result = parseSmLineTrackingResponses(search, transshipmentRoute, events, 'SMCU1312616', 'SMLMNJBD6A755700');
+  assert.equal(result.arrivalKind, 'ETA');
+  assert.equal(result.arrived, false);
+  assert.equal(result.discharged, false);
+  assert.equal(result.dischargeTimeText, null);
+  assert.equal(result.trackingDetail?.currentPort, 'BUSAN,KOREA');
+  assert.equal(result.trackingDetail?.estimatedArrivalPort, 'LOS ANGELES,CA,UNITED STATES');
+  assert.equal(result.trackingDetail?.routeStops.find((stop) => stop.name === 'BUSAN,KOREA')?.role, 'transshipment');
 });
 
 test('森罗返回其他提单时拒绝写入', () => {

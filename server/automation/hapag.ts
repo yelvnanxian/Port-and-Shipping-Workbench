@@ -11,6 +11,12 @@ function normalizedReference(value: string) {
   return value.toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
+function sameLocation(left: string | null | undefined, right: string | null | undefined) {
+  const a = normalizedReference(left || '');
+  const b = normalizedReference(right || '');
+  return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
+}
+
 function linesOf(value: string) {
   return value.replace(/\u00a0/g, ' ').split(/[\r\n\t]+/).map((line) => line.replace(/ {2,}/g, ' ').trim()).filter(Boolean);
 }
@@ -132,7 +138,7 @@ function hapagEvents(lines: string[]) {
   });
 }
 
-function hapagRoute(lines: string[], events: TrackingEventDetail[]) {
+function hapagRoute(lines: string[], events: TrackingEventDetail[], destination = '') {
   const definitions: Array<{ label: RegExp; role: TrackingRouteStop['role'] }> = [
     { label: /Place of Receipt/i, role: 'origin' },
     { label: /Port of Loading/i, role: 'loading' },
@@ -146,8 +152,10 @@ function hapagRoute(lines: string[], events: TrackingEventDetail[]) {
   }
   for (const event of events) {
     if (!event.location || stops.some((stop) => stop.name.toUpperCase() === event.location!.toUpperCase())) continue;
-    const role = event.eventType === 'arrival' || event.eventType === 'discharge'
+    const role = destination && sameLocation(event.location, destination)
       ? 'discharge'
+      : event.eventType === 'arrival' || event.eventType === 'discharge'
+        ? 'transshipment'
       : event.eventType === 'departure' || event.eventType === 'origin'
         ? 'loading'
         : 'transshipment';
@@ -176,15 +184,21 @@ export function parseHapagTrackingText(text: string, input: TrackingQuery): Trac
     throw trackingError('订单号验证失败', `赫伯罗特页面未显示输入柜号 ${input.containerNo}`);
   }
 
-  const actualArrival = eventDate(lines, /actual(?: time of)? arrival|arrived at|container arrived in|arrival at (?:pod|destination)|^arrival in$/i, /estimated|expected/i);
-  const estimatedArrival = eventDate(lines, /estimated arrival|estimated time of arrival|\bETA\b/i, /actual|arrived|discharg/i);
-  const discharge = eventDate(lines, /discharg|unload/i, /estimated|expected|planned/i);
   const events = hapagEvents(lines);
+  const destination = valueAfterRouteLabel(lines, /Port of Discharge|Destination/i);
+  const isDestinationEvent = (event: TrackingEventDetail) => !destination || (event.location ? sameLocation(event.location, destination) : false);
+  const destinationEvents = events.filter(isDestinationEvent);
+  const actualArrival = [...destinationEvents].reverse().find((event) => event.eventType === 'arrival' && event.actual)?.timeText?.replace('（官网未标注时区）', '')
+    || eventDate(lines, /actual(?: time of)? arrival|arrived at|container arrived in|arrival at (?:pod|destination)|^arrival in$/i, /estimated|expected/i);
+  const estimatedArrival = [...destinationEvents].reverse().find((event) => event.eventType === 'arrival' && !event.actual)?.timeText?.replace('（官网未标注时区）', '')
+    || eventDate(lines, /estimated arrival|estimated time of arrival|\bETA\b/i, /actual|arrived|discharg/i);
+  const discharge = [...destinationEvents].reverse().find((event) => event.eventType === 'discharge' && event.actual)?.timeText?.replace('（官网未标注时区）', '')
+    || eventDate(lines, /discharg|unload/i, /estimated|expected|planned/i);
   if (!actualArrival && !estimatedArrival && !discharge && !events.length) {
     throw trackingError('解析失败', '赫伯罗特官网已返回柜号结果，但没有可验证的运输事件');
   }
   const arrivalText = actualArrival || estimatedArrival;
-  const routeStops = hapagRoute(lines, events);
+  const routeStops = hapagRoute(lines, events, destination);
   const routeText = routeStops.map((stop) => stop.name).join(' → ') || null;
   const facts = [
     ['提单号', input.originalBillNo],
@@ -197,8 +211,9 @@ export function parseHapagTrackingText(text: string, input: TrackingQuery): Trac
     arrivalTime: null,
     arrivalTimeText: localTime(arrivalText),
     arrivalKind: actualArrival ? 'ATA' : estimatedArrival ? 'ETA' : null,
-    arrived: Boolean(actualArrival || discharge || events.some((event) => event.actual && event.eventType === 'arrival')),
-    discharged: Boolean(discharge || events.some((event) => event.actual && event.eventType === 'discharge')),
+    estimatedArrivalTimeText: estimatedArrival ? localTime(estimatedArrival) : null,
+    arrived: Boolean(actualArrival || discharge || destinationEvents.some((event) => event.actual && event.eventType === 'arrival')),
+    discharged: Boolean(discharge || destinationEvents.some((event) => event.actual && event.eventType === 'discharge')),
     dischargeTime: null,
     dischargeTimeText: localTime(discharge),
     rawSummary: `赫伯罗特官网浏览器查询解析成功；查询号码=${queryValue}；柜号=${input.containerNo || '未提供'}${actualArrival ? `；实际到港=${actualArrival}` : estimatedArrival ? `；预计到港=${estimatedArrival}` : ''}${discharge ? `；实际卸船=${discharge}` : '；未发现实际卸船事件'}；已解析 ${events.length} 条事件`,
@@ -211,6 +226,9 @@ export function parseHapagTrackingText(text: string, input: TrackingQuery): Trac
       capturedAt: new Date().toISOString(),
       routeStops,
       events,
+      currentPort: [...events].reverse().find((event) => event.actual && event.location)?.location || null,
+      estimatedArrivalPort: destination || null,
+      estimatedArrivalTimeText: estimatedArrival ? localTime(estimatedArrival) : null,
       facts,
     },
     rawPageText: compactText,

@@ -88,3 +88,14 @@ test('合德提单无结果后的柜号查询只验证柜号并抓取完整详�
   assert.equal(result.trackingDetail?.queryType, 'container');
   assert.equal(result.trackingDetail?.queryValue, 'SEKU6633329');
 });
+
+test('合德中转港卸船事件只作为中转节点，不覆盖最终卸货港', () => {
+  const transshipmentDynamic = dynamicFixture.replace(
+    '<tr class="read-tr"><td>DIS</td><td>箱子卸船</td><td>2026-07-30T01:09</td><td>SEKU6633329</td><td>HC</td><td>40</td><td></td><td>LOS ANGELES,CA</td><td>WBCT</td><td>F</td><td>G. CROWN</td><td>2606E</td></tr>',
+    '<tr class="read-tr"><td>DIS</td><td>箱子卸船</td><td>2026-07-20T01:09</td><td>SEKU6633329</td><td>HC</td><td>40</td><td></td><td>BUSAN,KR</td><td>BNCT</td><td>F</td><td>G. CROWN</td><td>2606E</td></tr>'
+      + '<tr class="read-tr"><td>DIS</td><td>箱子卸船</td><td>2026-07-30T01:09</td><td>SEKU6633329</td><td>HC</td><td>40</td><td></td><td>LOS ANGELES,CA</td><td>WBCT</td><td>F</td><td>G. CROWN</td><td>2606E</td></tr>',
+  );
+  const result = parseHedeTrackingHtml(fixture, 'HDUJGLA26BZ04040', 'SEKU6633329', detailFixture, transshipmentDynamic);
+  assert.equal(result.trackingDetail?.routeStops.find((stop) => stop.name === 'BUSAN,KR')?.role, 'transshipment');
+  assert.equal(result.dischargeTimeText, '2026-07-30 01:09（官网未标注时区）');
+});

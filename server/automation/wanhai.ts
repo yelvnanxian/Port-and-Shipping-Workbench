@@ -63,13 +63,37 @@ function parseEvents(lines: string[]) {
   return [...unique.values()].sort((left, right) => (left.timeText || '').localeCompare(right.timeText || ''));
 }
 
-function routeStops(events: TrackingEventDetail[]) {
+function routeStops(events: TrackingEventDetail[], origin = '', destination = '') {
   const stops: TrackingRouteStop[] = [];
   for (const event of events) {
     if (!event.location || stops.some((stop) => stop.name === event.location)) continue;
-    stops.push({ name: event.location, role: event.eventType === 'arrival' || event.eventType === 'discharge' ? 'discharge' : 'loading' });
+    const role: TrackingRouteStop['role'] = destination && sameLocation(event.location, destination)
+      ? 'discharge'
+      : origin && sameLocation(event.location, origin)
+        ? 'loading'
+        : stops.length
+          ? 'transshipment'
+          : 'origin';
+    stops.push({ name: event.location, role });
   }
+  if (origin && !stops.some((stop) => sameLocation(stop.name, origin))) stops.unshift({ name: origin, role: 'loading' });
+  if (destination && !stops.some((stop) => sameLocation(stop.name, destination))) stops.push({ name: destination, role: 'discharge' });
   return stops;
+}
+
+function sameLocation(left: string | null | undefined, right: string | null | undefined) {
+  const a = normalizedReference(left || '');
+  const b = normalizedReference(right || '');
+  return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
+}
+
+function valueAfterLabel(lines: string[], label: RegExp) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const inline = lines[index].match(new RegExp(`${label.source}\\s*[:：]?\\s*(.+)$`, label.flags.replace(/g/g, '')))?.[1]?.trim();
+    if (inline) return inline;
+    if (label.test(lines[index]) && lines[index + 1] && !wanhaiDateText(lines[index + 1])) return lines[index + 1].trim();
+  }
+  return '';
 }
 
 function firstMatchingLine(lines: string[], pattern: RegExp) {
@@ -97,15 +121,20 @@ export function parseWanhaiTrackingText(pageText: string, input: TrackingQuery):
     .map((line) => line.replace(/ {2,}/g, ' ').trim())
     .filter(Boolean);
   const events = parseEvents(lines);
-  const actualArrival = [...events].reverse().find((event) => event.eventType === 'arrival' && event.actual);
-  const discharge = [...events].reverse().find((event) => event.eventType === 'discharge' && event.actual);
-  const completion = [...events].reverse().find((event) => event.actual && (event.eventType === 'pickup' || event.eventType === 'empty-return'));
+  const origin = valueAfterLabel(lines, /^装货港$/i);
+  const destination = valueAfterLabel(lines, /^卸货港$/i);
+  const isDestinationEvent = (event: TrackingEventDetail) => !destination
+    || (event.location ? sameLocation(event.location, destination) : ['discharge', 'pickup', 'empty-return'].includes(event.eventType));
+  const destinationEvents = events.filter(isDestinationEvent);
+  const actualArrival = [...destinationEvents].reverse().find((event) => event.eventType === 'arrival' && event.actual);
+  const discharge = [...destinationEvents].reverse().find((event) => event.eventType === 'discharge' && event.actual);
+  const completion = [...destinationEvents].reverse().find((event) => event.actual && (event.eventType === 'pickup' || event.eventType === 'empty-return'));
   const estimatedArrivalLabel = lines.findIndex((line) => /卸货港预计到港时间|预计到港|ETA/i.test(line));
   const estimatedArrivalText = estimatedArrivalLabel >= 0 ? nearestDate(lines, estimatedArrivalLabel) : '';
   if (!actualArrival && !estimatedArrivalText && !discharge && !completion) {
     throw trackingError('解析失败', '万海结果页没有可核验的实际到港、预计到港或卸船后续事件');
   }
-  const stops = routeStops(events);
+  const stops = routeStops(events, origin, destination);
   const routeText = stops.map((stop) => stop.name).join(' → ') || null;
   const facts = [
     ['提单号', firstMatchingLine(lines, /^(?:WHLC)?\d{3}[A-Z]\d{6}$/i)],
@@ -121,6 +150,7 @@ export function parseWanhaiTrackingText(pageText: string, input: TrackingQuery):
     arrivalTime: null,
     arrivalTimeText: actualArrival?.timeText || (estimatedArrivalText ? `${estimatedArrivalText}（官网未标注时区）` : null),
     arrivalKind: actualArrival ? 'ATA' : estimatedArrivalText ? 'ETA' : null,
+    estimatedArrivalTimeText: estimatedArrivalText ? `${estimatedArrivalText}（官网未标注时区）` : null,
     arrived: Boolean(actualArrival || discharge || completion),
     discharged: Boolean(discharge || completion),
     dischargeTime: null,
@@ -135,6 +165,9 @@ export function parseWanhaiTrackingText(pageText: string, input: TrackingQuery):
       capturedAt: new Date().toISOString(),
       routeStops: stops,
       events,
+      currentPort: [...events].reverse().find((event) => event.actual && event.location)?.location || null,
+      estimatedArrivalPort: destination || null,
+      estimatedArrivalTimeText: estimatedArrivalText ? `${estimatedArrivalText}（官网未标注时区）` : null,
       facts,
     },
     rawPageText: compactText,
