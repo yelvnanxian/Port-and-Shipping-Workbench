@@ -310,7 +310,7 @@ export class SmLineTrackingProvider implements TrackingProvider {
         return input.queryType === 'container' ? returnedContainer === expected : returnedBills.includes(billNo);
       });
       if (input.queryType === 'bill' && expected && !exactSelected && referenceSelected) {
-        throw trackingError('订单号验证失败', `森罗提单 ${billNo} 的结果未包含输入柜号 ${expected}，将按 OR 规则改查柜号`);
+        throw trackingError('订单号验证失败', `森罗提单 ${billNo} 的结果未包含输入柜号 ${expected}，将改用柜号查询核验`);
       }
       const selected = exactSelected || referenceSelected;
       if (!selected) {

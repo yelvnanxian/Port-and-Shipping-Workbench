@@ -6,7 +6,7 @@ import type { TrackingProvider } from './tracker.js';
 import type { TrackingQuery } from './types.js';
 
 const input: TrackingQuery = {
-  rule: { prefix: 'ONEY', code: 'ONE', name: '海洋网联', removePrefix: true, queryMode: 'bill-or-container', url: 'https://example.com', integration: 'ready', integrationMessage: '' },
+  rule: { prefix: 'ONEY', code: 'ONE', name: '海洋网联', removePrefix: true, queryMode: 'bill-then-container', url: 'https://example.com', integration: 'ready', integrationMessage: '' },
   originalBillNo: 'ONEY0000001',
   queryBillNo: '0000001',
   containerNo: 'ONEU0000001',

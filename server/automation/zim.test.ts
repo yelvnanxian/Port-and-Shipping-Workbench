@@ -4,7 +4,7 @@ import { parseZimTrackingText } from './zim.js';
 import type { TrackingQuery } from './types.js';
 
 const query: TrackingQuery = {
-  rule: { prefix: 'ZIMU', code: 'ZIM', name: '以星', removePrefix: false, queryMode: 'bill-and-container', url: 'https://www.zimchina.com/tools/track-a-shipment', integration: 'blocked', integrationMessage: '' },
+  rule: { prefix: 'ZIMU', code: 'ZIM', name: '以星', removePrefix: false, queryMode: 'bill-then-container', url: 'https://www.zimchina.com/tools/track-a-shipment', integration: 'blocked', integrationMessage: '' },
   originalBillNo: 'ZIMUXIA8569326',
   queryBillNo: 'ZIMUXIA8569326',
   containerNo: 'JXLU6447207',

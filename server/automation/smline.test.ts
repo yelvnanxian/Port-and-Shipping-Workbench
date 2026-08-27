@@ -122,7 +122,7 @@ test('森罗柜号查询使用官方 search_type C 且不要求提单同时匹�
     return new Response(JSON.stringify(payload), { status: 200 });
   };
   const input: TrackingQuery = {
-    rule: { prefix: 'SML', code: 'SMLINE', name: '森罗', removePrefix: true, queryMode: 'bill-or-container', url: 'https://esvc.smlines.com', integration: 'ready', integrationMessage: '' },
+    rule: { prefix: 'SML', code: 'SMLINE', name: '森罗', removePrefix: true, queryMode: 'bill-then-container', url: 'https://esvc.smlines.com', integration: 'ready', integrationMessage: '' },
     originalBillNo: 'SMLMNJBD6A755700',
     queryBillNo: 'NJBD6A755700',
     containerNo: 'SMCU1312616',

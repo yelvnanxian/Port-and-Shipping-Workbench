@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildQueryBillNo, resolveCarrierRule } from './carriers.js';
+import { buildQueryBillNo, CARRIER_RULES, resolveCarrierRule } from './carriers.js';
 import { mergeTrackingResults, trackRecord, type TrackingProvider } from './tracker.js';
 import type { TrackingQuery, TrackingResult, WorkbookRecord } from './types.js';
 
@@ -55,10 +55,25 @@ test('马士基两个提单号均失败后自动改用柜号', async () => {
   assert.match(tracked.result.rawSummary, /自动改用柜号 CICU6040856/);
 });
 
+test('马士基完整提单号遇到风控时不会继续查询柜号', async () => {
+  const calls: string[] = [];
+  const provider: TrackingProvider = {
+    async query(input) {
+      const value = input.queryType === 'container' ? input.containerNo : input.queryBillNo;
+      calls.push(value);
+      if (value === '271552824') throw new Error('去前缀提单无结果');
+      throw new Error('Cloudflare 验证页面');
+    },
+  };
+  const record: WorkbookRecord = { rowNumber: 2, carrierHint: '马士基', billNo: 'MAEU271552824', containerNo: 'CICU6040856', arrivalTime: null, dischargeTime: null, vesselState: '', manualMark: '', lastUpdated: null, note: '', progress: '' };
+  await assert.rejects(() => trackRecord(record, provider), /Cloudflare 验证页面/);
+  assert.deepEqual(calls, ['271552824', 'MAEU271552824']);
+});
+
 test('森罗官网查询固定移除 SMLM 四位前缀', () => {
   const rule = resolveCarrierRule({ billNo: 'SMLMNJBD6A755700', carrierHint: '森罗' });
   assert.equal(rule.code, 'SMLINE');
-  assert.equal(rule.queryMode, 'bill-or-container');
+  assert.equal(rule.queryMode, 'bill-then-container');
   assert.equal(buildQueryBillNo('SMLMNJBD6A755700', rule), 'NJBD6A755700');
 });
 
@@ -83,6 +98,12 @@ test('示例 Excel 的 15 条提单全部能识别到对应船司规则', () => 
   rows.forEach(([carrierHint, billNo, code]) => assert.equal(resolveCarrierRule({ billNo, carrierHint }).code, code, billNo));
 });
 
+test('内置规则统一使用提单优先的规范查询模式', () => {
+  assert.ok(CARRIER_RULES.every((rule) => rule.queryMode === 'bill' || rule.queryMode === 'bill-then-container'));
+  assert.equal(CARRIER_RULES.find((rule) => rule.code === 'MAERSK')?.queryMode, 'bill');
+  assert.ok(CARRIER_RULES.filter((rule) => rule.code !== 'MAERSK').every((rule) => rule.queryMode === 'bill-then-container'));
+});
+
 test('ZIM 合并时优先采用带卸船时间的查询结果', () => {
   const base: TrackingResult = { arrivalTime: new Date('2026-08-18T01:00:00Z'), arrivalKind: 'ATA', arrived: true, dischargeTime: null, rawSummary: '提单', sourceUrl: 'a' };
   const container: TrackingResult = { ...base, dischargeTime: new Date('2026-08-18T08:00:00Z'), rawSummary: '柜号', sourceUrl: 'b' };
@@ -91,7 +112,7 @@ test('ZIM 合并时优先采用带卸船时间的查询结果', () => {
   assert.match(merged.rawSummary, /合并提单号查询/);
 });
 
-test('万海提单查询失败后自动使用柜号查询', async () => {
+test('万海提单明确无结果后自动使用柜号查询', async () => {
   const calls: TrackingQuery['queryType'][] = [];
   const containerResult: TrackingResult = { arrivalTime: new Date('2026-08-18T01:00:00Z'), arrivalKind: 'ATA', arrived: true, dischargeTime: null, rawSummary: '柜号查询成功', sourceUrl: 'https://cn.wanhai.com' };
   const provider: TrackingProvider = {
@@ -106,7 +127,7 @@ test('万海提单查询失败后自动使用柜号查询', async () => {
   const tracked = await trackRecord(record, provider);
   assert.ok(calls.includes('bill'));
   assert.ok(calls.includes('container'));
-  assert.match(tracked.result.rawSummary, /OR 规则改用柜号/);
+  assert.match(tracked.result.rawSummary, /明确无结果后已自动改用柜号/);
 });
 
 test('万海提单和柜号均失败时保留两次失败原因', async () => {
@@ -129,7 +150,7 @@ test('万海提单成功时不再执行不必要的柜号查询', async () => {
   assert.deepEqual(calls, ['bill']);
 });
 
-test('森罗按 OR 规则采用任一路成功结果', async () => {
+test('森罗提单明确无结果后采用柜号结果', async () => {
   const result: TrackingResult = { arrivalTime: new Date('2026-08-20T09:00:00Z'), arrivalKind: 'ETA', arrived: false, dischargeTime: null, rawSummary: '柜号查询成功', sourceUrl: 'https://esvc.smlines.com' };
   const provider: TrackingProvider = {
     async query(input) {
@@ -140,10 +161,10 @@ test('森罗按 OR 规则采用任一路成功结果', async () => {
   const record: WorkbookRecord = { rowNumber: 2, carrierHint: '森罗', billNo: 'SMLMNJBD6A755700', containerNo: 'SMCU1312616', arrivalTime: null, dischargeTime: null, vesselState: '', manualMark: '', lastUpdated: null, note: '', progress: '' };
   const tracked = await trackRecord(record, provider);
   assert.equal(tracked.result.arrivalTime?.toISOString(), '2026-08-20T09:00:00.000Z');
-  assert.match(tracked.result.rawSummary, /OR 规则改用柜号/);
+  assert.match(tracked.result.rawSummary, /明确无结果后已自动改用柜号/);
 });
 
-test('森罗提单成功时按 OR 规则直接采用该结果', async () => {
+test('森罗提单成功时直接采用该结果', async () => {
   const result: TrackingResult = { arrivalTime: new Date('2026-08-20T09:00:00Z'), arrivalKind: 'ETA', arrived: false, dischargeTime: null, rawSummary: '森罗查询成功', sourceUrl: 'https://esvc.smlines.com' };
   const calls: TrackingQuery['queryType'][] = [];
   const provider: TrackingProvider = { async query(input) { calls.push(input.queryType); return result; } };
@@ -154,7 +175,7 @@ test('森罗提单成功时按 OR 规则直接采用该结果', async () => {
 });
 
 test('所有非特殊船司都配置了提单未找到后的柜号回退', () => {
-  const exempt = new Set(['ONE', 'MAERSK', 'WANHAI', 'ZIM', 'SMLINE']);
+  const exempt = new Set(['MAERSK']);
   const records = [
     ['MEDUPN815212', 'MSC'], ['EGLV146600523956', 'EVERGREEN'], ['OOLU2171963250', 'OOCL'],
     ['MATS7419163000', 'MATSON'], ['YMJAW239076615', 'YANGMING'], ['CMDUNGP4005669', 'CMA'],
@@ -167,8 +188,8 @@ test('所有非特殊船司都配置了提单未找到后的柜号回退', () =>
   });
 });
 
-test('验证码或网络错误不能触发柜号回退', async () => {
-  for (const reason of ['Cloudflare 验证页面', '官网查询 timeout']) {
+test('验证码、网络和非无结果错误不能触发柜号回退', async () => {
+  for (const reason of ['Cloudflare 验证页面', '官网查询 timeout', '页面未显示查询号码，拒绝写入无法核验的数据', '官网返回柜号与输入不一致']) {
     const calls: TrackingQuery['queryType'][] = [];
     const provider: TrackingProvider = {
       async query(input) {
@@ -195,5 +216,40 @@ test('以星提单明确未找到时允许单独采用柜号结果', async () =>
   const record: WorkbookRecord = { rowNumber: 2, carrierHint: '以星', billNo: 'ZIMUXIA8569326', containerNo: 'ZCSU7648508', arrivalTime: null, dischargeTime: null, vesselState: '', manualMark: '', lastUpdated: null, note: '', progress: '' };
   const tracked = await trackRecord(record, provider);
   assert.deepEqual(calls, ['bill', 'container']);
-  assert.match(tracked.result.rawSummary, /自动改用柜号/);
+  assert.match(tracked.result.rawSummary, /明确无结果后已自动改用柜号/);
+});
+
+test('以星提单查询成功时不再重复查询柜号', async () => {
+  const calls: TrackingQuery['queryType'][] = [];
+  const result: TrackingResult = {
+    arrivalTime: new Date('2026-08-20T09:00:00Z'),
+    arrivalKind: 'ATA',
+    arrived: true,
+    dischargeTime: null,
+    rawSummary: '以星提单查询成功',
+    sourceUrl: 'https://www.zimchina.com',
+  };
+  const provider: TrackingProvider = {
+    async query(input) {
+      calls.push(input.queryType);
+      return result;
+    },
+  };
+  const record: WorkbookRecord = {
+    rowNumber: 2,
+    carrierHint: '以星',
+    billNo: 'ZIMUXIA8569326',
+    containerNo: 'ZCSU7648508',
+    arrivalTime: null,
+    dischargeTime: null,
+    vesselState: '',
+    manualMark: '',
+    lastUpdated: null,
+    note: '',
+    progress: '',
+  };
+  const tracked = await trackRecord(record, provider);
+  assert.deepEqual(calls, ['bill']);
+  assert.equal(tracked.result.rawSummary, '以星提单查询成功');
+  assert.equal(resolveCarrierRule(record).queryMode, 'bill-then-container');
 });

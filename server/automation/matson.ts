@@ -354,12 +354,19 @@ export class MatsonTrackingProvider implements TrackingProvider {
 
   async query(input: TrackingQuery): Promise<TrackingResult> {
     if (input.rule.code !== 'MATSON') throw trackingError('解析失败', `美森解析器不能查询 ${input.rule.name}`);
-    if (input.queryType !== 'bill') throw trackingError('解析失败', '美森解析器目前按提单号查询');
     const billNo = input.queryBillNo.trim().toUpperCase();
-    if (!/^MATS[A-Z0-9]{6,}$/.test(billNo)) throw trackingError('订单号验证失败', `美森提单号格式不正确：${billNo || '空'}`);
+    const containerNo = input.containerNo.trim().toUpperCase();
+    if (input.queryType === 'bill' && !/^MATS[A-Z0-9]{6,}$/.test(billNo)) {
+      throw trackingError('订单号验证失败', `美森提单号格式不正确：${billNo || '空'}`);
+    }
+    if (input.queryType === 'container' && !/^[A-Z]{4}\d{7}$/.test(containerNo)) {
+      throw trackingError('订单号验证失败', `美森柜号格式不正确：${containerNo || '空'}`);
+    }
+    const queryValue = input.queryType === 'container' ? containerNo : billNo;
     const summaryUrl = new URL(MATSON_ENDPOINT);
-    summaryUrl.searchParams.set('cargoNumber', billNo);
-    // 官网 CargoPortal 的“关单号”查询使用 bk；bl 会返回 CS.0004。
+    summaryUrl.searchParams.set('cargoNumber', queryValue);
+    // CargoPortal 的公开查询端点统一使用 bk。它既接受订舱/提单号，
+    // 也接受柜号，并在后者场景返回关联订舱号供 detailpub 继续读取完整轨迹。
     summaryUrl.searchParams.set('type', 'bk');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -376,7 +383,7 @@ export class MatsonTrackingProvider implements TrackingProvider {
       return parseMatsonTrackingResponse(summaryPayload, input.containerNo, detailPayload, {
         expectedBillNo: input.originalBillNo,
         queryType: input.queryType,
-        queryValue: billNo,
+        queryValue,
       });
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') throw trackingError('查询超时', '美森官方接口查询超时，请稍后重试');

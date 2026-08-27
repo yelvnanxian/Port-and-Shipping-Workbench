@@ -94,6 +94,11 @@ export class CarrierRoutingTrackingProvider implements TrackingProvider {
   }
 }
 
+/**
+ * Compatibility helper for callers that already have two independently
+ * collected results. The normal tracking path is bill-first with container
+ * fallback and does not call this function.
+ */
 export function mergeTrackingResults(primary: TrackingResult, secondary: TrackingResult): TrackingResult {
   const hasDischarge = (item: TrackingResult) => Boolean(item.dischargeTime || item.dischargeTimeText || item.discharged);
   const mergeDetail = (preferred: TrackingResult, fallback: TrackingResult) => {
@@ -167,7 +172,12 @@ async function queryMaerskAlternatives(
         rawSummary: `${result.rawSummary}；马士基去前缀查询失败后已自动改用${alternative.label}`,
       };
     } catch (error) {
-      failures.push({ label: alternative.label, failure: classifyTrackingError(error) });
+      const failure = classifyTrackingError(error);
+      failures.push({ label: alternative.label, failure });
+      // The alternative chain is still bill-first: a challenge, timeout,
+      // network error or parser mismatch at one stage must stop the chain,
+      // rather than triggering an unverified container request.
+      if (!isReferenceMissFailure(failure)) throw error;
     }
   }
   const lastFailure = failures.at(-1)!.failure;
@@ -181,7 +191,15 @@ async function queryMaerskAlternatives(
   );
 }
 
-async function queryBillOrContainer(baseQuery: Omit<TrackingQuery, 'queryType'>, provider: TrackingProvider) {
+/**
+ * 统一的提单优先查询链：只有官网明确返回“无结果”，或解析器明确标记
+ * “结果未包含本条输入柜号、需要柜号核验”时才改查柜号。
+ * 验证码、限流、超时和解析异常必须原样抛出，避免错误触发第二次请求。
+ */
+async function queryBillThenContainer(
+  baseQuery: Omit<TrackingQuery, 'queryType'>,
+  provider: TrackingProvider,
+) {
   try {
     return await provider.query({ ...baseQuery, queryType: 'bill' });
   } catch (billError) {
@@ -194,7 +212,7 @@ async function queryBillOrContainer(baseQuery: Omit<TrackingQuery, 'queryType'>,
       const containerResult = await provider.query({ ...baseQuery, queryType: 'container' });
       return {
         ...containerResult,
-        rawSummary: `${containerResult.rawSummary}；提单号未找到后已按 OR 规则改用柜号 ${baseQuery.containerNo}`,
+        rawSummary: `${containerResult.rawSummary}；提单号明确无结果后已自动改用柜号 ${baseQuery.containerNo} 查询`,
       };
     } catch (containerError) {
       const containerFailure = classifyTrackingError(containerError);
@@ -218,50 +236,20 @@ export async function trackRecord(record: WorkbookRecord, provider: TrackingProv
     queryBillNo: buildQueryBillNo(record.billNo, rule),
     containerNo: record.containerNo,
   };
-  if (rule.queryMode === 'bill-or-container') {
-    return { rule, result: await queryBillOrContainer(baseQuery, provider) };
-  }
-  let billResult: TrackingResult;
-  try {
-    billResult = await provider.query({ ...baseQuery, queryType: 'bill' });
-  } catch (billError) {
-    const billFailure = classifyTrackingError(billError);
-    if (rule.code === 'MAERSK' && isReferenceMissFailure(billFailure)) {
-      return { rule, result: await queryMaerskAlternatives(baseQuery, billError, provider) };
-    }
-    if (rule.queryMode !== 'bill-then-container' && rule.queryMode !== 'bill-and-container') throw billError;
-    if (!isReferenceMissFailure(billFailure)) throw billError;
-    if (!record.containerNo) throw trackingError('订单号验证失败', `${rule.name}提单查询失败，且没有柜号可供备用查询`);
+  if (rule.code === 'MAERSK') {
     try {
-      const containerResult = await provider.query({ ...baseQuery, queryType: 'container' });
-      return {
-        rule,
-        result: {
-          ...containerResult,
-          rawSummary: `${containerResult.rawSummary}；提单号明确未找到后已自动改用柜号 ${record.containerNo} 查询`,
-        },
-      };
-    } catch (containerError) {
-      const containerFailure = classifyTrackingError(containerError);
-      throw trackingError(
-        containerFailure.category,
-        `${rule.name}提单查询失败（${billFailure.category}：${billFailure.reason}）；柜号 ${record.containerNo} 备用查询也失败（${containerFailure.category}：${containerFailure.reason}）`,
-        { evidencePath: containerFailure.evidencePath || billFailure.evidencePath, sourceUrl: containerFailure.sourceUrl || billFailure.sourceUrl },
-      );
+      return { rule, result: await provider.query({ ...baseQuery, queryType: 'bill' }) };
+    } catch (billError) {
+      const billFailure = classifyTrackingError(billError);
+      if (isReferenceMissFailure(billFailure)) {
+        return { rule, result: await queryMaerskAlternatives(baseQuery, billError, provider) };
+      }
+      throw billError;
     }
   }
-  if (rule.queryMode !== 'bill-and-container') return { rule, result: billResult };
-  if (!record.containerNo) throw trackingError('订单号验证失败', `${rule.name}需要同时提供柜号进行交叉查询`);
-  let containerResult: TrackingResult;
-  try {
-    containerResult = await provider.query({ ...baseQuery, queryType: 'container' });
-  } catch (containerError) {
-    const failure = classifyTrackingError(containerError);
-    throw trackingError(
-      failure.category,
-      `${rule.name}提单查询成功，但柜号 ${record.containerNo} 交叉查询失败（${failure.category}：${failure.reason}），拒绝写入未经双重核验的数据`,
-      { evidencePath: failure.evidencePath, sourceUrl: failure.sourceUrl },
-    );
-  }
-  return { rule, result: mergeTrackingResults(billResult, containerResult) };
+
+  if (rule.queryMode === 'bill') return { rule, result: await provider.query({ ...baseQuery, queryType: 'bill' }) };
+  // The two legacy values are accepted when loading old serialized rules, but
+  // all of them now use the same bill-first/container-fallback semantics.
+  return { rule, result: await queryBillThenContainer(baseQuery, provider) };
 }

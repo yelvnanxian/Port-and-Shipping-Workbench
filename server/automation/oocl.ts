@@ -405,10 +405,14 @@ export class OoclTrackingProvider implements TrackingProvider {
   ) {}
 
   async query(input: TrackingQuery): Promise<TrackingResult> {
-    if (input.rule.code !== 'OOCL') throw new Error(`OOCL 解析器不能查询 ${input.rule.name}`);
-    if (input.queryType !== 'bill') throw new Error('OOCL 解析器目前仅支持提单号查询');
+    if (input.rule.code !== 'OOCL') throw trackingError('解析失败', `OOCL 解析器不能查询 ${input.rule.name}`);
+    if (input.queryType !== 'bill') {
+      // OOCL Lite only exposes the bill-number endpoint. Container fallback,
+      // when enabled, is handled by the Patchright Control Tower provider.
+      throw trackingError('解析失败', 'OOCL 官方 Lite 接口仅支持提单号查询，柜号请使用网页查询通道');
+    }
     const billNo = input.queryBillNo.trim().toUpperCase();
-    if (!/^OOLU[A-Z0-9]{6,}$/.test(billNo)) throw new Error(`OOCL 提单号格式不正确：${billNo || '空'}`);
+    if (!/^OOLU[A-Z0-9]{6,}$/.test(billNo)) throw trackingError('订单号验证失败', `OOCL 提单号格式不正确：${billNo || '空'}`);
 
     const url = new URL(OOCL_TRACKING_ENDPOINT);
     url.searchParams.set('paramString', `blNumber=${billNo}`);
@@ -419,19 +423,28 @@ export class OoclTrackingProvider implements TrackingProvider {
         headers: { accept: 'application/json' },
         signal: controller.signal,
       });
-      if (!response.ok) throw new Error(`OOCL 官方接口 HTTP ${response.status}`);
+      if (!response.ok) {
+        const category = response.status === 401
+          ? '官网拒绝访问'
+          : response.status === 403 || response.status === 412
+            ? '验证码或风控'
+            : '官网接口异常';
+        throw trackingError(category, `OOCL 官方接口 HTTP ${response.status}`);
+      }
       const body = await response.text();
       let payload: unknown;
       try {
         payload = JSON.parse(body);
       } catch {
-        throw new Error(/<html|challenge|cloudflare/i.test(body)
-          ? 'OOCL 官网返回了验证页面，暂时无法自动查询'
-          : 'OOCL 返回了无法识别的数据格式');
+        const challenge = /<html|challenge|cloudflare/i.test(body);
+        throw trackingError(
+          challenge ? '验证码或风控' : '解析失败',
+          challenge ? 'OOCL 官网返回了验证页面，暂时无法自动查询' : 'OOCL 返回了无法识别的数据格式',
+        );
       }
       return parseOoclTrackingResponse(payload, input.containerNo);
     } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') throw new Error('OOCL 官方查询超时，请稍后重试');
+      if (error instanceof Error && error.name === 'AbortError') throw trackingError('查询超时', 'OOCL 官方查询超时，请稍后重试');
       throw error;
     } finally {
       clearTimeout(timer);

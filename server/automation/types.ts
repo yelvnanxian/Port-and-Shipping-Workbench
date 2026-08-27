@@ -82,6 +82,11 @@ export interface CarrierRule {
   code: string;
   name: string;
   removePrefix: boolean;
+  /**
+   * `bill-or-container` and `bill-then-container` both mean bill-first with
+   * container fallback. `bill-and-container` remains only for compatibility
+   * with older serialized rules and is treated the same way by trackRecord.
+   */
   queryMode: 'bill' | 'bill-and-container' | 'bill-then-container' | 'bill-or-container';
   url: string;
   integration: 'ready' | 'blocked' | 'limited' | 'error';

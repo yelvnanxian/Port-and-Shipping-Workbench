@@ -119,3 +119,20 @@ test('美森 Provider 使用官网 bk 查询参数', async () => {
   assert.equal(result.dischargeTime !== null, true);
   assert.equal(result.trackingDetail?.events.length, 10);
 });
+
+test('美森提单无结果后可以用柜号走同一公开查询端点', async () => {
+  const called: string[] = [];
+  const provider = new MatsonTrackingProvider(async (input) => {
+    called.push(String(input));
+    return new Response(JSON.stringify(String(input).includes('detailpub') ? detailPayload : payload), { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+  const result = await provider.query({
+    rule: { prefix: 'MATS', code: 'MATSON', name: '美森', removePrefix: false, queryMode: 'bill-then-container', url: 'https://www.cargo.chinamatson.com/', integration: 'ready', integrationMessage: '' },
+    originalBillNo: 'MATS7419163000', queryBillNo: 'MATS7419163000', containerNo: 'MATU2362806', queryType: 'container',
+  });
+  assert.match(called[0], /cargoNumber=MATU2362806/);
+  assert.match(called[0], /type=bk/);
+  assert.equal(result.trackingDetail?.queryType, 'container');
+  assert.equal(result.trackingDetail?.queryValue, 'MATU2362806');
+  assert.equal(result.dischargeTime !== null, true);
+});
