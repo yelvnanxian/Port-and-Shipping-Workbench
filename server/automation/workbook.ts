@@ -4,6 +4,7 @@ import JSZip from 'jszip';
 import path from 'node:path';
 import type { ManualMark, QueryProgress, TrackingTime, VesselState, WorkbookRecord } from './types.js';
 import { SerialExecutionCoordinator } from './concurrency.js';
+import { ConflictError, NotFoundError, RequestValidationError } from '../validation.js';
 
 const LEGACY_REQUIRED_HEADERS = ['船司', '到港时间', '提单号', '柜号', '卸船时间', '船只状态', '最后更新时间', '备注', '进度'] as const;
 export const REQUIRED_HEADERS = ['船司', '到港时间', '提单号', '柜号', '卸船时间', '船只状态', '人工标记', '最后更新时间', '备注', '进度'] as const;
@@ -51,9 +52,9 @@ async function normalizeNamespacePrefixes(filePath: string) {
   const input = await fs.readFile(filePath);
   const zip = await JSZip.loadAsync(input);
   const entries = Object.values(zip.files);
-  if (entries.length > 5_000) throw new Error('Excel 压缩包文件数量异常，已拒绝导入');
+  if (entries.length > 5_000) throw new RequestValidationError('Excel 压缩包文件数量异常，已拒绝导入');
   const uncompressedSize = entries.reduce((total, entry) => total + Number((entry as typeof entry & { _data?: { uncompressedSize?: number } })._data?.uncompressedSize || 0), 0);
-  if (uncompressedSize > 100 * 1024 * 1024) throw new Error('Excel 解压后体积超过 100MB，已拒绝导入');
+  if (uncompressedSize > 100 * 1024 * 1024) throw new RequestValidationError('Excel 解压后体积超过 100MB，已拒绝导入');
   let changed = false;
   for (const entry of entries) {
     if (entry.dir || !(entry.name.endsWith('.xml') || entry.name.endsWith('.rels'))) continue;
@@ -111,11 +112,11 @@ export class WorkbookStore {
     await this.initialize();
     try {
       const stat = await fs.stat(uploadedPath);
-      if (stat.size <= 0 || stat.size > 20 * 1024 * 1024) throw new Error('Excel 文件大小必须在 1B 至 20MB 之间');
+      if (stat.size <= 0 || stat.size > 20 * 1024 * 1024) throw new RequestValidationError('Excel 文件大小必须在 1B 至 20MB 之间');
       const magic = await fs.open(uploadedPath, 'r');
       const header = Buffer.alloc(4);
       await magic.read(header, 0, 4, 0).finally(() => magic.close().catch(() => undefined));
-      if (header[0] !== 0x50 || header[1] !== 0x4b) throw new Error('上传内容不是有效的 .xlsx 文件');
+      if (header[0] !== 0x50 || header[1] !== 0x4b) throw new RequestValidationError('上传内容不是有效的 .xlsx 文件');
       if (await this.exists()) await this.backup('上传替换');
       await normalizeNamespacePrefixes(uploadedPath);
       const workbook = new ExcelJS.Workbook();
@@ -151,7 +152,7 @@ export class WorkbookStore {
   }
 
   async open() {
-    if (!(await this.exists())) throw new Error('尚未导入 Excel 文件');
+    if (!(await this.exists())) throw new NotFoundError('尚未导入 Excel 文件');
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(this.currentPath);
     const headerValues = workbook.worksheets[0]?.getRow(1).values;
@@ -164,14 +165,14 @@ export class WorkbookStore {
 
   validate(workbook: ExcelJS.Workbook) {
     const sheet = workbook.worksheets[0];
-    if (!sheet) throw new Error('Excel 中没有工作表');
+    if (!sheet) throw new RequestValidationError('Excel 中没有工作表');
     const headerMap = new Map<HeaderName, number>();
     sheet.getRow(1).eachCell((cell, column) => {
       const value = cell.text.trim() as HeaderName;
       if (REQUIRED_HEADERS.includes(value)) headerMap.set(value, column);
     });
     const missing = LEGACY_REQUIRED_HEADERS.filter((header) => !headerMap.has(header));
-    if (missing.length) throw new Error(`Excel 缺少表头：${missing.join('、')}`);
+    if (missing.length) throw new RequestValidationError(`Excel 缺少表头：${missing.join('、')}`);
     if (!headerMap.has('人工标记')) {
       const column = Math.max(sheet.columnCount + 1, ...headerMap.values());
       const cell = sheet.getRow(1).getCell(column);
@@ -256,7 +257,10 @@ export class WorkbookStore {
     const { sheet, headerMap } = await this.open();
     const records = this.readRecords(sheet, headerMap);
     return {
-      path: this.currentPath,
+      // Metadata is returned by several authenticated API routes. Keep the
+      // actual filesystem location private; callers only need the safe file
+      // name and size/timestamps.
+      path: '',
       fileName: path.basename(this.currentPath),
       size: stat.size,
       modifiedAt: stat.mtime.toISOString(),
@@ -283,7 +287,7 @@ export class WorkbookStore {
 
   backupPath(name: string) {
     const safeName = path.basename(name);
-    if (safeName !== name || !safeName.endsWith('.xlsx')) throw new Error('备份文件名不合法');
+    if (safeName !== name || !safeName.endsWith('.xlsx')) throw new RequestValidationError('备份文件名不合法');
     return path.join(this.backupDirectory, safeName);
   }
 
@@ -368,11 +372,11 @@ export class WorkbookStore {
   async deleteRecords(rowNumbers: number[]) {
     return this.withWriteLock(async () => {
     const requested = [...new Set(rowNumbers.filter((rowNumber) => Number.isInteger(rowNumber) && rowNumber >= 2))];
-    if (!requested.length) throw new Error('请选择要删除的船期记录');
+    if (!requested.length) throw new RequestValidationError('请选择要删除的船期记录');
     const opened = await this.open();
     const existing = new Set(this.readRecords(opened.sheet, opened.headerMap).map((record) => record.rowNumber));
     const missing = requested.filter((rowNumber) => !existing.has(rowNumber));
-    if (missing.length) throw new Error(`找不到船期记录：${missing.join('、')}`);
+    if (missing.length) throw new NotFoundError(`找不到船期记录：${missing.join('、')}`);
     requested.sort((left, right) => right - left).forEach((rowNumber) => opened.sheet.spliceRows(rowNumber, 1));
     await this.save(opened.workbook);
     return { deleted: requested.length, metadata: await this.metadata() };
@@ -381,10 +385,10 @@ export class WorkbookStore {
 
   async archiveRecord(rowNumber: number, historyId: string) {
     return this.withWriteLock(async () => {
-    if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new Error('船期记录编号不合法');
+    if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new RequestValidationError('船期记录编号不合法');
     const opened = await this.open();
     const record = this.readRecords(opened.sheet, opened.headerMap).find((item) => item.rowNumber === rowNumber);
-    if (!record) throw new Error('找不到对应船期记录');
+    if (!record) throw new NotFoundError('找不到对应船期记录');
     const row = opened.sheet.getRow(rowNumber);
     for (const header of REQUIRED_HEADERS) row.getCell(opened.headerMap.get(header)!).value = null;
     row.getCell(opened.headerMap.get('备注')!).value = `清关历史归档占位 ${historyId}`;
@@ -404,8 +408,8 @@ export class WorkbookStore {
     const duplicate = records.find((record) => normalizedBill
       ? record.billNo === normalizedBill
       : Boolean(normalizedContainer && record.containerNo === normalizedContainer));
-    if (duplicate) throw new Error(`当前船期追踪已存在 ${normalizedBill || normalizedContainer}，不能重复恢复`);
-    if (!normalizedBill && !normalizedContainer) throw new Error('历史记录缺少提单号和柜号，无法恢复');
+    if (duplicate) throw new ConflictError(`当前船期追踪已存在 ${normalizedBill || normalizedContainer}，不能重复恢复`);
+    if (!normalizedBill && !normalizedContainer) throw new RequestValidationError('历史记录缺少提单号和柜号，无法恢复');
     const values: Record<HeaderName, ExcelJS.CellValue> = {
       船司: entry.carrierHint,
       到港时间: entry.arrivalTime,
@@ -453,10 +457,10 @@ export class WorkbookStore {
 
   async exportRecords(rowNumbers: number[]) {
     const requested = new Set(rowNumbers.filter((rowNumber) => Number.isInteger(rowNumber) && rowNumber >= 2));
-    if (!requested.size) throw new Error('当前列表没有可导出的记录');
+    if (!requested.size) throw new RequestValidationError('当前列表没有可导出的记录');
     const opened = await this.open();
     const records = this.readRecords(opened.sheet, opened.headerMap).filter((record) => requested.has(record.rowNumber));
-    if (!records.length) throw new Error('当前列表没有可导出的记录');
+    if (!records.length) throw new NotFoundError('当前列表没有可导出的记录');
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('筛选结果', { views: [{ state: 'frozen', ySplit: 1 }] });
     sheet.addRow([...REQUIRED_HEADERS]);

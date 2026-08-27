@@ -5,6 +5,7 @@ import type { NextFunction, Request, Response } from 'express';
 import type { AppDatabase } from './database.js';
 import { auditLog } from './audit.js';
 import { SerialExecutionCoordinator } from './automation/concurrency.js';
+import { ConflictError, NotFoundError, RateLimitError, RequestValidationError, UnauthorizedError } from './validation.js';
 
 export type UserRole = 'admin' | 'user';
 export interface AuthUser { id: string; username: string; role: UserRole }
@@ -39,12 +40,12 @@ function cookieValue(req: Request, name: string) {
 
 function cleanUsername(value: string) {
   const username = value.trim();
-  if (!/^[\p{L}\p{N}._-]{2,32}$/u.test(username)) throw new Error('用户名需为 2-32 位字母、数字或中文字符');
+  if (!/^[\p{L}\p{N}._-]{2,32}$/u.test(username)) throw new RequestValidationError('用户名需为 2-32 位字母、数字或中文字符');
   return username;
 }
 
 function cleanPassword(value: string) {
-  if (value.length < 12 || value.length > 128) throw new Error('密码长度必须为 12-128 位');
+  if (value.length < 12 || value.length > 128) throw new RequestValidationError('密码长度必须为 12-128 位');
   return value;
 }
 
@@ -135,13 +136,13 @@ export class AuthService {
   async login(username: string, password: string, clientKey = 'unknown') {
     const now = Date.now();
     const attempt = this.failedLogins.get(clientKey);
-    if (attempt && attempt.resetAt > now && attempt.count >= 10) throw new Error('登录失败次数过多，请 15 分钟后重试');
+    if (attempt && attempt.resetAt > now && attempt.count >= 10) throw new RateLimitError('登录失败次数过多，请 15 分钟后重试');
     const user = (await this.loadUsers()).find((item) => item.enabled && item.username === username && matchesPassword(password, item));
     if (!user) {
       const current = attempt && attempt.resetAt > now ? attempt : { count: 0, resetAt: now + 15 * 60 * 1000 };
       this.failedLogins.set(clientKey, { count: current.count + 1, resetAt: current.resetAt });
       await auditLog(path.dirname(this.usersPath), 'auth.login.failure', { clientKey, attempt: current.count + 1 });
-      throw new Error('用户名或密码错误');
+      throw new UnauthorizedError('用户名或密码错误');
     }
     this.failedLogins.delete(clientKey);
     const token = crypto.randomBytes(32).toString('base64url');
@@ -204,12 +205,12 @@ export class AuthService {
 
   async createUser(input: { username: string; password: string; role: UserRole }) {
     return this.userMutationCoordinator.run(async () => {
-    if (!this.enabled) throw new Error('请先在 .env 中设置 AUTH_ENABLED=true 后再管理登录账号');
+    if (!this.enabled) throw new ConflictError('请先在 .env 中设置 AUTH_ENABLED=true 后再管理登录账号');
     const users = await this.usersOrThrow();
     const username = cleanUsername(input.username);
     const password = cleanPassword(input.password);
-    if (input.role !== 'admin' && input.role !== 'user') throw new Error('用户角色不合法');
-    if (users.some((user) => user.username.toLowerCase() === username.toLowerCase())) throw new Error('用户名已存在');
+    if (input.role !== 'admin' && input.role !== 'user') throw new RequestValidationError('用户角色不合法');
+    if (users.some((user) => user.username.toLowerCase() === username.toLowerCase())) throw new ConflictError('用户名已存在');
     const now = new Date().toISOString();
     const user: StoredUser = { id: `user-${crypto.randomBytes(8).toString('hex')}`, username, role: input.role, enabled: true, createdAt: now, updatedAt: now, ...hashPassword(password) };
     users.push(user);
@@ -223,13 +224,13 @@ export class AuthService {
     return this.userMutationCoordinator.run(async () => {
     const users = await this.usersOrThrow();
     const user = users.find((item) => item.id === id);
-    if (!user) throw new Error('用户不存在');
-    if (patch.role !== undefined && patch.role !== 'admin' && patch.role !== 'user') throw new Error('用户角色不合法');
+    if (!user) throw new NotFoundError('用户不存在');
+    if (patch.role !== undefined && patch.role !== 'admin' && patch.role !== 'user') throw new RequestValidationError('用户角色不合法');
     const nextRole = patch.role || user.role;
     const nextEnabled = patch.enabled ?? user.enabled;
     const roleChanged = nextRole !== user.role;
-    if (user.id === actorId && (!nextEnabled || nextRole !== 'admin')) throw new Error('不能停用或降级当前登录的管理员账号');
-    if (user.role === 'admin' && (nextRole !== 'admin' || !nextEnabled) && users.filter((item) => item.role === 'admin' && item.enabled).length <= 1) throw new Error('至少需要保留一个启用的管理员账号');
+    if (user.id === actorId && (!nextEnabled || nextRole !== 'admin')) throw new ConflictError('不能停用或降级当前登录的管理员账号');
+    if (user.role === 'admin' && (nextRole !== 'admin' || !nextEnabled) && users.filter((item) => item.role === 'admin' && item.enabled).length <= 1) throw new ConflictError('至少需要保留一个启用的管理员账号');
     user.role = nextRole;
     user.enabled = nextEnabled;
     user.updatedAt = new Date().toISOString();
@@ -244,7 +245,7 @@ export class AuthService {
     return this.userMutationCoordinator.run(async () => {
     const users = await this.usersOrThrow();
     const user = users.find((item) => item.id === id);
-    if (!user) throw new Error('用户不存在');
+    if (!user) throw new NotFoundError('用户不存在');
     const passwordData = hashPassword(cleanPassword(password));
     user.salt = passwordData.salt;
     user.passwordHash = passwordData.passwordHash;
@@ -260,10 +261,10 @@ export class AuthService {
     return this.userMutationCoordinator.run(async () => {
     const users = await this.usersOrThrow();
     const index = users.findIndex((item) => item.id === id);
-    if (index < 0) throw new Error('用户不存在');
-    if (id === actorId) throw new Error('不能删除当前登录账号');
+    if (index < 0) throw new NotFoundError('用户不存在');
+    if (id === actorId) throw new ConflictError('不能删除当前登录账号');
     const user = users[index];
-    if (user.role === 'admin' && user.enabled && users.filter((item) => item.role === 'admin' && item.enabled).length <= 1) throw new Error('至少需要保留一个启用的管理员账号');
+    if (user.role === 'admin' && user.enabled && users.filter((item) => item.role === 'admin' && item.enabled).length <= 1) throw new ConflictError('至少需要保留一个启用的管理员账号');
     users.splice(index, 1);
     await this.saveUsers();
     this.revokeUserSessions(id, 'revoked');

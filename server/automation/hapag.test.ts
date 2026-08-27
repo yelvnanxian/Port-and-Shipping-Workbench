@@ -125,3 +125,43 @@ test('赫伯罗特真实 Last Movement 摘要和事件表解析目的地实际�
   assert.match(result.routeText || '', /DETROIT, MI/);
   assert.ok((result.trackingDetail?.events.length || 0) >= 3);
 });
+
+test('赫伯罗特中转港卸船不能覆盖最终目的港到港，也不能提前标记已卸船', () => {
+  const containerQuery: TrackingQuery = { ...query, queryType: 'container' };
+  const result = parseHapagTrackingText([
+    'Tracking by Container',
+    'Container No.',
+    'HAMU 1828139',
+    'Last Movement',
+    'The container arrived in DETROIT, MI at 2026-08-21.',
+    'Status',
+    'Place of Activity',
+    'Date',
+    'Time',
+    'Transport',
+    'Vessel arrived',
+    'VANCOUVER, BC',
+    '2026-08-02',
+    '18:30',
+    'Discharged',
+    'VANCOUVER, BC',
+    '2026-08-03',
+    '21:13',
+    'Arrival in',
+    'DETROIT, MI',
+    '2026-08-19',
+    '03:51',
+    'Gate in empty',
+    'DETROIT, MI',
+    '2026-08-21',
+    '09:13',
+  ].join('\n'), containerQuery);
+
+  assert.equal(result.arrivalTimeText, '2026-08-21（官网未标注时区）');
+  assert.equal(result.discharged, false);
+  assert.equal(result.dischargeTimeText, null);
+  assert.match(result.routeText || '', /VANCOUVER, BC/);
+  assert.match(result.routeText || '', /DETROIT, MI/);
+  const vancouver = result.trackingDetail?.routeStops.find((stop) => stop.name === 'VANCOUVER, BC');
+  assert.equal(vancouver?.role, 'transshipment');
+});

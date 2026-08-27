@@ -1,8 +1,12 @@
 import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { FileBlob, SpreadsheetFile } from '@oai/artifact-tool';
 
-const outputDirectory = '/Users/dc-ext-09/personal/work_table/outputs/01a014e4-2b3b-7f43-9fa3-d1086c95abc9';
-const workbookPath = `${outputDirectory}/船期自动抓取模板.xlsx`;
+const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const defaultWorkbookPath = path.join(projectDirectory, 'outputs', '01a014e4-2b3b-7f43-9fa3-d1086c95abc9', '船期自动抓取模板.xlsx');
+const workbookPath = path.resolve(process.argv[2] || defaultWorkbookPath);
+const outputDirectory = path.dirname(workbookPath);
 const workbook = await SpreadsheetFile.importXlsx(await FileBlob.load(workbookPath));
 
 const summary = await workbook.inspect({ kind: 'sheet,table', maxChars: 5000, tableMaxRows: 4, tableMaxCols: 10 });

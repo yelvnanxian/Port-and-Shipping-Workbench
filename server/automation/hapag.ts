@@ -185,15 +185,33 @@ export function parseHapagTrackingText(text: string, input: TrackingQuery): Trac
   }
 
   const events = hapagEvents(lines);
-  const destination = valueAfterRouteLabel(lines, /Port of Discharge|Destination/i);
+  const routeDestination = valueAfterRouteLabel(lines, /Port of Discharge|Destination/i);
+  // 赫伯罗特的柜号详情页经常不返回 Port of Discharge/最终目的地字段，
+  // 但会在事件表中同时出现中转港卸船和最终目的港到达。此时不能把
+  // 第一条 Discharged（通常是中转港）直接当成最终卸船。优先用最后一条
+  // 实际到港事件推断最终目的地；只有完全没有到港事件时，才退回最后一条
+  // 实际卸船事件，兼容只有卸船节点的详情页。
+  const inferredDestination = routeDestination
+    || [...events].reverse().find((event) => event.actual && event.eventType === 'arrival' && event.location)?.location
+    || [...events].reverse().find((event) => event.actual && event.eventType === 'discharge' && event.location)?.location
+    || '';
+  const destination = inferredDestination;
   const isDestinationEvent = (event: TrackingEventDetail) => !destination || (event.location ? sameLocation(event.location, destination) : false);
   const destinationEvents = events.filter(isDestinationEvent);
   const actualArrival = [...destinationEvents].reverse().find((event) => event.eventType === 'arrival' && event.actual)?.timeText?.replace('（官网未标注时区）', '')
-    || eventDate(lines, /actual(?: time of)? arrival|arrived at|container arrived in|arrival at (?:pod|destination)|^arrival in$/i, /estimated|expected/i);
+    || (!events.some((event) => event.eventType === 'arrival' && event.actual)
+      ? eventDate(lines, /actual(?: time of)? arrival|arrived at|container arrived in|arrival at (?:pod|destination)|^arrival in$/i, /estimated|expected/i)
+      : '');
   const estimatedArrival = [...destinationEvents].reverse().find((event) => event.eventType === 'arrival' && !event.actual)?.timeText?.replace('（官网未标注时区）', '')
-    || eventDate(lines, /estimated arrival|estimated time of arrival|\bETA\b/i, /actual|arrived|discharg/i);
+    || (!events.some((event) => event.eventType === 'arrival' && !event.actual)
+      ? eventDate(lines, /estimated arrival|estimated time of arrival|\bETA\b/i, /actual|arrived|discharg/i)
+      : '');
+  // 页面存在中转港 Discharged 时，绝不能用全页第一条卸船事件兜底；
+  // 只有事件表完全没有任何卸船节点时，才允许从摘要文字提取时间。
   const discharge = [...destinationEvents].reverse().find((event) => event.eventType === 'discharge' && event.actual)?.timeText?.replace('（官网未标注时区）', '')
-    || eventDate(lines, /discharg|unload/i, /estimated|expected|planned/i);
+    || (!events.some((event) => event.eventType === 'discharge' && event.actual)
+      ? eventDate(lines, /discharg|unload/i, /estimated|expected|planned/i)
+      : '');
   if (!actualArrival && !estimatedArrival && !discharge && !events.length) {
     throw trackingError('解析失败', '赫伯罗特官网已返回柜号结果，但没有可验证的运输事件');
   }

@@ -40,6 +40,26 @@ test('等待其他账号任务时状态会显示排队数量', async () => {
   }
 });
 
+test('自动化状态不会向 API 暴露 Excel 本机绝对路径', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-public-status-'));
+  try {
+    const store = new WorkbookStore(root);
+    await store.appendRecords([{ billNo: 'OOLU2171963250', containerNo: 'OOCU7496887', carrierHint: '东方海外' }]);
+    const engine = new AutomationEngine(store);
+    await fs.writeFile(engine.runLogPath, JSON.stringify([{
+      id: 'RUN-20260826123456', reason: 'manual', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+      total: 1, success: 1, unfinished: 0, failed: 0, skipped: 0, failedBills: [], failedDetails: [],
+      backupPath: path.join(root, 'backups', 'legacy.xlsx'), notification: 'skipped',
+    }]));
+    const status = await engine.status();
+    assert.equal(status.workbook?.path, '');
+    assert.equal(status.workbook?.fileName, 'current.xlsx');
+    assert.equal(status.lastRun?.backupPath, 'legacy.xlsx');
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('从成功备注中解析浏览器采集证据', () => {
   const evidencePath = '/api/browser-evidence/2026-08-19_MSC_MEDUPN815212_success.png';
   assert.equal(

@@ -10,6 +10,7 @@ export interface Shipment {
   vesselVoyage: string;
   terminal: string;
   eta: string | null;
+  arrivalKind?: 'ATA' | 'ETA' | null;
   berthingTime: string | null;
   dischargeTime: string | null;
   status: ShipmentStatus;

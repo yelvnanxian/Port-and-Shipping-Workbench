@@ -200,12 +200,22 @@ function summarizeNote(note?: string) {
   const reason = note.match(/(?:^|；)原因=([^；]+)/)?.[1];
   if (category || reason) return concise(`${category || '查询失败'}：${reason || '官网未返回可核验数据'}`);
   if (/人工补录|人工修改/.test(note)) return concise(note.split('；')[0]);
-  if (/确认已卸船，但未提供精确卸船时刻/.test(note)) return '已确认卸船完成，官网未提供精确卸船时间';
+  if (/确认已卸船，但未提供(?:精确)?卸船(?:时刻|时间)/.test(note) || /已卸船，但未提供具体时刻/.test(note)) return '已确认卸船完成，官网未提供精确卸船时间';
   const arrivalKind = note.match(/(?:^|；)到港字段=(ATA|ETA)/)?.[1];
   if (/已发现实际卸船事件|已发现卸船事件/.test(note)) return `已获取${arrivalKind ? ` ${arrivalKind}` : '到港时间'}和实际卸船时间`;
   if (arrivalKind) return `已获取 ${arrivalKind}，尚未发现实际卸船时间`;
   const firstSummary = note.split('；').find((part) => !/^(?:来源|成功证据|运行线路)=/.test(part.trim())) || note;
   return concise(firstSummary);
+}
+
+function arrivalKindFor(shipment: Shipment): 'ATA' | 'ETA' | null {
+  if (shipment.arrivalKind === 'ATA' || shipment.arrivalKind === 'ETA') return shipment.arrivalKind;
+  return shipment.note?.match(/(?:^|；)到港字段=(ATA|ETA)/)?.[1] as 'ATA' | 'ETA' | undefined || null;
+}
+
+function ArrivalTimeCell({ shipment }: { shipment: Shipment }) {
+  const kind = arrivalKindFor(shipment);
+  return <div className="date-cell eta">{kind && <em className={`arrival-kind ${kind === 'ATA' ? 'actual' : 'estimated'}`}>{kind === 'ATA' ? '实际 ATA' : '预计 ETA'}</em>}{formatDateTime(shipment.eta, true)}</div>;
 }
 
 function formatDateTime(value: string | null, twoLines = false) {
@@ -224,6 +234,20 @@ function timeAgo(value: string) {
   if (minutes < 1) return '刚刚';
   if (minutes < 60) return `${minutes} 分钟前`;
   return `${Math.floor(minutes / 60)} 小时前`;
+}
+
+function formatTodayLabel(value = new Date()) {
+  const date = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+  }).format(value);
+  const weekday = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    weekday: 'short',
+  }).format(value);
+  return `${date} · ${weekday}`;
 }
 
 function shipmentTimestamp(value: string | null | undefined) {
@@ -478,6 +502,7 @@ export default function App() {
   const [pageSize, setPageSize] = useState(20);
   const [pageNumber, setPageNumber] = useState(1);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [todayLabel, setTodayLabel] = useState(() => formatTodayLabel());
   const [sourceDetailsOpen, setSourceDetailsOpen] = useState(false);
   const [skipCompletedRecords, setSkipCompletedRecords] = useState(true);
   const [verificationDismissed, setVerificationDismissed] = useState('');
@@ -1038,6 +1063,11 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => setTodayLabel(formatTodayLabel()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const allSelected = visibleRows.length > 0 && visibleRows.every((item) => selected.has(item.id));
   const carriers = Array.from(new Set(data?.shipments.map((item) => item.carrierCode) || []));
   const successfulSources = data?.sources.filter((source) => source.status === 'online').length || 0;
@@ -1075,7 +1105,7 @@ export default function App() {
         <header className="topbar">
           <button className="mobile-menu" onClick={() => setMobileNav(true)}><Menu size={21} /></button>
           <div className="breadcrumb"><span>港航运营</span><ChevronRight size={14} /><strong>{pageTitles[activePage]}</strong></div>
-          <div className="header-actions"><button className="icon-button" title="查看自动化任务" onClick={() => navigate('automation')}><Bell size={19} /><span className="notification-dot" /></button><span className="today"><CalendarDays size={16} />2026年8月18日 · 周二</span></div>
+          <div className="header-actions"><button className="icon-button" title="查看自动化任务" onClick={() => navigate('automation')}><Bell size={19} /><span className="notification-dot" /></button><span className="today"><CalendarDays size={16} />{todayLabel}</span></div>
         </header>
 
         <div className="content">
@@ -1152,7 +1182,7 @@ export default function App() {
                     <tr key={item.id} className={`${selected.has(item.id) ? 'selected-row' : ''} ${item.manualMark === '已清关' ? 'cleared-row' : ''}`}>
                       <td className="check-col"><input type="checkbox" checked={selected.has(item.id)} onChange={() => toggleOne(item.id)} /></td>
                       <td><div className="carrier-cell"><CarrierMark code={item.carrierCode} /><div><strong>{carrierLabel(item.carrierCode, item.carrier)}</strong><span>{item.carrierCode}</span></div></div></td>
-                      <td><div className="date-cell eta">{formatDateTime(item.eta, true)}</div></td>
+                      <td><ArrivalTimeCell shipment={item} /></td>
                       <td><strong className="mono">{item.billNo}</strong></td>
                       <td><strong className="mono muted-strong">{item.containerNo || '—'}</strong></td>
                       <td>{item.trackingDetail?.currentPort || '—'}</td>
@@ -2018,7 +2048,8 @@ function DetailItem({ label, value }: { label: string; value: React.ReactNode })
 }
 
 function TimelineItem({ label, value, active = false, last = false }: { label: string; value: React.ReactNode; active?: boolean; last?: boolean }) {
-  return <div className={`timeline-item ${active ? 'active' : ''} ${last ? 'last' : ''}`}><span className="timeline-dot" /><div><span>{label}</span><strong>{value}</strong></div></div>;
+  const displayLabel = label === '到港时间 ATA / ETA' ? '到港时间（实际 ATA / 预计 ETA）' : label;
+  return <div className={`timeline-item ${active ? 'active' : ''} ${last ? 'last' : ''}`}><span className="timeline-dot" /><div><span>{displayLabel}</span><strong>{value}</strong></div></div>;
 }
 
 function RouteTimeline({ route, detail }: { route?: string | null; detail?: Shipment['trackingDetail'] }) {

@@ -12,6 +12,8 @@ export interface Shipment {
   eta: string | null;
   berthingTime: string | null;
   dischargeTime: string | null;
+  /** Whether the displayed arrival time is an actual arrival or an estimate. */
+  arrivalKind?: 'ATA' | 'ETA' | null;
   status: ShipmentStatus;
   lastUpdated: string;
   note?: string;

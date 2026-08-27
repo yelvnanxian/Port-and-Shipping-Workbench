@@ -29,6 +29,7 @@ import type { AppDatabase } from '../database.js';
 import { safeSourceCode, sourceEvidenceDirectory, sourceEvidenceUrl, sourceTrackingDetailKey, sourceTrackingDetailPath, sourceTrackingDetailUrl } from './source-storage.js';
 import { SerialExecutionCoordinator } from './concurrency.js';
 import { checkAndPlanCarrierBatches } from './batch-checker.js';
+import { ConflictError, NotFoundError, RequestValidationError } from '../validation.js';
 
 function isQueryable(record: WorkbookRecord) {
   return record.manualMark !== '已清关'
@@ -65,7 +66,7 @@ function clearAutomaticTrackingResult(record: WorkbookRecord) {
 
 function manualTime(value: unknown): TrackingTime {
   if (value === null || value === undefined || value === '') return null;
-  if (typeof value !== 'string') throw new Error('时间必须是文本或空值');
+  if (typeof value !== 'string') throw new RequestValidationError('时间必须是文本或空值');
   let normalized = value.trim().replace('T', ' ').replace(/\//g, '-');
   if (!normalized) return null;
   if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(normalized)) normalized = `${normalized} 00:00:00`;
@@ -73,7 +74,7 @@ function manualTime(value: unknown): TrackingTime {
   const localValue = /\d{2}:\d{2}$/.test(normalized) ? `${normalized}:00` : normalized;
   const withTimezone = hasTimezone ? normalized : `${localValue}+08:00`;
   const parsed = new Date(withTimezone.replace(' ', 'T'));
-  if (Number.isNaN(parsed.getTime())) throw new Error(`无法识别时间：${value}`);
+  if (Number.isNaN(parsed.getTime())) throw new RequestValidationError(`无法识别时间：${value}`);
   return withTimezone;
 }
 
@@ -97,7 +98,7 @@ function manualTimeDate(value: TrackingTime): Date | null {
 
 function manualState(value: unknown): VesselState {
   if (value !== '未到港未卸船' && value !== '已到港未卸船' && value !== '已到港已卸船') {
-    throw new Error('船只状态不合法');
+    throw new RequestValidationError('船只状态不合法');
   }
   return value;
 }
@@ -145,7 +146,7 @@ export function deriveManualVesselState(
 
 function manualMark(value: unknown): ManualMark {
   if (value === '' || value === '已清关' || value === '查验中' || value === '其他') return value;
-  throw new Error('人工标记不合法');
+  throw new RequestValidationError('人工标记不合法');
 }
 
 async function writeJsonAtomic(filePath: string, value: unknown) {
@@ -376,7 +377,7 @@ export class AutomationEngine {
     const code = safeSourceCode(carrierCode);
     const expectedCarrier = code === carrierCode.trim().toUpperCase();
     const safeName = path.basename(fileName);
-    if (!expectedCarrier || safeName !== fileName || !/\.json$/i.test(safeName)) throw new Error('轨迹详情路径不合法');
+    if (!expectedCarrier || safeName !== fileName || !/\.json$/i.test(safeName)) throw new RequestValidationError('轨迹详情路径不合法');
     const filePath = sourceTrackingDetailPath(this.store.dataDirectory, code, safeName.replace(/\.json$/i, ''));
     const raw = await fs.readFile(filePath, 'utf8');
     return JSON.parse(raw) as StoredTrackingDetail;
@@ -458,16 +459,16 @@ export class AutomationEngine {
   async createTask(input: { name: string; scope: AutomationTaskScope; carrierCodes?: string[]; shipmentIds?: string[]; scheduleTime?: string | null }) {
     return this.withWorkspaceWrite(async () => {
     const name = input.name.trim();
-    if (!name) throw new Error('任务名称不能为空');
-    if (name.length > 80) throw new Error('任务名称不能超过 80 个字符');
-    if (!['all', 'carrier', 'shipment'].includes(input.scope)) throw new Error('任务范围不合法');
+    if (!name) throw new RequestValidationError('任务名称不能为空');
+    if (name.length > 80) throw new RequestValidationError('任务名称不能超过 80 个字符');
+    if (!['all', 'carrier', 'shipment'].includes(input.scope)) throw new RequestValidationError('任务范围不合法');
     const carrierCodes = [...new Set((input.carrierCodes || []).map((code) => code.trim().toUpperCase()).filter(Boolean))];
     const shipmentIds = [...new Set((input.shipmentIds || []).map((id) => id.trim()).filter(Boolean))];
-    if (carrierCodes.length > 15 || shipmentIds.length > 200) throw new Error('任务选择数量超过限制');
+    if (carrierCodes.length > 15 || shipmentIds.length > 200) throw new RequestValidationError('任务选择数量超过限制');
     const scheduleTime = input.scheduleTime?.trim() || null;
-    if (scheduleTime && !/^([01]\d|2[0-3]):[0-5]\d$/.test(scheduleTime)) throw new Error('任务时间必须是 HH:mm 格式');
-    if (input.scope === 'carrier' && !carrierCodes.length) throw new Error('请选择至少一个船司');
-    if (input.scope === 'shipment' && !shipmentIds.length) throw new Error('请选择至少一条船期');
+    if (scheduleTime && !/^([01]\d|2[0-3]):[0-5]\d$/.test(scheduleTime)) throw new RequestValidationError('任务时间必须是 HH:mm 格式');
+    if (input.scope === 'carrier' && !carrierCodes.length) throw new RequestValidationError('请选择至少一个船司');
+    if (input.scope === 'shipment' && !shipmentIds.length) throw new RequestValidationError('请选择至少一条船期');
     const now = new Date().toISOString();
     const task: AutomationTask = {
       id: `TASK-${now.replace(/\D/g, '').slice(0, 14)}-${Math.random().toString(36).slice(2, 7)}`,
@@ -503,7 +504,7 @@ export class AutomationEngine {
     return this.withWorkspaceWrite(async () => {
     const tasks = await this.listTasks();
     const index = tasks.findIndex((task) => task.id === id);
-    if (index < 0) throw new Error('自动化任务不存在');
+    if (index < 0) throw new NotFoundError('自动化任务不存在');
     tasks[index] = { ...tasks[index], enabled: patch.enabled ?? tasks[index].enabled, updatedAt: new Date().toISOString() };
     await this.saveTasks(tasks);
     return tasks[index];
@@ -512,13 +513,13 @@ export class AutomationEngine {
 
   async manualAppend(input: { billNo: string; containerNo?: string; carrierHint?: string; arrivalTime?: unknown; dischargeTime?: unknown; vesselState: unknown; note?: string }) {
     return this.withWorkspaceWrite(async () => {
-    if (this.running) throw new Error('自动更新正在执行，请稍后再进行人工补录');
+    if (this.running) throw new ConflictError('自动更新正在执行，请稍后再进行人工补录');
     const billNo = input.billNo.trim().toUpperCase();
-    if (!billNo) throw new Error('提单号不能为空');
-    if (billNo.length > 64) throw new Error('提单号不能超过 64 个字符');
-    if ((input.containerNo || '').length > 32) throw new Error('柜号不能超过 32 个字符');
-    if ((input.carrierHint || '').length > 40) throw new Error('船司备注不能超过 40 个字符');
-    if ((input.note || '').length > 1000) throw new Error('备注不能超过 1000 个字符');
+    if (!billNo) throw new RequestValidationError('提单号不能为空');
+    if (billNo.length > 64) throw new RequestValidationError('提单号不能超过 64 个字符');
+    if ((input.containerNo || '').length > 32) throw new RequestValidationError('柜号不能超过 32 个字符');
+    if ((input.carrierHint || '').length > 40) throw new RequestValidationError('船司备注不能超过 40 个字符');
+    if ((input.note || '').length > 1000) throw new RequestValidationError('备注不能超过 1000 个字符');
     const arrivalTime = manualTime(input.arrivalTime);
     const dischargeTime = manualTime(input.dischargeTime);
     const vesselState = deriveManualVesselState(arrivalTime, dischargeTime, manualState(input.vesselState));
@@ -526,7 +527,7 @@ export class AutomationEngine {
     if (await this.store.exists()) {
       const opened = await this.store.open();
       if (this.store.readRecords(opened.sheet, opened.headerMap).some((record) => record.billNo === billNo)) {
-        throw new Error(`提单号已存在：${billNo}`);
+        throw new ConflictError(`提单号已存在：${billNo}`);
       }
     }
     const backupPath = await this.store.backup('人工补录前备份');
@@ -540,7 +541,7 @@ export class AutomationEngine {
       note,
       progress: '已完成',
     }]);
-    if (result.duplicates.length) throw new Error(`提单号已存在：${result.duplicates.join('、')}`);
+    if (result.duplicates.length) throw new ConflictError(`提单号已存在：${result.duplicates.join('、')}`);
     const addedRecord = result.added[0];
     if (addedRecord) {
       const opened = await this.store.open();
@@ -559,16 +560,16 @@ export class AutomationEngine {
 
   async manualUpdate(rowNumber: number, input: { arrivalTime?: unknown; dischargeTime?: unknown; vesselState: unknown; note?: string }) {
     return this.withWorkspaceWrite(async () => {
-    if (this.running) throw new Error('自动更新正在执行，请稍后再进行人工补录');
-    if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new Error('船期记录编号不合法');
+    if (this.running) throw new ConflictError('自动更新正在执行，请稍后再进行人工补录');
+    if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new RequestValidationError('船期记录编号不合法');
     const arrivalTime = manualTime(input.arrivalTime);
     const dischargeTime = manualTime(input.dischargeTime);
     const vesselState = deriveManualVesselState(arrivalTime, dischargeTime, manualState(input.vesselState));
-    if ((input.note || '').length > 1000) throw new Error('备注不能超过 1000 个字符');
+    if ((input.note || '').length > 1000) throw new RequestValidationError('备注不能超过 1000 个字符');
     const opened = await this.store.open();
     const records = this.store.readRecords(opened.sheet, opened.headerMap);
     const record = records.find((item) => item.rowNumber === rowNumber);
-    if (!record) throw new Error('找不到对应船期记录');
+    if (!record) throw new NotFoundError('找不到对应船期记录');
     const backupPath = await this.store.backup('人工修改前备份');
     record.arrivalTime = arrivalTime;
     record.dischargeTime = dischargeTime;
@@ -598,14 +599,14 @@ export class AutomationEngine {
     screenshot?: Buffer;
   }) {
     return this.withWorkspaceWrite(async () => {
-    if (this.running) throw new Error('自动更新正在执行，请等待当前任务完成');
-    if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new Error('船期记录编号不合法');
-    if (!input.pageText.trim()) throw new Error('采集页面没有可解析的文字内容');
+    if (this.running) throw new ConflictError('自动更新正在执行，请等待当前任务完成');
+    if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new RequestValidationError('船期记录编号不合法');
+    if (!input.pageText.trim()) throw new RequestValidationError('采集页面没有可解析的文字内容');
     const opened = await this.store.open();
     const record = this.store.readRecords(opened.sheet, opened.headerMap).find((item) => item.rowNumber === rowNumber);
-    if (!record) throw new Error('找不到对应船期记录');
+    if (!record) throw new NotFoundError('找不到对应船期记录');
     const rule = resolveCarrierRule(record);
-    if (rule.code !== 'CMA' && rule.code !== 'HAPAG') throw new Error('普通浏览器采集目前仅支持达飞和赫伯罗特');
+    if (rule.code !== 'CMA' && rule.code !== 'HAPAG') throw new RequestValidationError('普通浏览器采集目前仅支持达飞和赫伯罗特');
     const query: import('./types.js').TrackingQuery = {
       rule,
       originalBillNo: record.billNo,
@@ -672,18 +673,18 @@ export class AutomationEngine {
 
   async updateManualMark(rowNumber: number, value: unknown, expected?: { billNo: string; containerNo: string }) {
     return this.withWorkspaceWrite(async () => {
-    if (this.running) throw new Error('自动更新正在执行，请稍后再修改人工标记');
-    if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new Error('船期记录编号不合法');
+    if (this.running) throw new ConflictError('自动更新正在执行，请稍后再修改人工标记');
+    if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new RequestValidationError('船期记录编号不合法');
     const opened = await this.store.open();
     const record = this.store.readRecords(opened.sheet, opened.headerMap).find((item) => item.rowNumber === rowNumber);
-    if (!record) throw new Error('找不到对应船期记录');
+    if (!record) throw new NotFoundError('找不到对应船期记录');
     if (expected && (record.billNo !== expected.billNo.trim().toUpperCase() || record.containerNo !== expected.containerNo.trim().toUpperCase())) {
-      throw new Error('船期记录已发生变化，请刷新页面后重试');
+      throw new ConflictError('船期记录已发生变化，请刷新页面后重试');
     }
     const nextMark = manualMark(value);
     const backupPath = await this.store.backup(nextMark === '已清关' ? '归档已清关记录前备份' : '修改人工标记前备份');
     if (nextMark === '已清关') {
-      if (!backupPath) throw new Error('当前 Excel 不存在，无法归档清关记录');
+      if (!backupPath) throw new ConflictError('当前 Excel 不存在，无法归档清关记录');
       let historyEntry: Awaited<ReturnType<ClearanceHistoryStore['archive']>> | null = null;
       try {
         historyEntry = await this.clearanceHistory.archive(record);
@@ -715,7 +716,7 @@ export class AutomationEngine {
     const cleared = this.store.readRecords(opened.sheet, opened.headerMap).filter((record) => record.manualMark === '已清关');
     if (!cleared.length) return { migrated: 0 };
     const backupPath = await this.store.backup('迁移旧版已清关记录前备份');
-    if (!backupPath) throw new Error('当前 Excel 不存在，无法迁移已清关记录');
+    if (!backupPath) throw new ConflictError('当前 Excel 不存在，无法迁移已清关记录');
     const existing = await this.clearanceHistory.snapshot();
     const createdIds: string[] = [];
     try {
@@ -762,12 +763,12 @@ export class AutomationEngine {
 
   async restoreClearanceHistory(id: string) {
     return this.withWorkspaceWrite(async () => {
-    if (this.running) throw new Error('自动更新正在执行，请稍后再恢复历史记录');
+    if (this.running) throw new ConflictError('自动更新正在执行，请稍后再恢复历史记录');
     const history = await this.clearanceHistory.snapshot();
     const entry = history.entries.find((item) => item.id === id);
-    if (!entry) throw new Error('找不到对应清关历史记录');
+    if (!entry) throw new NotFoundError('找不到对应清关历史记录');
     const backupPath = await this.store.backup('恢复清关历史前备份');
-    if (!backupPath) throw new Error('当前 Excel 不存在，无法恢复历史记录');
+    if (!backupPath) throw new ConflictError('当前 Excel 不存在，无法恢复历史记录');
     const restored = await this.store.restoreRecord({
       carrierHint: entry.carrierHint,
       billNo: entry.billNo,
@@ -782,7 +783,7 @@ export class AutomationEngine {
     }, { preferredRowNumber: entry.originalRowNumber, historyId: entry.id });
     try {
       const deleted = await this.clearanceHistory.remove([id]);
-      if (deleted !== 1) throw new Error('清关历史记录状态已变化，请刷新后重试');
+      if (deleted !== 1) throw new ConflictError('清关历史记录状态已变化，请刷新后重试');
       await this.syncDatabaseFromWorkbook().catch((error) => console.warn('[AutomationEngine] 清关历史恢复后 PostgreSQL 镜像同步失败：', error));
       return { record: restored, backupPath, history: await this.clearanceHistory.snapshot() };
     } catch (error) {
@@ -794,7 +795,7 @@ export class AutomationEngine {
 
   async deleteShipments(rowNumbers: number[]) {
     return this.withWorkspaceWrite(async () => {
-    if (this.running) throw new Error('自动更新正在执行，请稍后再删除船期记录');
+    if (this.running) throw new ConflictError('自动更新正在执行，请稍后再删除船期记录');
     const opened = await this.store.open();
     const targets = this.store.readRecords(opened.sheet, opened.headerMap).filter((record) => rowNumbers.includes(record.rowNumber));
     const backupPath = await this.store.backup('删除船期记录前备份');
@@ -874,7 +875,7 @@ export class AutomationEngine {
   }
 
   private async executeRun(reason: RunSummary['reason'], selection?: { carrierCodes?: string[]; shipmentIds?: string[]; skipCompleted?: boolean }): Promise<RunSummary> {
-    if (this.running) throw new Error('已有更新任务正在执行');
+    if (this.running) throw new ConflictError('已有更新任务正在执行');
     this.running = true;
     const startedAt = new Date();
     const id = `RUN-${startedAt.toISOString().replace(/\D/g, '').slice(0, 14)}`;
@@ -1220,8 +1221,8 @@ export class AutomationEngine {
 
   private async executeTask(id: string) {
     const task = (await this.listTasks()).find((item) => item.id === id);
-    if (!task) throw new Error('自动化任务不存在');
-    if (!task.enabled) throw new Error('自动化任务已停用');
+    if (!task) throw new NotFoundError('自动化任务不存在');
+    if (!task.enabled) throw new ConflictError('自动化任务已停用');
     const selection = task.scope === 'carrier'
       ? { carrierCodes: task.carrierCodes }
       : task.scope === 'shipment'
@@ -1251,8 +1252,17 @@ export class AutomationEngine {
   }
 
   async status() {
-    const workbook = await this.store.metadata();
+    const workbookMetadata = await this.store.metadata();
+    // 运行状态会直接返回给浏览器和普通用户，不能把本机绝对路径
+    // （例如 /Users/.../data/current.xlsx）暴露到 API 响应中。
+    const workbook = workbookMetadata ? { ...workbookMetadata, path: '' } : null;
     const runs = await this.listRuns();
+    // Run summaries are persisted before being sent to the API. Older
+    // installations may therefore still contain an absolute backup path;
+    // normalize it here as well so every status response is safe to expose.
+    const lastRun = runs[0]
+      ? { ...runs[0], backupPath: runs[0].backupPath ? path.basename(runs[0].backupPath) : null }
+      : null;
     const settings = await this.settings();
     return {
       running: this.running,
@@ -1265,8 +1275,10 @@ export class AutomationEngine {
       schedule: settings.schedule,
       timezone: settings.timezone,
       notificationConfigured: Boolean(settings.wechatWebhookUrl),
-      databaseConfigured: Boolean(this.database),
-      lastRun: runs[0] || null,
+      // DisabledDatabase 仍是一个对象，不能用 Boolean(this.database)
+      // 判断是否真的启用了 PostgreSQL。
+      databaseConfigured: Boolean(this.database?.enabled),
+      lastRun,
       supportedCarriers: 15,
     };
   }

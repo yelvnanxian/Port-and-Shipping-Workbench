@@ -1,8 +1,49 @@
 export class RequestValidationError extends Error {
   readonly statusCode = 400;
+  readonly code = 'VALIDATION_ERROR';
   constructor(message: string) {
     super(message);
     this.name = 'RequestValidationError';
+  }
+}
+
+/** A well-formed request that refers to a resource which does not exist. */
+export class NotFoundError extends Error {
+  readonly statusCode = 404;
+  readonly code = 'NOT_FOUND';
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotFoundError';
+  }
+}
+
+/** A valid request that cannot be applied because the current state changed. */
+export class ConflictError extends Error {
+  readonly statusCode = 409;
+  readonly code = 'CONFLICT';
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConflictError';
+  }
+}
+
+/** Authentication failed without revealing whether the account exists. */
+export class UnauthorizedError extends Error {
+  readonly statusCode = 401;
+  readonly code = 'UNAUTHORIZED';
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnauthorizedError';
+  }
+}
+
+/** The caller must wait before retrying the operation. */
+export class RateLimitError extends Error {
+  readonly statusCode = 429;
+  readonly code = 'RATE_LIMITED';
+  constructor(message: string) {
+    super(message);
+    this.name = 'RateLimitError';
   }
 }
 

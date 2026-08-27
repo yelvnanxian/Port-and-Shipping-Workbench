@@ -11,7 +11,7 @@ import { notifyWeComTest } from './automation/notifier.js';
 import { startScheduler } from './automation/scheduler.js';
 import { corsOrigin, createRateLimiter, requestClientAddress, securityHeaders } from './security.js';
 import { auditLog, auditMiddleware } from './audit.js';
-import { assertBodyObject, backupNamePattern, clearanceHistoryIdPattern, optionalString, optionalStringArray, recordIds, requiredString, runIdPattern, shipmentIdPattern, taskIdPattern, userIdPattern, RequestValidationError } from './validation.js';
+import { assertBodyObject, backupNamePattern, clearanceHistoryIdPattern, ConflictError, NotFoundError, optionalString, optionalStringArray, recordIds, requiredString, runIdPattern, shipmentIdPattern, taskIdPattern, userIdPattern, RequestValidationError } from './validation.js';
 import { legacyEvidenceDirectory, safeSourceCode, sourceEvidenceDirectory } from './automation/source-storage.js';
 import { AuthService } from './auth.js';
 import { createAppDatabase } from './database.js';
@@ -144,7 +144,7 @@ app.post('/api/auth/login', async (req, res, next) => {
     if (!auth.enabled) { res.json({ enabled: false, authenticated: true, user: { id: 'local-admin', username: 'local-admin', role: 'admin' }, csrfToken: '' }); return; }
     const username = typeof body.username === 'string' ? body.username.trim() : '';
     const password = typeof body.password === 'string' ? body.password : '';
-    if (!username || !password) throw new Error('请输入用户名和密码');
+    if (!username || !password) throw new RequestValidationError('请输入用户名和密码');
     const session = await auth.login(username, password, requestClientAddress(req));
     auth.setSessionCookie(res, session.token);
     res.json({ enabled: true, authenticated: true, user: session.user, csrfToken: session.csrfToken });
@@ -207,6 +207,7 @@ async function dashboardPayload(target = engine) {
       vesselVoyage: 'Excel 自动追踪',
       terminal: '以船司官网为准',
       eta: record.arrivalTime || null,
+      arrivalKind: arrivalKindFromNote(record.note),
       berthingTime: null,
       dischargeTime: record.dischargeTime || null,
       status: record.progress === '失败'
@@ -217,7 +218,7 @@ async function dashboardPayload(target = engine) {
             ? '作业中'
             : '待靠泊',
       lastUpdated: record.lastUpdated?.toISOString() || new Date(0).toISOString(),
-      note: compactPublicNote(record.note || (record.progress ? `进度：${record.progress}` : '待首次查询'), Boolean(record.dischargeTime)),
+      note: compactPublicNote(record.note || (record.progress ? `进度：${record.progress}` : '待首次查询'), Boolean(record.arrivalTime), Boolean(record.dischargeTime)),
       vesselState: record.vesselState || '未到港未卸船',
       manualMark: record.manualMark,
       progress: record.progress || '待查询',
@@ -234,10 +235,11 @@ async function dashboardPayload(target = engine) {
   return { shipments: [], sources: [], generatedAt };
 }
 
-function compactPublicNote(note: string, hasDischarge = false) {
+function compactPublicNote(note: string, hasArrival = false, hasDischarge = false) {
   const value = note.trim();
   if (!value) return '';
-  if (hasDischarge) return '已获取到港时间和实际卸船时间';
+  if (hasArrival && hasDischarge) return '已获取到港时间和实际卸船时间';
+  if (hasDischarge && !hasArrival) return '已确认卸船完成，官网未提供到港时间';
   const category = value.match(/(?:^|；)失败分类=([^；]+)/)?.[1];
   const reason = value.match(/(?:^|；)原因=([^；]+)/)?.[1];
   if (category || reason) return `失败：${category || '查询失败'}${reason ? `；${reason}` : ''}`.slice(0, 120);
@@ -248,6 +250,22 @@ function compactPublicNote(note: string, hasDischarge = false) {
   if (arrivalKind) return `已获取 ${arrivalKind}，尚未发现实际卸船时间`;
   const first = value.split('；').find((part) => !/^(?:来源|成功证据|运行线路)=/.test(part.trim())) || value;
   return first.slice(0, 120);
+}
+
+function arrivalKindFromNote(note: string): 'ATA' | 'ETA' | null {
+  return note.match(/(?:^|；)到港字段=(ATA|ETA)/)?.[1] as 'ATA' | 'ETA' | undefined || null;
+}
+
+function publicBackupPath(value: string | null | undefined) {
+  return value ? path.basename(value) : value || null;
+}
+
+function publicRun<T extends { backupPath?: string | null }>(run: T) {
+  return { ...run, backupPath: publicBackupPath(run.backupPath) };
+}
+
+function publicBackupResult<T extends { backupPath?: string | null }>(result: T) {
+  return publicRun(result);
 }
 
 app.get('/api/health', async (_req, res) => {
@@ -406,7 +424,7 @@ app.post('/api/automation/browser/cleanup', auth.requireRole('admin'), async (_r
   try {
     const activeEngines = [engine, ...workspaceEngines.values()];
     if (activeEngines.some((item) => item.isRunning || item.queuedRuns > 0)) {
-      throw new Error('当前有查询任务正在执行，请等待任务完成后再清理自动化 Chrome');
+      throw new ConflictError('当前有查询任务正在执行，请等待任务完成后再清理自动化 Chrome');
     }
     const cleanup = await shutdownBrowserAutomation(activeEngines.map((item) => item.store.dataDirectory));
     res.json({ ok: true, cleanup, automation: await engine.status() });
@@ -421,7 +439,7 @@ app.post('/api/automation/verification/skip', async (req, res, next) => {
   try {
     const target = await activeEngine(req);
     const skipped = target.skipVerification();
-    if (!skipped) throw new Error('当前没有等待人工验证的查询记录');
+    if (!skipped) throw new ConflictError('当前没有等待人工验证的查询记录');
     res.json({ ok: true, automation: await target.status() });
   } catch (error) {
     next(error);
@@ -455,12 +473,12 @@ app.patch('/api/automation/settings', auth.requireRole('admin'), async (req, res
       if (webhook) {
         const parsed = new URL(webhook);
         if (parsed.protocol !== 'https:' || parsed.hostname !== 'qyapi.weixin.qq.com' || !parsed.searchParams.get('key')) {
-          throw new Error('请输入完整的企业微信机器人 Webhook 地址');
+          throw new RequestValidationError('请输入完整的企业微信机器人 Webhook 地址');
         }
       }
       patch.wechatWebhookUrl = webhook;
     }
-    if (!Object.keys(patch).length) throw new Error('没有需要保存的设置');
+    if (!Object.keys(patch).length) throw new RequestValidationError('没有需要保存的设置');
     const settings = await engine.updateSettings(patch);
     res.json({ settings: publicSettings(settings), automation: await engine.status() });
   } catch (error) {
@@ -472,7 +490,7 @@ app.post('/api/automation/test-notification', auth.requireRole('admin'), async (
   try {
     const body = assertBodyObject(req.body || {});
     const configured = typeof body.wechatWebhookUrl === 'string' ? body.wechatWebhookUrl.trim() : (await engine.settings()).wechatWebhookUrl;
-    if (!configured) throw new Error('请先填写企业微信 Webhook 地址');
+    if (!configured) throw new RequestValidationError('请先填写企业微信 Webhook 地址');
     const result = await notifyWeComTest(configured);
     if (result === 'failed') throw new Error('企业微信测试消息发送失败，请检查 Webhook 或网络连接');
     res.json({ ok: true });
@@ -483,7 +501,7 @@ app.post('/api/automation/test-notification', auth.requireRole('admin'), async (
 
 app.get('/api/automation/runs', async (req, res, next) => {
   try {
-    res.json({ runs: await (await activeEngine(req)).listRuns() });
+    res.json({ runs: (await (await activeEngine(req)).listRuns()).map(publicRun) });
   } catch (error) {
     next(error);
   }
@@ -492,7 +510,7 @@ app.get('/api/automation/runs', async (req, res, next) => {
 app.delete('/api/automation/runs', async (req, res, next) => {
   try {
     const ids = recordIds(req.body?.ids, '运行记录编号', runIdPattern);
-    res.json({ runs: await (await activeEngine(req)).deleteRuns(ids) });
+    res.json({ runs: (await (await activeEngine(req)).deleteRuns(ids)).map(publicRun) });
   } catch (error) {
     next(error);
   }
@@ -501,7 +519,7 @@ app.delete('/api/automation/runs', async (req, res, next) => {
 app.post('/api/automation/runs/delete-batch', async (req, res, next) => {
   try {
     const ids = recordIds(req.body?.ids, '运行记录编号', runIdPattern);
-    res.json({ runs: await (await activeEngine(req)).deleteRuns(ids) });
+    res.json({ runs: (await (await activeEngine(req)).deleteRuns(ids)).map(publicRun) });
   } catch (error) {
     next(error);
   }
@@ -511,7 +529,7 @@ app.delete('/api/automation/runs/:id', async (req, res, next) => {
   try {
     const id = requiredString(req.params.id, '运行记录编号', 80);
     if (!runIdPattern.test(id)) throw new RequestValidationError('运行记录编号不合法');
-    res.json({ runs: await (await activeEngine(req)).deleteRuns([id]) });
+    res.json({ runs: (await (await activeEngine(req)).deleteRuns([id])).map(publicRun) });
   } catch (error) {
     next(error);
   }
@@ -591,7 +609,7 @@ app.post('/api/automation/tasks/:id/run', async (req, res, next) => {
     const target = await activeEngine(req);
     const run = await target.runTask(id, req.get('x-idempotency-key'));
     lastSync = run.finishedAt;
-    res.json({ run, dashboard: await dashboardPayload(target), automation: await target.status(), tasks: await target.listTasks() });
+    res.json({ run: publicRun(run), dashboard: await dashboardPayload(target), automation: await target.status(), tasks: await target.listTasks() });
   } catch (error) {
     next(error);
   }
@@ -606,7 +624,7 @@ app.post('/api/automation/tasks/run-batch', async (req, res, next) => {
       runs.push(await target.runTask(id, req.get('x-idempotency-key') ? `${req.get('x-idempotency-key')}:${id}` : undefined));
       lastSync = runs[runs.length - 1].finishedAt;
     }
-    res.json({ runs, dashboard: await dashboardPayload(target), automation: await target.status(), tasks: await target.listTasks() });
+    res.json({ runs: runs.map(publicRun), dashboard: await dashboardPayload(target), automation: await target.status(), tasks: await target.listTasks() });
   } catch (error) {
     next(error);
   }
@@ -705,9 +723,9 @@ app.get('/api/backups/:name', async (req, res, next) => {
 app.post('/api/backups/create', async (req, res, next) => {
   try {
     const target = await activeEngine(req);
-    if (!(await target.store.exists())) throw new Error('尚未导入 Excel，无法创建备份');
+    if (!(await target.store.exists())) throw new ConflictError('尚未导入 Excel，无法创建备份');
     const backupPath = await target.store.backup('手动创建备份');
-    res.json({ backupPath, backups: await target.store.listBackups() });
+    res.json({ backupPath: publicBackupPath(backupPath), backups: await target.store.listBackups() });
   } catch (error) {
     next(error);
   }
@@ -775,6 +793,8 @@ app.post('/api/intake', async (req, res, next) => {
       await target.syncDatabaseFromWorkbook();
       return appended;
     });
+    // appendRecords 返回的是 workbook metadata/新增记录结果，不包含 backupPath；
+    // 直接透传（metadata.path 已在 WorkbookStore 中脱敏）即可。
     res.json({ ...result, dashboard: await dashboardPayload(target), automation: await target.status() });
   } catch (error) {
     next(error);
@@ -782,9 +802,9 @@ app.post('/api/intake', async (req, res, next) => {
 });
 
 function workbookRowId(value: unknown) {
-  if (typeof value !== 'string') throw new Error('船期编号不合法');
+  if (typeof value !== 'string') throw new RequestValidationError('船期编号不合法');
   const match = value.match(/^XLSX-(\d+)$/);
-  if (!match) throw new Error('船期编号不合法');
+  if (!match) throw new RequestValidationError('船期编号不合法');
   return Number(match[1]);
 }
 
@@ -799,9 +819,9 @@ app.post('/api/manual-collection/sessions', async (req, res, next) => {
     const rowNumber = workbookRowId(shipmentId);
     const opened = await target.store.open();
     const record = target.store.readRecords(opened.sheet, opened.headerMap).find((item) => item.rowNumber === rowNumber);
-    if (!record) throw new Error('找不到对应船期记录');
+    if (!record) throw new NotFoundError('找不到对应船期记录');
     const rule = resolveCarrierRule(record);
-    if (!isManualCollectionCarrier(rule.code)) throw new Error('普通浏览器采集目前仅支持达飞和赫伯罗特');
+    if (!isManualCollectionCarrier(rule.code)) throw new RequestValidationError('普通浏览器采集目前仅支持达飞和赫伯罗特');
     if (rule.code === 'HAPAG') {
       if (!record.containerNo) throw new RequestValidationError('赫伯罗特必须提供完整柜号后才能采集');
       if (queryType !== 'container') throw new RequestValidationError('赫伯罗特请使用完整柜号采集');
@@ -850,7 +870,7 @@ app.patch('/api/shipments/:id/mark', async (req, res, next) => {
     const containerNo = optionalString(body.containerNo, '柜号', 40);
     if (billNo === undefined || containerNo === undefined) throw new RequestValidationError('缺少船期记录核验信息，请刷新页面后重试');
     const result = await target.updateManualMark(workbookRowId(req.params.id), body.manualMark, { billNo, containerNo });
-    res.json({ ...result, dashboard: await dashboardPayload(target), automation: await target.status() });
+    res.json({ ...publicBackupResult(result), dashboard: await dashboardPayload(target), automation: await target.status() });
   } catch (error) {
     next(error);
   }
@@ -880,7 +900,7 @@ app.post('/api/clearance-history/:id/restore', async (req, res, next) => {
     if (!clearanceHistoryIdPattern.test(id)) throw new RequestValidationError('清关历史编号不合法');
     const target = await activeEngine(req);
     const result = await target.restoreClearanceHistory(id);
-    res.json({ ...result, dashboard: await dashboardPayload(target), automation: await target.status() });
+    res.json({ ...publicBackupResult(result), dashboard: await dashboardPayload(target), automation: await target.status() });
   } catch (error) {
     next(error);
   }
@@ -909,7 +929,7 @@ app.post('/api/shipments/delete-batch', async (req, res, next) => {
     const rowNumbers = ids.map(workbookRowId);
     const target = await activeEngine(req);
     const result = await target.deleteShipments(rowNumbers);
-    res.json({ ...result, dashboard: await dashboardPayload(target), automation: await target.status() });
+    res.json({ ...publicBackupResult(result), dashboard: await dashboardPayload(target), automation: await target.status() });
   } catch (error) {
     next(error);
   }
@@ -940,7 +960,7 @@ app.post('/api/shipments/manual', async (req, res, next) => {
       vesselState: body.vesselState,
       note: typeof body.note === 'string' ? body.note : '',
     });
-    res.json({ ...result, dashboard: await dashboardPayload(target), automation: await target.status() });
+    res.json({ ...publicBackupResult(result), dashboard: await dashboardPayload(target), automation: await target.status() });
   } catch (error) {
     next(error);
   }
@@ -956,7 +976,7 @@ app.patch('/api/shipments/:id/manual', async (req, res, next) => {
       vesselState: body.vesselState,
       note: typeof body.note === 'string' ? body.note : '',
     });
-    res.json({ ...result, dashboard: await dashboardPayload(target), automation: await target.status() });
+    res.json({ ...publicBackupResult(result), dashboard: await dashboardPayload(target), automation: await target.status() });
   } catch (error) {
     next(error);
   }
@@ -973,7 +993,7 @@ app.post('/api/automation/run', async (req, res, next) => {
     const target = await activeEngine(req);
     const run = await target.run('manual', hasSelection ? { carrierCodes, shipmentIds, skipCompleted: body.skipCompleted } : undefined, req.get('x-idempotency-key'));
     lastSync = run.finishedAt;
-    res.json({ run, dashboard: await dashboardPayload(target), automation: await target.status() });
+    res.json({ run: publicRun(run), dashboard: await dashboardPayload(target), automation: await target.status() });
   } catch (error) {
     next(error);
   }
@@ -982,7 +1002,7 @@ app.post('/api/automation/run', async (req, res, next) => {
 app.post('/api/sync', async (req, res, next) => {
   try {
     const target = await activeEngine(req);
-    if (!(await target.store.exists())) throw new Error('请先导入 Excel 或新增单号');
+    if (!(await target.store.exists())) throw new ConflictError('请先导入 Excel 或新增单号');
     const run = await target.run('manual', undefined, req.get('x-idempotency-key'));
     lastSync = run.finishedAt;
     res.json(await dashboardPayload(target));
@@ -993,7 +1013,7 @@ app.post('/api/sync', async (req, res, next) => {
 
 app.post('/api/workbooks/upload', upload.single('workbook'), async (req, res, next) => {
   try {
-    if (!req.file) throw new Error('请选择 .xlsx 文件');
+    if (!req.file) throw new RequestValidationError('请选择 .xlsx 文件');
     const target = await activeEngine(req);
     const workbook = await target.withWorkspaceWrite(async () => {
       await target.store.install(req.file!.path);
@@ -1010,7 +1030,7 @@ app.post('/api/workbooks/upload', upload.single('workbook'), async (req, res, ne
 app.get('/api/workbooks/current', async (req, res, next) => {
   try {
     const target = await activeEngine(req);
-    if (!(await target.store.exists())) throw new Error('尚未导入 Excel 文件');
+    if (!(await target.store.exists())) throw new NotFoundError('尚未导入 Excel 文件');
     res.download(target.store.currentPath, '船期自动更新.xlsx');
   } catch (error) {
     next(error);
