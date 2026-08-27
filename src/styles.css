@@ -131,3 +131,68 @@ main { margin-left: 232px; min-height: 100vh; }
 .clearance-summary-grid{display:grid;grid-template-columns:repeat(3,minmax(220px,1fr));gap:12px;margin-bottom:14px}.clearance-summary-grid article{min-height:94px;display:flex;align-items:center;gap:12px;padding:17px;background:#fff;border:1px solid #dfe7e5;border-radius:10px}.clearance-summary-grid article>svg{flex:0 0 auto;color:#168477}.clearance-summary-grid article>div{flex:1;min-width:0}.clearance-summary-grid span,.clearance-summary-grid strong,.clearance-summary-grid small{display:block}.clearance-summary-grid span{color:#819095;font-size:9px}.clearance-summary-grid strong{margin-top:4px;color:#173b47;font-size:16px}.clearance-summary-grid small{margin-top:4px;color:#9aa6aa;font-size:8px}.clearance-summary-grid select{height:32px;border:1px solid #cfe0dd;border-radius:7px;padding:0 9px;background:#f7fbfa;color:#2c6e67;font-size:10px;outline:0}.clearance-summary-grid select:focus{border-color:#55a69b;box-shadow:0 0 0 3px rgba(39,145,132,.1)}.history-toolbar{min-height:56px;padding:10px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid #e7eceb;background:#fbfcfc}.history-toolbar>span{color:#89979b;font-size:9px}.clearance-history-table{min-width:1320px}.clearance-history-table td{height:64px}.clearance-history-table .secondary-button{display:inline-flex}.history-expiry{display:inline-flex;padding:4px 7px;border-radius:10px;background:#fff4e8;color:#a66a31;font-size:8px;white-space:nowrap}.clearance-history-card .module-card-header{min-height:58px}.clearance-history-page .module-heading{align-items:center}
 @media(max-width:900px){.clearance-summary-grid{grid-template-columns:1fr}.clearance-summary-grid article{min-height:78px}.history-toolbar{align-items:flex-start;flex-direction:column}.history-toolbar .search-box{width:100%}}
 .arrival-kind{display:inline-flex!important;width:max-content;margin:0 0 4px!important;padding:2px 5px;border-radius:5px;font-family:inherit!important;font-size:7px!important;font-style:normal;font-weight:600;line-height:1.2}.arrival-kind.actual{background:#e5f4ef;color:#187667}.arrival-kind.estimated{background:#fff3dd;color:#986927}
+
+/* Tracking table: keep dense operational data readable instead of allowing
+   optional columns (especially notes) to collapse into narrow vertical strips. */
+.tracking-table{width:100%;min-width:1570px;table-layout:fixed}
+.tracking-table th,.tracking-table td{overflow:hidden}
+.tracking-table th.tracking-col-check,.tracking-table td.tracking-col-check{width:42px}
+.tracking-table th.tracking-col-carrier,.tracking-table td.tracking-col-carrier{width:118px}
+.tracking-table th.tracking-col-arrival,.tracking-table td.tracking-col-arrival{width:132px}
+.tracking-table th.tracking-col-bill,.tracking-table td.tracking-col-bill{width:145px}
+.tracking-table th.tracking-col-container,.tracking-table td.tracking-col-container{width:145px}
+.tracking-table th.tracking-col-current-port,.tracking-table td.tracking-col-current-port{width:120px}
+.tracking-table th.tracking-col-estimated-port,.tracking-table td.tracking-col-estimated-port{width:145px}
+.tracking-table th.tracking-col-estimated-time,.tracking-table td.tracking-col-estimated-time{width:132px}
+.tracking-table th.tracking-col-discharge,.tracking-table td.tracking-col-discharge{width:132px}
+.tracking-table th.tracking-col-status,.tracking-table td.tracking-col-status{width:128px}
+.tracking-table th.tracking-col-manual,.tracking-table td.tracking-col-manual{width:106px}
+.tracking-table th.tracking-col-updated,.tracking-table td.tracking-col-updated{width:118px}
+.tracking-table th.tracking-col-note,.tracking-table td.tracking-col-note{width:185px}
+.tracking-table th.tracking-col-progress,.tracking-table td.tracking-col-progress{width:92px}
+.tracking-table th.tracking-col-actions,.tracking-table td.tracking-col-actions{width:150px}
+.tracking-table td.tracking-col-bill,.tracking-table td.tracking-col-container{white-space:nowrap;text-overflow:ellipsis}
+.tracking-table td.tracking-col-current-port,.tracking-table td.tracking-col-estimated-port,.tracking-table td.tracking-col-estimated-time{white-space:normal;line-height:1.4;overflow-wrap:anywhere}
+.tracking-table .note-cell{display:-webkit-box;max-width:none;white-space:normal;line-height:1.45;-webkit-line-clamp:3;-webkit-box-orient:vertical}
+.tracking-table .tracking-col-check,.tracking-table .tracking-col-carrier{position:sticky;z-index:2;background:#fff}
+.tracking-table th.tracking-col-check,.tracking-table th.tracking-col-carrier{z-index:3;background:#f5f7f6}
+.tracking-table .tracking-col-check{left:0}
+.tracking-table .tracking-col-carrier{left:42px}
+.tracking-table tr.selected-row>.tracking-col-check,.tracking-table tr.selected-row>.tracking-col-carrier{background:#f1f9f7!important}
+.tracking-table tr.cleared-row>.tracking-col-check,.tracking-table tr.cleared-row>.tracking-col-carrier{background:#f7faf8!important}
+.tracking-table-hint{display:none!important}
+
+/* The icon is a fixed-size affordance; the content column owns the flexible
+   width. The old nth-child selector also matched the icon and created a large
+   blank preview-like block in the backup list. */
+.backup-list>div>div.backup-icon{flex:0 0 33px;width:33px}
+.backup-list>div>input[type="checkbox"]{flex:0 0 auto}
+.backup-list .backup-main{flex:1 1 auto;min-width:0}
+.backup-actions{flex-wrap:wrap;justify-content:flex-end;min-width:0}
+
+@media(max-width:850px){
+  .heading-actions{flex-wrap:wrap;justify-content:flex-end}
+  .heading-actions>*{min-width:0}
+  .module-card-header{gap:10px;flex-wrap:wrap}
+  .module-card-header>div:first-child{min-width:0;flex:1 1 220px}
+}
+
+@media(max-width:700px){
+  .tracking-table-hint{display:inline!important;color:#a0abad!important}
+  .backup-list>div{align-items:flex-start;flex-wrap:wrap}
+  .backup-list .backup-actions{width:100%;padding-left:44px;justify-content:flex-start;margin-top:2px}
+  .backup-toolbar{margin-left:auto;flex-wrap:wrap;justify-content:flex-end}
+}
+
+@media(max-width:560px){
+  .heading-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;width:100%}
+  .heading-actions>*{width:100%;min-width:0;justify-content:center}
+  .heading-actions>label.sync-option{grid-column:1/-1;justify-content:flex-start;padding:0 3px}
+  .heading-actions>button.primary-button{grid-column:1/-1}
+  .heading-actions button{flex:initial;white-space:nowrap}
+  .page-heading h1{font-size:23px}
+  .table-header>div:first-child{min-width:0;display:block}
+  .table-header>div:first-child>span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tracking-table-hint{margin-top:3px}
+  .backup-list .backup-actions{padding-left:0}
+}

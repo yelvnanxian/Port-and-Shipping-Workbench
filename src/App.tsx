@@ -1071,6 +1071,7 @@ export default function App() {
   const allSelected = visibleRows.length > 0 && visibleRows.every((item) => selected.has(item.id));
   const carriers = Array.from(new Set(data?.shipments.map((item) => item.carrierCode) || []));
   const successfulSources = data?.sources.filter((source) => source.status === 'online').length || 0;
+  const trackingColumnCount = 13 + (showUpdatedColumn ? 1 : 0) + (showNoteColumn ? 1 : 0);
 
   if (authLoading) return <main className="login-screen"><div className="login-card login-loading"><LoaderCircle size={24} className="spin" /><span>正在检查登录状态…</span></div></main>;
   if (auth?.enabled && !auth.authenticated) return <LoginScreen onLogin={login} />;
@@ -1160,7 +1161,7 @@ export default function App() {
 
           <section className={`table-card ${denseTable ? 'compact-table' : ''}`}>
             <div className="table-header">
-              <div><h2>船期追踪</h2><span>共 {filtered.length} 条记录 · 勾选后可只更新指定船期</span></div>
+              <div><h2>船期追踪</h2><span>共 {filtered.length} 条记录 · 勾选后可只更新指定船期</span><span className="tracking-table-hint">左右滑动查看全部字段</span></div>
               <div className="table-header-actions">{selected.size > 0 && <><button className="view-settings" onClick={handleSelectedSync} disabled={syncing}><RefreshCw size={15} />更新已选</button><button className="view-settings danger-action" onClick={() => handleDeleteShipments([...selected])} disabled={syncing}><Trash2 size={14} />删除已选</button></>}<button className="view-settings" onClick={() => setDisplaySettingsOpen(true)}><SlidersHorizontal size={16} />显示设置</button></div>
             </div>
             <div className="filters-row">
@@ -1172,29 +1173,29 @@ export default function App() {
             </div>
 
             <div className="table-scroll">
-              <table>
+              <table className="tracking-table">
                 <thead><tr>
-                  <th className="check-col"><input type="checkbox" checked={allSelected} onChange={toggleAll} /></th>
-                  <th>船司</th><th>到港时间<br/><span>ATA / ETA</span></th><th>提单号</th><th>柜号</th><th>当前港口</th><th>预计到达港口</th><th>预计到达时间</th><th>卸船时间</th><th>船只状态</th><th>人工标记</th>{showUpdatedColumn && <th>最后更新时间</th>}{showNoteColumn && <th>备注</th>}<th>进度</th><th />
+                  <th className="check-col tracking-col-check"><input type="checkbox" checked={allSelected} onChange={toggleAll} /></th>
+                  <th className="tracking-col-carrier">船司</th><th className="tracking-col-arrival">到港时间<br/><span>ATA / ETA</span></th><th className="tracking-col-bill">提单号</th><th className="tracking-col-container">柜号</th><th className="tracking-col-current-port">当前港口</th><th className="tracking-col-estimated-port">预计到达港口</th><th className="tracking-col-estimated-time">预计到达时间</th><th className="tracking-col-discharge">卸船时间</th><th className="tracking-col-status">船只状态</th><th className="tracking-col-manual">人工标记</th>{showUpdatedColumn && <th className="tracking-col-updated">最后更新时间</th>}{showNoteColumn && <th className="tracking-col-note">备注</th>}<th className="tracking-col-progress">进度</th><th className="tracking-col-actions" />
                 </tr></thead>
                 <tbody>
-                  {loading ? <tr><td colSpan={15}><div className="loading-state"><LoaderCircle className="spin" />正在汇总船司数据…</div></td></tr> : filtered.length === 0 ? <tr><td colSpan={15}><div className="empty-state"><Search size={24} /><strong>没有匹配的船期记录</strong><span>调整关键词或筛选条件后再试</span></div></td></tr> : visibleRows.map((item) => (
+                  {loading ? <tr><td colSpan={trackingColumnCount}><div className="loading-state"><LoaderCircle className="spin" />正在汇总船司数据…</div></td></tr> : filtered.length === 0 ? <tr><td colSpan={trackingColumnCount}><div className="empty-state"><Search size={24} /><strong>没有匹配的船期记录</strong><span>调整关键词或筛选条件后再试</span></div></td></tr> : visibleRows.map((item) => (
                     <tr key={item.id} className={`${selected.has(item.id) ? 'selected-row' : ''} ${item.manualMark === '已清关' ? 'cleared-row' : ''}`}>
-                      <td className="check-col"><input type="checkbox" checked={selected.has(item.id)} onChange={() => toggleOne(item.id)} /></td>
-                      <td><div className="carrier-cell"><CarrierMark code={item.carrierCode} /><div><strong>{carrierLabel(item.carrierCode, item.carrier)}</strong><span>{item.carrierCode}</span></div></div></td>
-                      <td><ArrivalTimeCell shipment={item} /></td>
-                      <td><strong className="mono">{item.billNo}</strong></td>
-                      <td><strong className="mono muted-strong">{item.containerNo || '—'}</strong></td>
-                      <td>{item.trackingDetail?.currentPort || '—'}</td>
-                      <td>{item.trackingDetail?.estimatedArrivalPort || '—'}</td>
-                      <td>{item.trackingDetail?.estimatedArrivalTimeText || '—'}</td>
-                      <td><div className="date-cell discharge">{formatDateTime(item.dischargeTime, true)}</div></td>
-                      <td><VesselStateBadge shipment={item} /></td>
-                      <td><ManualMarkSelect value={item.manualMark} onChange={(value) => handleManualMark(item.id, value)} disabled={syncing} /></td>
-                      {showUpdatedColumn && <td><div className="update-cell"><span>{timeAgo(item.lastUpdated)}</span><small>{formatDateTime(item.lastUpdated)}</small></div></td>}
-                      {showNoteColumn && <td><span className="note-cell" title={item.note}>{summarizeNote(item.note)}</span></td>}
-                      <td><ProgressBadge shipment={item} /></td>
-                      <td><div className="row-actions"><button className="row-action" title="人工修改时间与状态" onClick={() => openManualEdit(item)}><Pencil size={14} /></button><button className="row-action" title="只更新这一条" onClick={() => handleSync({ shipmentIds: [item.id] })} disabled={syncing || item.manualMark === '已清关'}><RefreshCw size={14} /></button><button className="row-action danger-action" title="删除这条记录" onClick={() => handleDeleteShipments([item.id])} disabled={syncing}><Trash2 size={14} /></button><button className="row-action" title="查看详情" onClick={() => setDetail(item)}><ChevronRight size={17} /></button></div></td>
+                      <td className="check-col tracking-col-check"><input type="checkbox" checked={selected.has(item.id)} onChange={() => toggleOne(item.id)} /></td>
+                      <td className="tracking-col-carrier"><div className="carrier-cell"><CarrierMark code={item.carrierCode} /><div><strong>{carrierLabel(item.carrierCode, item.carrier)}</strong><span>{item.carrierCode}</span></div></div></td>
+                      <td className="tracking-col-arrival"><ArrivalTimeCell shipment={item} /></td>
+                      <td className="tracking-col-bill"><strong className="mono">{item.billNo}</strong></td>
+                      <td className="tracking-col-container"><strong className="mono muted-strong">{item.containerNo || '—'}</strong></td>
+                      <td className="tracking-col-current-port">{item.trackingDetail?.currentPort || '—'}</td>
+                      <td className="tracking-col-estimated-port">{item.trackingDetail?.estimatedArrivalPort || '—'}</td>
+                      <td className="tracking-col-estimated-time">{item.trackingDetail?.estimatedArrivalTimeText || '—'}</td>
+                      <td className="tracking-col-discharge"><div className="date-cell discharge">{formatDateTime(item.dischargeTime, true)}</div></td>
+                      <td className="tracking-col-status"><VesselStateBadge shipment={item} /></td>
+                      <td className="tracking-col-manual"><ManualMarkSelect value={item.manualMark} onChange={(value) => handleManualMark(item.id, value)} disabled={syncing} /></td>
+                      {showUpdatedColumn && <td className="tracking-col-updated"><div className="update-cell"><span>{timeAgo(item.lastUpdated)}</span><small>{formatDateTime(item.lastUpdated)}</small></div></td>}
+                      {showNoteColumn && <td className="tracking-col-note"><span className="note-cell" title={item.note}>{summarizeNote(item.note)}</span></td>}
+                      <td className="tracking-col-progress"><ProgressBadge shipment={item} /></td>
+                      <td className="tracking-col-actions"><div className="row-actions"><button className="row-action" title="人工修改时间与状态" onClick={() => openManualEdit(item)}><Pencil size={14} /></button><button className="row-action" title="只更新这一条" onClick={() => handleSync({ shipmentIds: [item.id] })} disabled={syncing || item.manualMark === '已清关'}><RefreshCw size={14} /></button><button className="row-action danger-action" title="删除这条记录" onClick={() => handleDeleteShipments([item.id])} disabled={syncing}><Trash2 size={14} /></button><button className="row-action" title="查看详情" onClick={() => setDetail(item)}><ChevronRight size={17} /></button></div></td>
                     </tr>
                   ))}
                 </tbody>
