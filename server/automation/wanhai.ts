@@ -10,6 +10,10 @@ function wanhaiDateText(value: string) {
 }
 
 function eventDefinition(label: string): { eventType: TrackingEventType; cargoState: TrackingCargoState } | null {
+  // The summary/table contains fields such as “卸货港预计到港时间”.  They are
+  // metadata, not actual movement events; matching “离港/到港” here would
+  // create a fake departure and can also attach the wrong nearby date.
+  if (/预计|预估|estimate|estimated|expected/i.test(label)) return null;
   if (/空柜进站|还空箱|empty.*(?:return|gate.?in)/i.test(label)) return { eventType: 'empty-return', cargoState: 'empty' };
   if (/进口重柜领出|提货|pickup|gate.?out.*(?:full|laden)/i.test(label)) return { eventType: 'pickup', cargoState: 'laden' };
   if (/卸船|卸货完成|discharg|unload/i.test(label)) return { eventType: 'discharge', cargoState: 'laden' };
@@ -100,8 +104,70 @@ function firstMatchingLine(lines: string[], pattern: RegExp) {
   return lines.find((line) => pattern.test(line))?.trim() || '';
 }
 
+const WanhaiTableFields = [
+  '船名/航次',
+  '提单号',
+  '装货港',
+  '装货港预计离港时间',
+  '卸货港',
+  '卸货港预计到港时间',
+  '关单号',
+  '提单类型',
+  '签单时间',
+] as const;
+
+function normalizeFieldLabel(value: string) {
+  return value
+    .replace(/[：:]/g, '')
+    .replace(/裝/g, '装')
+    .replace(/卸貨/g, '卸货')
+    .replace(/提單/g, '提单')
+    .replace(/簽單/g, '签单')
+    .replace(/離港/g, '离港')
+    .replace(/到港/g, '到港')
+    .replace(/關單/g, '关单')
+    .trim();
+}
+
+/**
+ * 万海结果表在浏览器 innerText 中经常按“整行表头 + 整行数据”输出，
+ * 而不是 label/value 相邻输出。按固定表头顺序重建字段，避免把“装货港
+ * 预计离港时间”误当成装货港，并能读取卸货港预计到港时间。
+ */
+function parseWanhaiTableFields(lines: string[]) {
+  const fields = new Map<string, string>();
+  for (let index = 0; index <= lines.length - WanhaiTableFields.length * 2; index += 1) {
+    const headerBlock = lines.slice(index, index + WanhaiTableFields.length).map(normalizeFieldLabel);
+    if (!WanhaiTableFields.every((label, offset) => headerBlock[offset] === normalizeFieldLabel(label))) continue;
+    const valueBlock = lines.slice(index + WanhaiTableFields.length, index + WanhaiTableFields.length * 2)
+      .map((value) => value.replace(/^\s*[:：]\s*/, '').trim());
+    WanhaiTableFields.forEach((label, offset) => {
+      if (valueBlock[offset]) fields.set(label, valueBlock[offset]);
+    });
+    return fields;
+  }
+  return fields;
+}
+
+function parseWanhaiInlineFields(pageText: string) {
+  const fields = new Map<string, string>();
+  const labels = [...WanhaiTableFields].sort((left, right) => right.length - left.length)
+    .map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const pattern = new RegExp(`(${labels.join('|')})\\s*[:：]\\s*(.*?)(?=${labels.join('|')}\\s*[:：]|$)`, 'gi');
+  for (const match of pageText.matchAll(pattern)) {
+    const label = WanhaiTableFields.find((item) => item.toLowerCase() === String(match[1]).toLowerCase());
+    const value = String(match[2] || '').trim();
+    if (label && value) fields.set(label, value);
+  }
+  return fields;
+}
+
 export function parseWanhaiTrackingText(pageText: string, input: TrackingQuery): TrackingResult {
-  const normalizedPageText = pageText.replace(/\u00a0/g, ' ');
+  // Provider logs may append captured JSON responses after the rendered page.
+  // Keep that payload in rawPageText, but do not let API keys/status labels be
+  // mistaken for visible movement events while parsing the page itself.
+  const renderedPageText = pageText.split(/\n\s*\[WANHAI API /i, 1)[0];
+  const normalizedPageText = renderedPageText.replace(/\u00a0/g, ' ');
   const compactText = normalizedPageText.replace(/[ \t]+/g, ' ').trim();
   if (/captcha|cloudflare|verify you are human|验证码|安全验证|滑块|拖拽/i.test(compactText)) {
     throw trackingError('验证码或风控', '万海页面仍停留在安全验证界面');
@@ -120,17 +186,25 @@ export function parseWanhaiTrackingText(pageText: string, input: TrackingQuery):
     .split(/[\r\n\t]+/)
     .map((line) => line.replace(/ {2,}/g, ' ').trim())
     .filter(Boolean);
+  const tableFields = parseWanhaiTableFields(lines);
+  const inlineFields = parseWanhaiInlineFields(normalizedPageText);
+  const readField = (label: (typeof WanhaiTableFields)[number], fallbackPattern: RegExp) => tableFields.get(label)
+    || inlineFields.get(label)
+    || valueAfterLabel(lines, fallbackPattern);
   const events = parseEvents(lines);
-  const origin = valueAfterLabel(lines, /^装货港$/i);
-  const destination = valueAfterLabel(lines, /^卸货港$/i);
+  const origin = readField('装货港', /^装货港$/i);
+  const destination = readField('卸货港', /^卸货港$/i);
   const isDestinationEvent = (event: TrackingEventDetail) => !destination
     || (event.location ? sameLocation(event.location, destination) : ['discharge', 'pickup', 'empty-return'].includes(event.eventType));
   const destinationEvents = events.filter(isDestinationEvent);
   const actualArrival = [...destinationEvents].reverse().find((event) => event.eventType === 'arrival' && event.actual);
   const discharge = [...destinationEvents].reverse().find((event) => event.eventType === 'discharge' && event.actual);
   const completion = [...destinationEvents].reverse().find((event) => event.actual && (event.eventType === 'pickup' || event.eventType === 'empty-return'));
-  const estimatedArrivalLabel = lines.findIndex((line) => /卸货港预计到港时间|预计到港|ETA/i.test(line));
-  const estimatedArrivalText = estimatedArrivalLabel >= 0 ? nearestDate(lines, estimatedArrivalLabel) : '';
+  const estimatedArrivalField = readField('卸货港预计到港时间', /^卸货港预计到港时间$/i);
+  const estimatedArrivalText = wanhaiDateText(estimatedArrivalField)
+    || (lines.findIndex((line) => /卸货港预计到港时间|预计到港|ETA/i.test(line)) >= 0
+      ? nearestDate(lines, lines.findIndex((line) => /卸货港预计到港时间|预计到港|ETA/i.test(line)))
+      : '');
   if (!actualArrival && !estimatedArrivalText && !discharge && !completion) {
     throw trackingError('解析失败', '万海结果页没有可核验的实际到港、预计到港或卸船后续事件');
   }
@@ -144,6 +218,7 @@ export function parseWanhaiTrackingText(pageText: string, input: TrackingQuery):
     ['卸货港', stops.find((stop) => stop.role === 'discharge')?.name || ''],
     ['ISO Code', firstMatchingLine(lines, /^\d{2}[A-Z]\d$/i)],
     ['货物件数/重量', firstMatchingLine(lines, /\b(?:CTN|CARTON|KGS?|KG)\b/i)],
+    ['预计到港时间', estimatedArrivalText],
   ].flatMap(([label, value]) => value ? [{ label, value }] : []);
 
   return {

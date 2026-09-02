@@ -64,3 +64,49 @@ test('万海结果必须显示当前查询号码', () => {
     queryType: 'container',
   }), /未显示本次提单号或柜号/);
 });
+
+test('万海结果表按整行表头输出时仍能读取卸货港预计到港时间', () => {
+  const result = parseWanhaiTrackingText(`
+提单号或柜号或关单号查询
+2026-07-17 11:32:00
+网上Booking
+2026-07-31 11:17:33.0
+船名/航次
+提单号
+装货港
+装货港预计离港时间
+卸货港
+卸货港预计到港时间
+关单号
+提单类型
+签单时间
+HMM TURQUOISE/ 011E
+027G731676
+CNSHA
+2026-08-12 21:00:01
+USLAX
+2026-09-01 04:00:01
+W6243V70093
+電放
+2026-08-03 12:00:00
+柜号
+WHSU6850081
+ISO Code
+45G1
+提单号
+027G731676
+`, {
+    rule,
+    originalBillNo: 'WHLC027G731676',
+    queryBillNo: '027G731676',
+    containerNo: 'WHSU6850081',
+    queryType: 'bill',
+  });
+
+  assert.equal(result.arrivalKind, 'ETA');
+  assert.equal(result.arrivalTimeText, '2026-09-01 04:00:01（官网未标注时区）');
+  assert.equal(result.trackingDetail?.estimatedArrivalPort, 'USLAX');
+  assert.equal(result.trackingDetail?.estimatedArrivalTimeText, '2026-09-01 04:00:01（官网未标注时区）');
+  assert.equal(result.routeText, 'CNSHA → USLAX');
+  assert.equal(result.trackingDetail?.events.some((event) => event.label.includes('预计')), false);
+});

@@ -196,3 +196,78 @@ main { margin-left: 232px; min-height: 100vh; }
   .tracking-table-hint{margin-top:3px}
   .backup-list .backup-actions{padding-left:0}
 }
+
+/* Desktop tracking ergonomics: the operation view keeps the actionable fields
+   visible and lets the user expand secondary data in place.  The optional
+   columns remain in the DOM so switching to a full/audit view is instant. */
+.tracking-table.operation-view{min-width:1030px}
+.tracking-table.operation-view .tracking-col-current-port,
+.tracking-table.operation-view .tracking-col-estimated-port,
+.tracking-table.operation-view .tracking-col-estimated-time,
+.tracking-table.operation-view .tracking-col-updated,
+.tracking-table.operation-view .tracking-col-note{display:none}
+.tracking-table.operation-view th.tracking-col-check,.tracking-table.operation-view td.tracking-col-check{width:38px}
+.tracking-table.operation-view th.tracking-col-carrier,.tracking-table.operation-view td.tracking-col-carrier{width:108px}
+.tracking-table.operation-view th.tracking-col-arrival,.tracking-table.operation-view td.tracking-col-arrival{width:118px}
+.tracking-table.operation-view th.tracking-col-bill,.tracking-table.operation-view td.tracking-col-bill{width:142px}
+.tracking-table.operation-view th.tracking-col-container,.tracking-table.operation-view td.tracking-col-container{width:142px}
+.tracking-table.operation-view th.tracking-col-discharge,.tracking-table.operation-view td.tracking-col-discharge{width:118px}
+.tracking-table.operation-view th.tracking-col-status,.tracking-table.operation-view td.tracking-col-status{width:120px}
+.tracking-table.operation-view th.tracking-col-manual,.tracking-table.operation-view td.tracking-col-manual{width:102px}
+.tracking-table.operation-view th.tracking-col-progress,.tracking-table.operation-view td.tracking-col-progress{width:84px}
+.tracking-table.operation-view th.tracking-col-actions,.tracking-table.operation-view td.tracking-col-actions{width:188px}
+.tracking-table.full-view,.tracking-table.audit-view{min-width:1570px}
+.tracking-table .tracking-col-actions{position:sticky;right:0;z-index:4;background:#fff;box-shadow:-8px 0 14px rgba(22,66,73,.07)}
+.tracking-table th.tracking-col-actions{z-index:5;background:#f5f7f6}
+.tracking-table tbody tr:hover>.tracking-col-actions{background:#fafcfb}
+.tracking-table tr.selected-row>.tracking-col-actions{background:#f1f9f7!important}
+.tracking-table tr.cleared-row>.tracking-col-actions{background:#f7faf8!important}
+.tracking-table .row-actions{justify-content:flex-start;gap:3px}
+.tracking-table .expand-action{color:#39867d}
+.tracking-table .expand-action svg{transition:transform .16s ease}
+.tracking-table .expand-action.expanded svg{transform:rotate(180deg)}
+.tracking-table .tracking-expanded-row>td{padding:0;border-bottom:1px solid #dceae7;background:#f7fbfa}
+.tracking-expanded-content{padding:13px 18px 15px 60px}
+.expanded-heading{display:flex;align-items:center;gap:8px;min-height:25px}
+.expanded-heading strong{font-size:10px;color:#316b67}
+.expanded-heading span{font-size:8px;color:#8a9c9e}
+.expanded-heading .text-action-button{margin-left:auto}
+.expanded-facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:9px}
+.expanded-facts>div{min-width:0;padding:8px 9px;border:1px solid #dceae7;border-radius:7px;background:#fff}
+.expanded-facts span,.expanded-facts strong{display:block}
+.expanded-facts span{font-size:8px;color:#899c9f}
+.expanded-facts strong{margin-top:3px;color:#48676b;font-size:9px;line-height:1.4;overflow-wrap:anywhere}
+.expanded-facts .expanded-note{grid-column:span 2}
+.expanded-facts .expanded-note strong{display:-webkit-box;overflow:hidden;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.display-mode-grid{display:grid;grid-template-columns:1fr;gap:9px;margin-top:20px}
+.display-mode-option{display:flex;align-items:flex-start;gap:10px;padding:12px 13px;border:1px solid #e0e7e6;border-radius:9px;background:#fafcfb;cursor:pointer;transition:border-color .16s,background .16s}
+.display-mode-option:hover,.display-mode-option.active{border-color:#7fbcb3;background:#f1f8f6}
+.display-mode-option input{margin-top:2px;accent-color:#138174}
+.display-mode-option strong,.display-mode-option small{display:block}
+.display-mode-option strong{font-size:10px;color:#354e57}
+.display-mode-option small{margin-top:3px;color:#849397;font-size:8px;line-height:1.5}
+.tracking-view-switch{display:flex;align-items:center;gap:2px;padding:2px;border:1px solid #dbe7e4;border-radius:7px;background:#f7faf9}
+.tracking-view-switch button{height:26px;padding:0 8px;border:0;border-radius:5px;background:transparent;color:#70848a;font-size:8px;cursor:pointer}
+.tracking-view-switch button:hover{color:#147a70;background:#eef7f5}
+.tracking-view-switch button.active{background:#147c71;color:#fff;box-shadow:0 1px 2px rgba(21,96,88,.18)}
+
+/* The dedicated tracking page uses the same compact interaction pattern. */
+.module-tracking-table{min-width:1030px}
+.module-tracking-table.operation-view .tracking-secondary-column{display:none}
+.module-tracking-table .module-tracking-actions{position:sticky;right:0;z-index:4;background:#fff;box-shadow:-8px 0 14px rgba(22,66,73,.07)}
+.module-tracking-table th.module-tracking-actions{z-index:5;background:#f5f7f6}
+.module-tracking-table tbody tr:hover>.module-tracking-actions{background:#fafcfb}
+.module-tracking-table tr.selected-row>.module-tracking-actions{background:#f1f9f7!important}
+.module-tracking-table tr.cleared-row>.module-tracking-actions{background:#f7faf8!important}
+.module-tracking-table .module-tracking-expanded>td{padding:0;background:#f7fbfa;border-bottom:1px solid #dceae7}
+.module-tracking-table .module-tracking-expanded .tracking-expanded-content{padding-left:54px}
+@media(max-width:900px){
+  .expanded-facts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .expanded-facts .expanded-note{grid-column:1/-1}
+}
+@media(max-width:700px){
+  .tracking-table.operation-view{min-width:920px}
+  .tracking-expanded-content{padding-left:18px}
+  .expanded-heading{align-items:flex-start;flex-wrap:wrap}
+  .expanded-heading .text-action-button{margin-left:0}
+}

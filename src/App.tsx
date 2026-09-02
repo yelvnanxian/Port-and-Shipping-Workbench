@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Anchor,
   Archive,
@@ -107,6 +107,7 @@ type RunSelection = { carrierCodes?: string[]; shipmentIds?: string[]; skipCompl
 type MetricKey = 'tracking' | 'arriving' | 'working' | 'completed' | 'changed';
 type ShipmentDateField = 'eta' | 'dischargeTime' | 'lastUpdated';
 type ShipmentSort = 'default' | 'asc' | 'desc';
+type TableViewMode = 'operation' | 'full' | 'audit';
 
 interface ManualForm {
   mode: 'new' | 'edit';
@@ -496,9 +497,11 @@ export default function App() {
   const [timeSort, setTimeSort] = useState<ShipmentSort>('default');
   const [metricView, setMetricView] = useState<MetricKey | null>(null);
   const [displaySettingsOpen, setDisplaySettingsOpen] = useState(false);
-  const [denseTable, setDenseTable] = useState(false);
+  const [denseTable, setDenseTable] = useState(true);
   const [showNoteColumn, setShowNoteColumn] = useState(true);
   const [showUpdatedColumn, setShowUpdatedColumn] = useState(true);
+  const [tableViewMode, setTableViewMode] = useState<TableViewMode>('operation');
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [pageSize, setPageSize] = useState(20);
   const [pageNumber, setPageNumber] = useState(1);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
@@ -779,6 +782,11 @@ export default function App() {
   }, [query, carrier, status, onlyIncomplete, onlyException, manualMarkFilter, dateField, dateFrom, dateTo, timeSort, pageSize]);
 
   useEffect(() => {
+    const existing = new Set((data?.shipments || []).map((shipment) => shipment.id));
+    setExpandedRows((previous) => new Set([...previous].filter((id) => existing.has(id))));
+  }, [data]);
+
+  useEffect(() => {
     const closeMenu = (event: MouseEvent) => {
       if (moreFilterRef.current && !moreFilterRef.current.contains(event.target as Node)) setMoreFilterOpen(false);
     };
@@ -788,6 +796,14 @@ export default function App() {
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const visibleRows = filtered.slice((pageNumber - 1) * pageSize, pageNumber * pageSize);
+
+  function toggleExpandedRow(id: string) {
+    setExpandedRows((previous) => {
+      const next = new Set(previous);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
 
   const metricLists = useMemo(() => {
     const records = data?.shipments || [];
@@ -1072,6 +1088,7 @@ export default function App() {
   const carriers = Array.from(new Set(data?.shipments.map((item) => item.carrierCode) || []));
   const successfulSources = data?.sources.filter((source) => source.status === 'online').length || 0;
   const trackingColumnCount = 13 + (showUpdatedColumn ? 1 : 0) + (showNoteColumn ? 1 : 0);
+  const trackingTableClass = `tracking-table ${tableViewMode}-view`;
 
   if (authLoading) return <main className="login-screen"><div className="login-card login-loading"><LoaderCircle size={24} className="spin" /><span>正在检查登录状态…</span></div></main>;
   if (auth?.enabled && !auth.authenticated) return <LoginScreen onLogin={login} />;
@@ -1161,7 +1178,7 @@ export default function App() {
 
           <section className={`table-card ${denseTable ? 'compact-table' : ''}`}>
             <div className="table-header">
-              <div><h2>船期追踪</h2><span>共 {filtered.length} 条记录 · 勾选后可只更新指定船期</span><span className="tracking-table-hint">左右滑动查看全部字段</span></div>
+              <div><h2>船期追踪</h2><span>共 {filtered.length} 条记录 · 勾选后可只更新指定船期</span><span className="tracking-table-hint">当前为{tableViewMode === 'operation' ? '操作视图，点击展开详情查看港口与备注' : tableViewMode === 'audit' ? '核验视图，显示来源与更新时间' : '完整视图，显示全部字段'}</span></div>
               <div className="table-header-actions">{selected.size > 0 && <><button className="view-settings" onClick={handleSelectedSync} disabled={syncing}><RefreshCw size={15} />更新已选</button><button className="view-settings danger-action" onClick={() => handleDeleteShipments([...selected])} disabled={syncing}><Trash2 size={14} />删除已选</button></>}<button className="view-settings" onClick={() => setDisplaySettingsOpen(true)}><SlidersHorizontal size={16} />显示设置</button></div>
             </div>
             <div className="filters-row">
@@ -1173,14 +1190,15 @@ export default function App() {
             </div>
 
             <div className="table-scroll">
-              <table className="tracking-table">
+              <table className={trackingTableClass}>
                 <thead><tr>
                   <th className="check-col tracking-col-check"><input type="checkbox" checked={allSelected} onChange={toggleAll} /></th>
                   <th className="tracking-col-carrier">船司</th><th className="tracking-col-arrival">到港时间<br/><span>ATA / ETA</span></th><th className="tracking-col-bill">提单号</th><th className="tracking-col-container">柜号</th><th className="tracking-col-current-port">当前港口</th><th className="tracking-col-estimated-port">预计到达港口</th><th className="tracking-col-estimated-time">预计到达时间</th><th className="tracking-col-discharge">卸船时间</th><th className="tracking-col-status">船只状态</th><th className="tracking-col-manual">人工标记</th>{showUpdatedColumn && <th className="tracking-col-updated">最后更新时间</th>}{showNoteColumn && <th className="tracking-col-note">备注</th>}<th className="tracking-col-progress">进度</th><th className="tracking-col-actions" />
                 </tr></thead>
                 <tbody>
-                  {loading ? <tr><td colSpan={trackingColumnCount}><div className="loading-state"><LoaderCircle className="spin" />正在汇总船司数据…</div></td></tr> : filtered.length === 0 ? <tr><td colSpan={trackingColumnCount}><div className="empty-state"><Search size={24} /><strong>没有匹配的船期记录</strong><span>调整关键词或筛选条件后再试</span></div></td></tr> : visibleRows.map((item) => (
-                    <tr key={item.id} className={`${selected.has(item.id) ? 'selected-row' : ''} ${item.manualMark === '已清关' ? 'cleared-row' : ''}`}>
+                  {loading ? <tr><td colSpan={trackingColumnCount}><div className="loading-state"><LoaderCircle className="spin" />正在汇总船司数据…</div></td></tr> : filtered.length === 0 ? <tr><td colSpan={trackingColumnCount}><div className="empty-state"><Search size={24} /><strong>没有匹配的船期记录</strong><span>调整关键词或筛选条件后再试</span></div></td></tr> : visibleRows.map((item) => {
+                    const isExpanded = expandedRows.has(item.id);
+                    return <Fragment key={item.id}><tr className={`${selected.has(item.id) ? 'selected-row' : ''} ${item.manualMark === '已清关' ? 'cleared-row' : ''}`}>
                       <td className="check-col tracking-col-check"><input type="checkbox" checked={selected.has(item.id)} onChange={() => toggleOne(item.id)} /></td>
                       <td className="tracking-col-carrier"><div className="carrier-cell"><CarrierMark code={item.carrierCode} /><div><strong>{carrierLabel(item.carrierCode, item.carrier)}</strong><span>{item.carrierCode}</span></div></div></td>
                       <td className="tracking-col-arrival"><ArrivalTimeCell shipment={item} /></td>
@@ -1195,9 +1213,9 @@ export default function App() {
                       {showUpdatedColumn && <td className="tracking-col-updated"><div className="update-cell"><span>{timeAgo(item.lastUpdated)}</span><small>{formatDateTime(item.lastUpdated)}</small></div></td>}
                       {showNoteColumn && <td className="tracking-col-note"><span className="note-cell" title={item.note}>{summarizeNote(item.note)}</span></td>}
                       <td className="tracking-col-progress"><ProgressBadge shipment={item} /></td>
-                      <td className="tracking-col-actions"><div className="row-actions"><button className="row-action" title="人工修改时间与状态" onClick={() => openManualEdit(item)}><Pencil size={14} /></button><button className="row-action" title="只更新这一条" onClick={() => handleSync({ shipmentIds: [item.id] })} disabled={syncing || item.manualMark === '已清关'}><RefreshCw size={14} /></button><button className="row-action danger-action" title="删除这条记录" onClick={() => handleDeleteShipments([item.id])} disabled={syncing}><Trash2 size={14} /></button><button className="row-action" title="查看详情" onClick={() => setDetail(item)}><ChevronRight size={17} /></button></div></td>
-                    </tr>
-                  ))}
+                      <td className="tracking-col-actions"><div className="row-actions"><button className={`row-action expand-action ${isExpanded ? 'expanded' : ''}`} title={isExpanded ? '收起详情' : '展开详情'} aria-label={isExpanded ? '收起详情' : '展开详情'} onClick={() => toggleExpandedRow(item.id)}><ChevronDown size={14} /></button><button className="row-action" title="人工修改时间与状态" onClick={() => openManualEdit(item)}><Pencil size={14} /></button><button className="row-action" title="只更新这一条" onClick={() => handleSync({ shipmentIds: [item.id] })} disabled={syncing || item.manualMark === '已清关'}><RefreshCw size={14} /></button><button className="row-action danger-action" title="删除这条记录" onClick={() => handleDeleteShipments([item.id])} disabled={syncing}><Trash2 size={14} /></button><button className="row-action" title="查看详情" onClick={() => setDetail(item)}><ChevronRight size={17} /></button></div></td>
+                    </tr>{isExpanded && <tr className="tracking-expanded-row"><td colSpan={trackingColumnCount}><div className="tracking-expanded-content"><div className="expanded-heading"><strong>记录详情</strong><span>完整信息已保留在官网查询结果和详情抽屉中</span><button className="text-action-button" onClick={() => setDetail(item)}>打开详情 <ChevronRight size={13} /></button></div><div className="expanded-facts"><div><span>当前港口</span><strong>{item.trackingDetail?.currentPort || '—'}</strong></div><div><span>预计到达港口</span><strong>{item.trackingDetail?.estimatedArrivalPort || '—'}</strong></div><div><span>预计到达时间</span><strong>{item.trackingDetail?.estimatedArrivalTimeText || '—'}</strong></div><div><span>最后更新时间</span><strong>{formatDateTime(item.lastUpdated)}</strong></div><div className="expanded-note"><span>备注</span><strong title={item.note}>{summarizeNote(item.note)}</strong></div></div></div></td></tr>}</Fragment>;
+                  })}
                 </tbody>
               </table>
             </div>
@@ -1226,9 +1244,7 @@ export default function App() {
       {displaySettingsOpen && <div className="modal-backdrop settings-backdrop" role="presentation" onMouseDown={() => setDisplaySettingsOpen(false)}>
         <section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="display-settings-title" onMouseDown={(event) => event.stopPropagation()}>
           <div className="modal-heading"><div><p className="eyebrow">TABLE DISPLAY</p><h2 id="display-settings-title">显示设置</h2><p>这些选项会立即作用于当前追踪表格。</p></div><button className="drawer-close" aria-label="关闭" onClick={() => setDisplaySettingsOpen(false)}><X size={19} /></button></div>
-          <label className="display-option"><span><strong>紧凑表格</strong><small>缩短行高，在一屏内显示更多记录</small></span><input type="checkbox" checked={denseTable} onChange={(event) => setDenseTable(event.target.checked)} /></label>
-          <label className="display-option"><span><strong>显示备注列</strong><small>保留官网错误、来源和合并查询提示</small></span><input type="checkbox" checked={showNoteColumn} onChange={(event) => setShowNoteColumn(event.target.checked)} /></label>
-          <label className="display-option"><span><strong>显示最后更新时间</strong><small>查看本次官网联调写回 Excel 的时间</small></span><input type="checkbox" checked={showUpdatedColumn} onChange={(event) => setShowUpdatedColumn(event.target.checked)} /></label>
+          <div className="display-mode-grid" role="radiogroup" aria-label="追踪表显示模式"><label className={`display-mode-option ${tableViewMode === 'operation' ? 'active' : ''}`}><input type="radio" name="tracking-view-mode" value="operation" checked={tableViewMode === 'operation'} onChange={() => { setTableViewMode('operation'); setDenseTable(true); setShowNoteColumn(false); setShowUpdatedColumn(false); }} /><span><strong>操作视图</strong><small>只保留查询、修改和删除所需字段，港口与备注点击展开查看</small></span></label><label className={`display-mode-option ${tableViewMode === 'full' ? 'active' : ''}`}><input type="radio" name="tracking-view-mode" value="full" checked={tableViewMode === 'full'} onChange={() => { setTableViewMode('full'); setDenseTable(false); setShowNoteColumn(true); setShowUpdatedColumn(true); }} /><span><strong>完整视图</strong><small>显示当前港口、预计港口、时间、更新时间和备注</small></span></label><label className={`display-mode-option ${tableViewMode === 'audit' ? 'active' : ''}`}><input type="radio" name="tracking-view-mode" value="audit" checked={tableViewMode === 'audit'} onChange={() => { setTableViewMode('audit'); setDenseTable(false); setShowNoteColumn(true); setShowUpdatedColumn(true); }} /><span><strong>核验视图</strong><small>用于人工核对来源字段；保留全部列并突出核验入口</small></span></label></div>
           <label className="display-option display-select"><span><strong>每页记录数</strong><small>分页只影响表格显示，不改变 Excel 数据</small></span><select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}><option value={10}>10 条</option><option value={20}>20 条</option><option value={50}>50 条</option></select></label>
           <div className="modal-actions"><button className="primary-button" onClick={() => setDisplaySettingsOpen(false)}>完成</button></div>
         </section>
@@ -1507,6 +1523,8 @@ function ModulePage({ page, data, automation, authEnabled, currentUser, syncing,
   const [deletingTask, setDeletingTask] = useState('');
   const [moduleLoading, setModuleLoading] = useState(false);
   const [selectedShipments, setSelectedShipments] = useState<Set<string>>(new Set());
+  const [trackingViewMode, setTrackingViewMode] = useState<TableViewMode>('operation');
+  const [expandedTrackingRows, setExpandedTrackingRows] = useState<Set<string>>(new Set());
   const moduleRefreshSeq = useRef(0);
 
   async function refreshModuleData() {
@@ -1541,6 +1559,7 @@ function ModulePage({ page, data, automation, authEnabled, currentUser, syncing,
   useEffect(() => {
     const existing = new Set((data?.shipments || []).map((shipment) => shipment.id));
     setSelectedShipments((previous) => new Set([...previous].filter((id) => existing.has(id))));
+    setExpandedTrackingRows((previous) => new Set([...previous].filter((id) => existing.has(id))));
   }, [data]);
 
   async function saveWebhook() {
@@ -1838,6 +1857,14 @@ function ModulePage({ page, data, automation, authEnabled, currentUser, syncing,
     });
   }
 
+  function toggleTrackingRow(id: string) {
+    setExpandedTrackingRows((previous) => {
+      const next = new Set(previous);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
   const trackingShipments = data?.shipments || [];
   const allTrackingSelected = trackingShipments.length > 0 && trackingShipments.every((shipment) => selectedShipments.has(shipment.id));
 
@@ -1859,9 +1886,12 @@ function ModulePage({ page, data, automation, authEnabled, currentUser, syncing,
     {moduleLoading && <div className="module-loading"><LoaderCircle className="spin" />正在加载模块数据…</div>}
 
       {page === 'tracking' && <section className="module-card">
-      <div className="module-card-header"><div><strong>全部追踪记录</strong><span>Excel 当前共 {trackingShipments.length} 条 · 可单独或批量更新指定船期</span></div><div className="table-header-actions">{selectedShipments.size > 0 && <><button className="secondary-button compact-button" onClick={() => onSync({ shipmentIds: [...selectedShipments] })} disabled={syncing}><RefreshCw size={14} />更新已选 ({selectedShipments.size})</button><button className="danger-button" onClick={() => onDelete([...selectedShipments])} disabled={syncing}><Trash2 size={13} />删除已选</button></>}<div className="compact-legend"><span className="legend-dot success" />已完成卸船<span className="legend-dot info" />等待卸船<span className="legend-dot muted-dot" />等待到港</div></div></div>
-      <div className="module-table-wrap"><table className="module-table"><thead><tr><th className="check-col"><input type="checkbox" checked={allTrackingSelected} onChange={() => setSelectedShipments(allTrackingSelected ? new Set() : new Set(trackingShipments.map((shipment) => shipment.id)))} /></th><th>船司</th><th>提单号</th><th>柜号</th><th>当前港口</th><th>预计到达港口</th><th>预计到达时间</th><th>到港时间</th><th>卸船时间</th><th>船只状态</th><th>人工标记</th><th>进度</th><th>最后更新</th><th>真实性核验</th><th>操作</th></tr></thead><tbody>
-        {trackingShipments.map((item) => <tr key={item.id} className={`${selectedShipments.has(item.id) ? 'selected-row' : ''} ${item.manualMark === '已清关' ? 'cleared-row' : ''}`}><td className="check-col"><input type="checkbox" checked={selectedShipments.has(item.id)} onChange={() => toggleShipment(item.id)} /></td><td><div className="carrier-cell"><CarrierMark code={item.carrierCode} /><div><strong>{carrierLabel(item.carrierCode, item.carrier)}</strong><span>{item.carrierCode}</span></div></div></td><td className="mono">{item.billNo}</td><td className="mono">{item.containerNo || '—'}</td><td>{item.trackingDetail?.currentPort || '—'}</td><td>{item.trackingDetail?.estimatedArrivalPort || '—'}</td><td>{item.trackingDetail?.estimatedArrivalTimeText || '—'}</td><td><div className="date-cell eta">{formatDateTime(item.eta, true)}</div></td><td><div className="date-cell discharge">{formatDateTime(item.dischargeTime, true)}</div></td><td><VesselStateBadge shipment={item} /></td><td><ManualMarkSelect value={item.manualMark} onChange={(value) => onMark(item.id, value)} disabled={syncing} /></td><td><ProgressBadge shipment={item} /></td><td>{timeAgo(item.lastUpdated)}</td><td><VerificationActions shipment={item} compact /></td><td><div className="row-actions"><button className="row-action" title="人工修改时间与状态" onClick={() => onOpenEdit(item)}><Pencil size={14} /></button><button className="row-action" title="只更新这一条船期" onClick={() => syncShipment(item.id)} disabled={syncing || item.manualMark === '已清关'}><RefreshCw size={14} /></button><button className="row-action danger-action" title="删除这条记录" onClick={() => onDelete([item.id])} disabled={syncing}><Trash2 size={14} /></button><button className="row-action" title="查看追踪详情" onClick={() => onOpenDetail(item)}><ChevronRight size={17} /></button></div></td></tr>)}
+      <div className="module-card-header"><div><strong>全部追踪记录</strong><span>Excel 当前共 {trackingShipments.length} 条 · 可单独或批量更新指定船期；展开行可查看港口与备注</span></div><div className="table-header-actions"><div className="tracking-view-switch" role="group" aria-label="追踪表显示模式"><button className={trackingViewMode === 'operation' ? 'active' : ''} onClick={() => setTrackingViewMode('operation')}>操作视图</button><button className={trackingViewMode === 'full' ? 'active' : ''} onClick={() => setTrackingViewMode('full')}>完整视图</button><button className={trackingViewMode === 'audit' ? 'active' : ''} onClick={() => setTrackingViewMode('audit')}>核验视图</button></div>{selectedShipments.size > 0 && <><button className="secondary-button compact-button" onClick={() => onSync({ shipmentIds: [...selectedShipments] })} disabled={syncing}><RefreshCw size={14} />更新已选 ({selectedShipments.size})</button><button className="danger-button" onClick={() => onDelete([...selectedShipments])} disabled={syncing}><Trash2 size={13} />删除已选</button></>}<div className="compact-legend"><span className="legend-dot success" />已完成卸船<span className="legend-dot info" />等待卸船<span className="legend-dot muted-dot" />等待到港</div></div></div>
+      <div className="module-table-wrap"><table className={`module-table module-tracking-table ${trackingViewMode}-view`}><thead><tr><th className="check-col"><input type="checkbox" checked={allTrackingSelected} onChange={() => setSelectedShipments(allTrackingSelected ? new Set() : new Set(trackingShipments.map((shipment) => shipment.id)))} /></th><th>船司</th><th>提单号</th><th>柜号</th><th className="tracking-secondary-column">当前港口</th><th className="tracking-secondary-column">预计到达港口</th><th className="tracking-secondary-column">预计到达时间</th><th>到港时间</th><th>卸船时间</th><th>船只状态</th><th>人工标记</th><th>进度</th><th className="tracking-secondary-column">最后更新</th><th className="tracking-secondary-column">真实性核验</th><th className="module-tracking-actions">操作</th></tr></thead><tbody>
+        {trackingShipments.map((item) => {
+          const isExpanded = expandedTrackingRows.has(item.id);
+          return <Fragment key={item.id}><tr className={`${selectedShipments.has(item.id) ? 'selected-row' : ''} ${item.manualMark === '已清关' ? 'cleared-row' : ''}`}><td className="check-col"><input type="checkbox" checked={selectedShipments.has(item.id)} onChange={() => toggleShipment(item.id)} /></td><td><div className="carrier-cell"><CarrierMark code={item.carrierCode} /><div><strong>{carrierLabel(item.carrierCode, item.carrier)}</strong><span>{item.carrierCode}</span></div></div></td><td className="mono">{item.billNo}</td><td className="mono">{item.containerNo || '—'}</td><td className="tracking-secondary-column">{item.trackingDetail?.currentPort || '—'}</td><td className="tracking-secondary-column">{item.trackingDetail?.estimatedArrivalPort || '—'}</td><td className="tracking-secondary-column">{item.trackingDetail?.estimatedArrivalTimeText || '—'}</td><td><div className="date-cell eta">{formatDateTime(item.eta, true)}</div></td><td><div className="date-cell discharge">{formatDateTime(item.dischargeTime, true)}</div></td><td><VesselStateBadge shipment={item} /></td><td><ManualMarkSelect value={item.manualMark} onChange={(value) => onMark(item.id, value)} disabled={syncing} /></td><td><ProgressBadge shipment={item} /></td><td className="tracking-secondary-column">{timeAgo(item.lastUpdated)}</td><td className="tracking-secondary-column"><VerificationActions shipment={item} compact /></td><td className="module-tracking-actions"><div className="row-actions"><button className={`row-action expand-action ${isExpanded ? 'expanded' : ''}`} title={isExpanded ? '收起详情' : '展开详情'} aria-label={isExpanded ? '收起详情' : '展开详情'} onClick={() => toggleTrackingRow(item.id)}><ChevronDown size={14} /></button><button className="row-action" title="人工修改时间与状态" onClick={() => onOpenEdit(item)}><Pencil size={14} /></button><button className="row-action" title="只更新这一条船期" onClick={() => syncShipment(item.id)} disabled={syncing || item.manualMark === '已清关'}><RefreshCw size={14} /></button><button className="row-action danger-action" title="删除这条记录" onClick={() => onDelete([item.id])} disabled={syncing}><Trash2 size={14} /></button><button className="row-action" title="查看追踪详情" onClick={() => onOpenDetail(item)}><ChevronRight size={17} /></button></div></td></tr>{isExpanded && <tr className="module-tracking-expanded"><td colSpan={15}><div className="tracking-expanded-content"><div className="expanded-heading"><strong>记录详情</strong><span>港口、预计时间、更新时间和备注</span><button className="text-action-button" onClick={() => onOpenDetail(item)}>打开详情 <ChevronRight size={13} /></button></div><div className="expanded-facts"><div><span>当前港口</span><strong>{item.trackingDetail?.currentPort || '—'}</strong></div><div><span>预计到达港口</span><strong>{item.trackingDetail?.estimatedArrivalPort || '—'}</strong></div><div><span>预计到达时间</span><strong>{item.trackingDetail?.estimatedArrivalTimeText || '—'}</strong></div><div><span>最后更新时间</span><strong>{formatDateTime(item.lastUpdated)}</strong></div><div className="expanded-note"><span>备注</span><strong title={item.note}>{summarizeNote(item.note)}</strong></div></div></div></td></tr>}</Fragment>;
+        })}
       </tbody></table></div>
     </section>}
 
