@@ -283,4 +283,4 @@ main { margin-left: 232px; min-height: 100vh; }
   .expanded-heading .text-action-button{margin-left:0}
   .task-toolbar{width:100%;flex-wrap:wrap}
 }
- .run-history-toolbar{display:flex;align-items:center;gap:9px;margin-left:auto}.run-select-all{display:inline-flex;align-items:center;gap:5px;color:#5d777b;font-size:9px;white-space:nowrap}.run-select-all input{accent-color:#147c71}
+.run-history-toolbar{display:flex;align-items:center;gap:9px;margin-left:auto}.run-select-all{display:inline-flex;align-items:center;gap:5px;height:30px;padding:0 9px;border:1px solid #dbe6e3;border-radius:6px;background:#f7faf9;color:#61767b;font-size:9px;white-space:nowrap;cursor:pointer}.run-select-all:hover{background:#eef7f5;color:#147a70}.run-select-all input{accent-color:#147c71}.run-select-all.partial{border-color:#8cbeb5;background:#eef8f6;color:#147a70}
