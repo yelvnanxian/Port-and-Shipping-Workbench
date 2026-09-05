@@ -198,7 +198,7 @@ async function dashboardPayload(target = engine) {
   const automation = await target.status();
   const generatedAt = automation.lastRun?.finishedAt || lastSync;
   if (workbookRecords.length) {
-    const shipments: Shipment[] = workbookRecords.map(({ record, carrier, carrierCode, sourceUrl, evidencePath, failureEvidencePath, verificationNo, route, trackingDetail, trackingDetailUrl }) => ({
+    const shipments: Shipment[] = workbookRecords.map(({ record, carrier, carrierCode, sourceUrl, evidencePath, failureEvidencePath, verificationNo, route, trackingDetail, trackingDetailUrl, arrivalKind }) => ({
       id: `XLSX-${record.rowNumber}`,
       carrier,
       carrierCode,
@@ -207,7 +207,7 @@ async function dashboardPayload(target = engine) {
       vesselVoyage: 'Excel 自动追踪',
       terminal: '以船司官网为准',
       eta: record.arrivalTime || null,
-      arrivalKind: arrivalKindFromNote(record.note),
+      arrivalKind: arrivalKind || arrivalKindFromNote(record.note),
       berthingTime: null,
       dischargeTime: record.dischargeTime || null,
       status: record.progress === '失败'

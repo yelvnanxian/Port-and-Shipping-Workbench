@@ -110,3 +110,35 @@ ISO Code
   assert.equal(result.routeText, 'CNSHA → USLAX');
   assert.equal(result.trackingDetail?.events.some((event) => event.label.includes('预计')), false);
 });
+
+test('万海真实接口证据不会把字段标题写成港口，并读取 RTSS 预计到港', () => {
+  const result = parseWanhaiTrackingText(`
+WHLC027G731676
+WHSU6850081
+提单号
+装货港
+卸货港
+卸货港预计到港时间
+027G731676
+CNSHA
+USLAX
+2026-09-01 04:00:01
+柜号
+WHSU6850081
+
+[WANHAI API https://cn.wanhai.com/cec/wdcec109_m.do]
+{"datas":{"RTSS":[{"status_d_d":"ESTIMATED","place_code_l":"CNSHA","s_arr_datetime_d":"2026-09-01 04:00:01","status_d_a":"ESTIMATED","place_code_d":"USLAX"}],"bookingInfo":[{"pol":"CNSHA","pod":"USLAX","book_no":"027G731676"}],"bookingDymc":[{"remark":"未到达USLAX","format_date":"2026-09-01 04:00:01"}]}}
+[WANHAI API https://cn.wanhai.com/cec/getDynamicCtnr.do]
+{"datas":[{"place_name":"SHANGHAI","ctnr_date_tpe":"2026-08-12 20:35:00","book_no":"027G731676","ctnr_status_desc":"重櫃裝船","ctnr_place":"CNSHA"}]}
+`, {
+    rule,
+    originalBillNo: 'WHLC027G731676',
+    queryBillNo: '027G731676',
+    containerNo: 'WHSU6850081',
+    queryType: 'bill',
+  });
+
+  assert.equal(result.trackingDetail?.estimatedArrivalPort, 'USLAX');
+  assert.equal(result.trackingDetail?.estimatedArrivalTimeText, '2026-09-01 04:00:01（官网未标注时区）');
+  assert.equal(result.trackingDetail?.routeStops.some((stop) => /预计到港时间/.test(stop.name)), false);
+});

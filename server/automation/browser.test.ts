@@ -246,3 +246,30 @@ test('中远真实成功页结构不会把菜单、时区和柜号误认成地�
   assert.equal(result.dischargeTime, null);
   assert.equal(result.discharged, true);
 });
+
+test('中远四节点路线不把码头链接当预计到达港口，并读取实时船期 ETA', () => {
+  const coscoQuery: TrackingQuery = {
+    ...query,
+    rule: { ...query.rule, prefix: 'COSU', code: 'COSCO', name: '中远海运' },
+    originalBillNo: 'COSU9508832520',
+    queryBillNo: '9508832520',
+    containerNo: 'FFAU3236667',
+  };
+  const result = parseRenderedTrackingText([
+    '提单号 9508832520',
+    '全链运输信息',
+    '起始地', '始发港', '目的港', '目的地',
+    'Yantian, CN', 'Yantian', 'Long Beach', 'Long Beach, US',
+    '实际到港', '2026-08-29', '14:44:35', 'PDT',
+    '实时船期',
+    'COSCO SHIPPING CARNATION', 'SEA', '008E', 'Yantian',
+    '预计：2026-08-13 18:00:00', '实际：2026-08-13 13:47:18',
+    'Long Beach', '预计：2026-08-29 08:00:00', '实际：2026-08-29 14:44:35',
+    '提单信息', '码头链接', '卸货港 :', 'Long Beach-Long Beach Container Terminal , LLC',
+  ].join('\n'), coscoQuery);
+
+  assert.equal(result.trackingDetail?.estimatedArrivalPort, 'Long Beach');
+  assert.equal(result.trackingDetail?.estimatedArrivalTimeText, '2026-08-29 08:00:00（官网当地时间）');
+  assert.equal(result.trackingDetail?.routeStops.some((stop) => /码头链接/.test(stop.name)), false);
+  assert.equal(result.arrivalTimeText, '2026-08-29 14:44:35 PDT（官网当地时间）');
+});

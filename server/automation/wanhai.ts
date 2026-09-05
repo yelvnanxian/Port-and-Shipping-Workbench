@@ -14,18 +14,18 @@ function eventDefinition(label: string): { eventType: TrackingEventType; cargoSt
   // metadata, not actual movement events; matching “离港/到港” here would
   // create a fake departure and can also attach the wrong nearby date.
   if (/预计|预估|estimate|estimated|expected/i.test(label)) return null;
-  if (/空柜进站|还空箱|empty.*(?:return|gate.?in)/i.test(label)) return { eventType: 'empty-return', cargoState: 'empty' };
-  if (/进口重柜领出|提货|pickup|gate.?out.*(?:full|laden)/i.test(label)) return { eventType: 'pickup', cargoState: 'laden' };
-  if (/卸船|卸货完成|discharg|unload/i.test(label)) return { eventType: 'discharge', cargoState: 'laden' };
-  if (/已到达[A-Z]{5}|实际到达|实际到港|arriv/i.test(label) && !/预计|estimate|expected/i.test(label)) return { eventType: 'arrival', cargoState: 'laden' };
-  if (/已开船|离港|开船|depart/i.test(label)) return { eventType: 'departure', cargoState: 'laden' };
-  if (/装船|loaded on/i.test(label)) return { eventType: 'departure', cargoState: 'laden' };
-  if (/重柜进站|网上Booking|舱单制作|gate.?in.*(?:full|laden)/i.test(label)) return { eventType: 'origin', cargoState: 'laden' };
+  if (/空柜進站|空柜进站|还空箱|還空箱|empty.*(?:return|gate.?in)/i.test(label)) return { eventType: 'empty-return', cargoState: 'empty' };
+  if (/进口重柜领出|進口重櫃領出|提货|提貨|pickup|gate.?out.*(?:full|laden)/i.test(label)) return { eventType: 'pickup', cargoState: 'laden' };
+  if (/进[口入]重柜卸船|進口重櫃卸船|卸船|卸貨|卸货完成|discharg|unload/i.test(label)) return { eventType: 'discharge', cargoState: 'laden' };
+  if (/已到达[A-Z]{5}|已到達[A-Z]{5}|实际到达|實際到達|实际到港|實際到港|arriv/i.test(label) && !/预计|預計|estimate|expected/i.test(label)) return { eventType: 'arrival', cargoState: 'laden' };
+  if (/已开船|已開船|离港|離港|开船|開船|depart/i.test(label)) return { eventType: 'departure', cargoState: 'laden' };
+  if (/装船|裝船|loaded on/i.test(label)) return { eventType: 'departure', cargoState: 'laden' };
+  if (/重柜进站|重櫃進場|重櫃內陸|出口重櫃進場|网上Booking|舱单制作|gate.?in.*(?:full|laden)/i.test(label)) return { eventType: 'origin', cargoState: 'laden' };
   return null;
 }
 
 function locationFromLabel(label: string) {
-  return (label.match(/已到达([A-Z]{5})/i)?.[1] || label.match(/([A-Z]{5})已开船/i)?.[1])?.toUpperCase() || null;
+  return (label.match(/已到(?:达|達)([A-Z]{5})/i)?.[1] || label.match(/([A-Z]{5})已(?:开|開)船/i)?.[1])?.toUpperCase() || null;
 }
 
 function nearestDate(lines: string[], index: number) {
@@ -69,19 +69,27 @@ function parseEvents(lines: string[]) {
 
 function routeStops(events: TrackingEventDetail[], origin = '', destination = '') {
   const stops: TrackingRouteStop[] = [];
+  const addStop = (name: string, role: TrackingRouteStop['role']) => {
+    if (!name || stops.some((stop) => sameLocation(stop.name, name))) return;
+    stops.push({ name, role });
+  };
+
+  // 万海接口通常按“最新事件在前”返回；线路不能直接沿用接口顺序，
+  // 必须以 booking 的 POL/POD 为边界，保证起运港始终在前、目的港始终在后。
+  if (origin) addStop(origin, 'loading');
   for (const event of events) {
-    if (!event.location || stops.some((stop) => stop.name === event.location)) continue;
-    const role: TrackingRouteStop['role'] = destination && sameLocation(event.location, destination)
-      ? 'discharge'
-      : origin && sameLocation(event.location, origin)
-        ? 'loading'
-        : stops.length
-          ? 'transshipment'
-          : 'origin';
-    stops.push({ name: event.location, role });
+    if (!event.location || (origin && sameLocation(event.location, origin)) || (destination && sameLocation(event.location, destination))) continue;
+    addStop(event.location, stops.length ? 'transshipment' : 'origin');
   }
-  if (origin && !stops.some((stop) => sameLocation(stop.name, origin))) stops.unshift({ name: origin, role: 'loading' });
-  if (destination && !stops.some((stop) => sameLocation(stop.name, destination))) stops.push({ name: destination, role: 'discharge' });
+  if (destination) addStop(destination, 'discharge');
+
+  // 没有 booking 港口字段时，退回事件实际顺序；此时仅能按官网返回的
+  // 事件顺序展示，不推断不存在的起运港或目的港。
+  if (!stops.length) {
+    for (const event of events) {
+      if (event.location) addStop(event.location, stops.length ? 'transshipment' : 'origin');
+    }
+  }
   return stops;
 }
 
@@ -92,10 +100,26 @@ function sameLocation(left: string | null | undefined, right: string | null | un
 }
 
 function valueAfterLabel(lines: string[], label: RegExp) {
+  const fieldLabels = new Set(WanhaiTableFields.map((item) => normalizeFieldLabel(item)));
+  const validValue = (value: string) => {
+    const trimmed = value.trim();
+    const normalized = normalizeFieldLabel(trimmed);
+    if (!trimmed || fieldLabels.has(normalized)) return '';
+    // 避免把“卸货港预计到港时间”等相邻字段标题当成港口值。
+    if (/^(?:装货港|卸货港)(?:预计离港时间|预计到港时间)$/.test(normalized)) return '';
+    return trimmed;
+  };
   for (let index = 0; index < lines.length; index += 1) {
-    const inline = lines[index].match(new RegExp(`${label.source}\\s*[:：]?\\s*(.+)$`, label.flags.replace(/g/g, '')))?.[1]?.trim();
+    const inline = validValue(lines[index].match(new RegExp(`${label.source}\\s*[:：]?\\s*(.+)$`, label.flags.replace(/g/g, '')))?.[1] || '');
     if (inline) return inline;
-    if (label.test(lines[index]) && lines[index + 1] && !wanhaiDateText(lines[index + 1])) return lines[index + 1].trim();
+    if (!label.test(lines[index])) continue;
+    // 标签和值之间可能重复渲染字段名或插入占位行，最多向后查看四行。
+    for (let offset = 1; offset <= 4 && index + offset < lines.length; offset += 1) {
+      const candidate = lines[index + offset].trim();
+      if (fieldLabels.has(normalizeFieldLabel(candidate))) break;
+      const value = validValue(candidate);
+      if (value && !wanhaiDateText(value)) return value;
+    }
   }
   return '';
 }
@@ -127,6 +151,150 @@ function normalizeFieldLabel(value: string) {
     .replace(/到港/g, '到港')
     .replace(/關單/g, '关单')
     .trim();
+}
+
+function validWanhaiPort(value: string) {
+  const normalized = normalizeFieldLabel(value);
+  if (!value || /^(?:装货港|卸货港|卸货港预计到港时间|装货港预计离港时间|预计到港|ETA)$/i.test(normalized)) return '';
+  if (/^(?:—|-|暂无|待更新|未提供)$/i.test(value.trim())) return '';
+  return value.trim();
+}
+
+type WanhaiApiPayload = { url: string; value: Record<string, unknown> };
+
+function extractWanhaiApiPayloads(pageText: string): WanhaiApiPayload[] {
+  const payloads: WanhaiApiPayload[] = [];
+  const marker = /\[WANHAI API ([^\]]+)\]\s*\n/g;
+  const matches = [...pageText.matchAll(marker)];
+  for (let index = 0; index < matches.length; index += 1) {
+    const start = (matches[index].index || 0) + matches[index][0].length;
+    const end = matches[index + 1]?.index || pageText.length;
+    const raw = pageText.slice(start, end).trim();
+    try {
+      const value = JSON.parse(raw) as unknown;
+      if (value && typeof value === 'object') payloads.push({ url: matches[index][1], value: value as Record<string, unknown> });
+    } catch {
+      // 证据文件可能包含被截断的响应；渲染文本解析仍可继续。
+    }
+  }
+  return payloads;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function asRecords(value: unknown) {
+  return Array.isArray(value) ? value.map(asRecord).filter((item): item is Record<string, unknown> => Boolean(item)) : [];
+}
+
+function textValue(value: unknown) {
+  return typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
+}
+
+function apiDateText(value: unknown) {
+  const text = textValue(value);
+  return wanhaiDateText(text) || text.match(/\b\d{4}[-/]\d{2}[-/]\d{2}\b/)?.[0] || '';
+}
+
+function parseWanhaiApiDetail(pageText: string, input: TrackingQuery) {
+  const payloads = extractWanhaiApiPayloads(pageText);
+  const trackingPayload = payloads.find((item) => /wdcec109_m\.do/i.test(item.url));
+  if (!trackingPayload) return null;
+  const datas = asRecord(trackingPayload.value.datas);
+  if (!datas) return null;
+  const rtss = asRecords(datas.RTSS);
+  const booking = asRecords(datas.bookingInfo)[0] || {};
+  const dynamicRows = asRecords(datas.bookingDymc);
+  const reference = normalizedReference(input.queryBillNo);
+  const exactRows = payloads
+    .filter((item) => /getDynamicCtnr\.do/i.test(item.url))
+    .flatMap((item) => asRecords(item.value.datas));
+  const matchingRows = exactRows.filter((row) => {
+    const bill = normalizedReference(textValue(row.book_no));
+    return !bill || !reference || bill === reference;
+  });
+  // 若响应中包含其他提单的记录，不能因为本单没有命中就把其他货柜的
+  // 动态写入当前订单。仅保留无提单号的公共货柜行（官网有时会省略）。
+  const rows = matchingRows.length
+    ? matchingRows
+    : exactRows.some((row) => normalizedReference(textValue(row.book_no)))
+      ? exactRows.filter((row) => !normalizedReference(textValue(row.book_no)))
+      : exactRows;
+  const origin = validWanhaiPort(textValue(booking.pol) || textValue(booking.plr));
+  const destination = validWanhaiPort(textValue(booking.pod));
+  // RTSS 使用 place_code_d 表示目的港（部分旧响应才会带 pod）。
+  // 必须先按 bookingInfo 的 POD 精确匹配，不能因为 destination 有值就
+  // 让每一条 RTSS 都命中第一条，避免多航段时拿到错误的 ETA。
+  const schedule = rtss.find((item) => {
+    const itemDestination = validWanhaiPort(textValue(item.place_code_d) || textValue(item.pod));
+    return destination ? Boolean(itemDestination && sameLocation(itemDestination, destination)) : Boolean(itemDestination);
+  }) || rtss[0] || {};
+  const etaValue = apiDateText(schedule.s_arr_datetime_d);
+  const scheduleStatus = `${textValue(schedule.status_d_d)} ${textValue(schedule.status_d_a)}`;
+  const scheduleActual = /\bACTUAL\b|实际|實際/i.test(scheduleStatus);
+  const etaEstimated = !scheduleActual && Boolean(etaValue);
+  const eventRows: TrackingEventDetail[] = rows
+    .map((row): TrackingEventDetail | null => {
+      const label = textValue(row.ctnr_status_desc);
+      const definition = eventDefinition(label);
+      if (!definition) return null;
+      const timeText = apiDateText(row.ctnr_date_tpe);
+      if (!timeText) return null;
+      const location = validWanhaiPort(textValue(row.ctnr_place) || textValue(row.place_name));
+      return {
+        label,
+        eventType: definition.eventType,
+        location: location || null,
+        time: null,
+        timeText: `${timeText}（官网未标注时区）`,
+        actual: !/预计|預計|estimate|expected/i.test(label),
+        cargoState: definition.cargoState,
+        transportMode: /進口重櫃領出|进口重柜领出|空櫃|空柜|進場|进场|轉運|转运/i.test(label) ? 'truck' as const : 'ocean' as const,
+        sourceLine: label,
+      };
+    })
+    .filter((item): item is TrackingEventDetail => Boolean(item));
+  const uniqueEventRows = new Map<string, TrackingEventDetail>();
+  for (const event of eventRows) {
+    const key = `${event.eventType}|${event.label}|${event.location || ''}|${event.timeText || ''}`.toUpperCase();
+    if (!uniqueEventRows.has(key)) uniqueEventRows.set(key, event);
+  }
+  const dynamicActualArrival = dynamicRows
+    .map((row) => ({ label: textValue(row.remark), timeText: apiDateText(row.format_date) }))
+    .find((item) => /已到(?:达|達)/i.test(item.label) && !/未到(?:达|達)/i.test(item.label));
+  const apiArrivalText = dynamicActualArrival?.timeText || (scheduleActual ? etaValue : '');
+  const apiActualArrival = Boolean(apiArrivalText);
+  const sortedEventRows = [...uniqueEventRows.values()];
+  if (apiActualArrival && !sortedEventRows.some((event) => event.eventType === 'arrival' && event.actual)) {
+    const arrivalLocation = validWanhaiPort(dynamicActualArrival?.label.match(/已到(?:达|達)([A-Z]{5})/i)?.[1] || destination);
+    sortedEventRows.push({
+      label: dynamicActualArrival?.label || '实际到港',
+      eventType: 'arrival',
+      location: arrivalLocation || null,
+      time: null,
+      timeText: `${apiArrivalText}（官网未标注时区）`,
+      actual: true,
+      cargoState: 'laden',
+      transportMode: 'ocean',
+      sourceLine: dynamicActualArrival?.label || '实际到港',
+    });
+  }
+  sortedEventRows.sort((left, right) => (left.timeText || '').localeCompare(right.timeText || ''));
+  const currentEvent = sortedEventRows.at(-1);
+  const apiDischarge = sortedEventRows.filter((event) => event.eventType === 'discharge' && event.actual && (!destination || !event.location || sameLocation(event.location, destination))).at(-1);
+  const stops = routeStops(sortedEventRows, origin, destination);
+  return {
+    origin,
+    destination,
+    etaText: !apiActualArrival && etaEstimated ? etaValue : '',
+    actualArrivalText: apiArrivalText,
+    events: sortedEventRows,
+    currentPort: currentEvent?.location || null,
+    dischargeEvent: apiDischarge || null,
+    stops,
+    booking,
+  };
 }
 
 /**
@@ -191,24 +359,35 @@ export function parseWanhaiTrackingText(pageText: string, input: TrackingQuery):
   const readField = (label: (typeof WanhaiTableFields)[number], fallbackPattern: RegExp) => tableFields.get(label)
     || inlineFields.get(label)
     || valueAfterLabel(lines, fallbackPattern);
-  const events = parseEvents(lines);
-  const origin = readField('装货港', /^装货港$/i);
-  const destination = readField('卸货港', /^卸货港$/i);
+  const apiDetail = parseWanhaiApiDetail(pageText, input);
+  const events = apiDetail?.events.length ? apiDetail.events : parseEvents(lines);
+  const origin = apiDetail?.origin || validWanhaiPort(readField('装货港', /^装货港$/i));
+  const destination = apiDetail?.destination || validWanhaiPort(readField('卸货港', /^卸货港$/i));
   const isDestinationEvent = (event: TrackingEventDetail) => !destination
     || (event.location ? sameLocation(event.location, destination) : ['discharge', 'pickup', 'empty-return'].includes(event.eventType));
   const destinationEvents = events.filter(isDestinationEvent);
-  const actualArrival = [...destinationEvents].reverse().find((event) => event.eventType === 'arrival' && event.actual);
-  const discharge = [...destinationEvents].reverse().find((event) => event.eventType === 'discharge' && event.actual);
+  const actualArrival = apiDetail?.actualArrivalText
+    ? { timeText: `${apiDetail.actualArrivalText}（官网未标注时区）` }
+    : [...destinationEvents].reverse().find((event) => event.eventType === 'arrival' && event.actual);
+  const discharge = apiDetail?.dischargeEvent || [...destinationEvents].reverse().find((event) => event.eventType === 'discharge' && event.actual);
   const completion = [...destinationEvents].reverse().find((event) => event.actual && (event.eventType === 'pickup' || event.eventType === 'empty-return'));
   const estimatedArrivalField = readField('卸货港预计到港时间', /^卸货港预计到港时间$/i);
-  const estimatedArrivalText = wanhaiDateText(estimatedArrivalField)
-    || (lines.findIndex((line) => /卸货港预计到港时间|预计到港|ETA/i.test(line)) >= 0
-      ? nearestDate(lines, lines.findIndex((line) => /卸货港预计到港时间|预计到港|ETA/i.test(line)))
-      : '');
+  // 官方接口已明确给出 ATA/ETA 时，以接口状态为准；不能在 ATA
+  // 已存在时再从旧页面摘要回填同一个日期并标成 ETA。
+  const estimatedArrivalText = apiDetail
+    ? apiDetail.etaText
+    : wanhaiDateText(estimatedArrivalField)
+      || (lines.findIndex((line) => /卸货港预计到港时间|预计到港|ETA/i.test(line)) >= 0
+        ? nearestDate(lines, lines.findIndex((line) => /卸货港预计到港时间|预计到港|ETA/i.test(line)))
+        : '');
   if (!actualArrival && !estimatedArrivalText && !discharge && !completion) {
     throw trackingError('解析失败', '万海结果页没有可核验的实际到港、预计到港或卸船后续事件');
   }
-  const stops = routeStops(events, origin, destination);
+  // 若摘要未提供卸货港，才使用实际到达事件的真实地点补齐；不会使用
+  // 字段标题或当前港口作为预计到达港口。
+  const eventDestination = [...events].reverse().find((event) => event.eventType === 'arrival' && event.location)?.location || '';
+  const resolvedDestination = destination || validWanhaiPort(eventDestination);
+  const stops = apiDetail?.stops?.length ? apiDetail.stops : routeStops(events, origin, resolvedDestination);
   const routeText = stops.map((stop) => stop.name).join(' → ') || null;
   const facts = [
     ['提单号', firstMatchingLine(lines, /^(?:WHLC)?\d{3}[A-Z]\d{6}$/i)],
@@ -241,10 +420,11 @@ export function parseWanhaiTrackingText(pageText: string, input: TrackingQuery):
       routeStops: stops,
       events,
       currentPort: [...events].reverse().find((event) => event.actual && event.location)?.location || null,
-      estimatedArrivalPort: destination || null,
+      estimatedArrivalPort: resolvedDestination || null,
       estimatedArrivalTimeText: estimatedArrivalText ? `${estimatedArrivalText}（官网未标注时区）` : null,
       facts,
     },
-    rawPageText: compactText,
+    // 保留渲染文本和官方接口响应，便于证据复核以及后续解析规则升级。
+    rawPageText: pageText,
   };
 }

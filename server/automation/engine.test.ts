@@ -8,6 +8,7 @@ import type { TrackingProvider } from './tracker.js';
 import { trackingError } from './errors.js';
 import { WorkbookStore } from './workbook.js';
 import { SerialExecutionCoordinator } from './concurrency.js';
+import { sourceTrackingDetailPath } from './source-storage.js';
 
 async function waitFor(predicate: () => Promise<boolean>) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -151,6 +152,62 @@ test('COSCO 查询失败会移除旧的轨迹详情，避免展示过期线路',
     const failure = await engine.run('manual', { skipCompleted: false });
     assert.equal(failure.failed, 1);
     assert.equal((await engine.dashboardRecords())[0].trackingDetail, undefined);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('读取旧版轨迹详情会根据已保存官网原文修复万海和中远字段', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'port-workbench-repair-legacy-detail-'));
+  try {
+    const store = new WorkbookStore(root);
+    const engine = new AutomationEngine(store);
+    const wanhaiPath = sourceTrackingDetailPath(store.dataDirectory, 'WANHAI', 'WHLC027G731676_WHSU6850081');
+    await fs.mkdir(path.dirname(wanhaiPath), { recursive: true });
+    await fs.writeFile(wanhaiPath, JSON.stringify({
+      carrierCode: 'WANHAI', billNo: 'WHLC027G731676', containerNo: 'WHSU6850081', sourceUrl: 'https://cn.wanhai.com/cec/', capturedAt: new Date().toISOString(),
+      trackingDetail: {
+        carrierCode: 'WANHAI', queryType: 'bill', queryValue: '027G731676', capturedAt: new Date().toISOString(),
+        routeStops: [{ name: '装货港预计离港时间', role: 'loading' }, { name: '卸货港预计到港时间', role: 'discharge' }],
+        events: [], estimatedArrivalPort: '卸货港预计到港时间', estimatedArrivalTimeText: '卸货港预计到港时间',
+        facts: [{ label: '卸货港', value: '卸货港预计到港时间' }],
+      },
+      rawPageText: [
+        'WHLC027G731676', 'WHSU6850081', '提单号', '装货港', '卸货港', '卸货港预计到港时间',
+        '027G731676', 'CNSHA', 'USLAX', '2026-09-01 04:00:01', '柜号', 'WHSU6850081',
+        '[WANHAI API https://cn.wanhai.com/cec/wdcec109_m.do]',
+        JSON.stringify({ datas: { RTSS: [{ status_d_d: 'ESTIMATED', place_code_l: 'CNSHA', s_arr_datetime_d: '2026-09-01 04:00:01', status_d_a: 'ESTIMATED', place_code_d: 'USLAX' }], bookingInfo: [{ pol: 'CNSHA', pod: 'USLAX', book_no: '027G731676' }], bookingDymc: [{ remark: '未到达USLAX', format_date: '2026-09-01 04:00:01' }] } }),
+      ].join('\n'),
+    }, null, 2));
+
+    const coscoPath = sourceTrackingDetailPath(store.dataDirectory, 'COSCO', 'COSU9508832520_FFAU3236667');
+    await fs.mkdir(path.dirname(coscoPath), { recursive: true });
+    await fs.writeFile(coscoPath, JSON.stringify({
+      carrierCode: 'COSCO', billNo: 'COSU9508832520', containerNo: 'FFAU3236667', sourceUrl: 'https://elines.coscoshipping.com/ebusiness/cargoTracking', capturedAt: new Date().toISOString(),
+      trackingDetail: {
+        carrierCode: 'COSCO', queryType: 'bill', queryValue: '9508832520', capturedAt: new Date().toISOString(),
+        routeStops: [{ name: 'Yantian, CN', role: 'origin' }, { name: '集装箱信息', role: 'discharge' }, { name: '码头链接', role: 'delivery' }],
+        events: [], estimatedArrivalPort: '码头链接', estimatedArrivalTimeText: '实时船期',
+        facts: [{ label: '目的港', value: '码头链接' }],
+      },
+      rawPageText: [
+        '提单号 9508832520', '全链运输信息', '起始地', '始发港', '目的港', '目的地',
+        'Yantian, CN', 'Yantian', 'Long Beach', 'Long Beach, US',
+        '实际到港', '2026-08-29', '14:44:35', 'PDT', '实时船期',
+        'COSCO SHIPPING CARNATION', 'SEA', '008E', 'Yantian', '预计：2026-08-13 18:00:00', '实际：2026-08-13 13:47:18',
+        'Long Beach', '预计：2026-08-29 08:00:00', '实际：2026-08-29 14:44:35', '提单信息', '码头链接',
+      ].join('\n'),
+    }, null, 2));
+
+    const repairedWanhai = await engine.readTrackingDetail('WANHAI', 'WHLC027G731676_WHSU6850081.json');
+    assert.equal(repairedWanhai.trackingDetail.estimatedArrivalPort, 'USLAX');
+    assert.equal(repairedWanhai.trackingDetail.estimatedArrivalTimeText, '2026-09-01 04:00:01（官网未标注时区）');
+    assert.equal(repairedWanhai.trackingDetail.routeStops.some((stop) => /预计到港时间/.test(stop.name)), false);
+
+    const repairedCosco = await engine.readTrackingDetail('COSCO', 'COSU9508832520_FFAU3236667.json');
+    assert.equal(repairedCosco.trackingDetail.estimatedArrivalPort, 'Long Beach');
+    assert.equal(repairedCosco.trackingDetail.estimatedArrivalTimeText, '2026-08-29 08:00:00（官网当地时间）');
+    assert.equal(repairedCosco.trackingDetail.routeStops.some((stop) => /码头链接|集装箱信息|实时船期|提单信息/.test(stop.name)), false);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

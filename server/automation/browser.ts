@@ -210,8 +210,21 @@ function findLabeledDateText(lines: string[], label: RegExp, excluded?: RegExp, 
       for (const pattern of DATE_PATTERNS) {
         const matched = candidateLine.match(pattern)?.[0] || context.match(pattern)?.[0];
         if (!matched) continue;
-        const suffix = candidateLine.slice(candidateLine.indexOf(matched) + matched.length).match(/^\s+([A-Z]{2,5})\b/)?.[1];
-        return `${matched}${suffix ? ` ${suffix}` : ''}`;
+        let dateWithTime = matched;
+        // 当日期和时刻被渲染为相邻节点（YYYY-MM-DD / HH:mm:ss / PDT）时，
+        // 把三行重新组合，避免详情只显示日期而丢失官网提供的精确时刻。
+        if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(matched)) {
+          const adjacentTime = lines[candidateIndex + 1]?.trim().match(/^\d{1,2}:\d{2}(?::\d{2})?$/)?.[0];
+          if (adjacentTime) dateWithTime = `${matched} ${adjacentTime}`;
+        }
+        // COSCO 等页面经常把日期、时刻、时区拆成三行。除当前行
+        // 外再读取相邻行的时间/时区，保留官网原文用于详情展示。
+        const inlineSuffix = candidateLine.slice(candidateLine.indexOf(matched) + matched.length).match(/^\s+([A-Z]{2,5})\b/)?.[1];
+        const nextSuffix = lines.slice(candidateIndex + 1, candidateIndex + 5)
+          .map((line) => line.trim())
+          .find((line) => /^[A-Z]{2,5}$/.test(line));
+        const suffix = inlineSuffix || nextSuffix;
+        return `${dateWithTime}${suffix ? ` ${suffix}` : ''}`;
       }
     }
   }
@@ -275,8 +288,22 @@ function coscoLocation(value: string) {
   if (!location || location.length < 2 || location.length > 120) return null;
   if (/^(?:CST|CDT|UTC|GMT|PST|PDT|MST|MDT|EST|EDT)$/i.test(location)) return null;
   if (DATE_PATTERNS.some((pattern) => pattern.test(location))) return null;
-  if (/货物跟踪|运输详情|最新动态|起始地|始发港|中转港|目的港|目的地|提货|还空箱|实际到|实际离|卸船|卸货|装船|时间|日期|船名|航次|container|bill|booking|yard|depot|truck|cy\s*\|\s*cy/i.test(location)) return null;
+  if (/货物跟踪|运输详情|最新动态|全链运输信息|集装箱信息|实时船期|提单信息|码头链接|起始地|始发港|中转港|目的港|目的地|提货|还空箱|实际到|实际离|卸船|卸货|装船|时间|日期|船名|航次|container|bill|booking|yard|depot|truck|cy\s*\|\s*cy/i.test(location)) return null;
   if (/^[A-Z][A-Z0-9 .,'()&/-]{2,}(?:,\s*[A-Z][A-Z0-9 .,'()&/-]{1,}){0,3}$/i.test(location)) return location;
+  if (/^[\u4e00-\u9fff]{2,}(?:[，,][\u4e00-\u9fffA-Za-z0-9 ./'()&/-]{2,}){0,3}$/.test(location)) return location;
+  return null;
+}
+
+/** 港口列中的英文港名有时没有国家后缀（如 Yantian、Long Beach）。 */
+function coscoPortLocation(value: string) {
+  const strict = coscoLocation(value);
+  if (strict) return strict;
+  const location = value.replace(/\u00a0/g, ' ').replace(/[\t ]+/g, ' ').trim().replace(/^[-–—:|]+|[-–—:|]+$/g, '');
+  if (!location || location.length < 3 || location.length > 80) return null;
+  if (/^(?:AI|English|帮助|登录|注册|海运|陆运|关务|仓储|SEA|CY|CY\s*\|\s*CY)$/i.test(location)) return null;
+  if (DATE_PATTERNS.some((pattern) => pattern.test(location))) return null;
+  if (/货物跟踪|运输详情|最新动态|全链运输信息|集装箱信息|实时船期|提单信息|码头链接|起始地|始发港|中转港|目的港|目的地|提货|还空箱|实际到|实际离|卸船|卸货|装船|时间|日期|船名|航次|container|bill|booking|yard|depot|truck/i.test(location)) return null;
+  if (/^[A-Z][A-Z0-9 .,'()&/-]{2,}$/i.test(location)) return location;
   if (/^[\u4e00-\u9fff]{2,}(?:[，,][\u4e00-\u9fffA-Za-z0-9 ./'()&/-]{2,}){0,3}$/.test(location)) return location;
   return null;
 }
@@ -380,18 +407,37 @@ function coscoRouteHeaderIndex(lines: string[]) {
 
 function coscoRouteFromHeader(lines: string[]) {
   const headerIndex = coscoRouteHeaderIndex(lines);
-  if (headerIndex < 0) return { headerIndex, routeStops: [] as TrackingRouteStop[] };
-  const roles: TrackingRouteStop['role'][] = ['origin', 'loading', 'transshipment', 'discharge', 'delivery'];
-  const routeStops = roles.flatMap((role, offset) => {
-    const location = coscoLocation(lines[headerIndex + 5 + offset] || '');
-    return location ? [{ name: location, role }] : [];
-  });
-  return { headerIndex, routeStops };
+  if (headerIndex >= 0) {
+    const roles: TrackingRouteStop['role'][] = ['origin', 'loading', 'transshipment', 'discharge', 'delivery'];
+    const routeStops = roles.flatMap((role, offset) => {
+      const location = coscoPortLocation(lines[headerIndex + 5 + offset] || '');
+      return location ? [{ name: location, role }] : [];
+    });
+    return { headerIndex, routeStops };
+  }
+
+  // COSCO 页面在没有中转港时只渲染四列：起始地、始发港、目的港、目的地。
+  // 不能按固定五列偏移读取，否则会把“集装箱信息/实时船期/码头链接”等
+  // UI 文本误当成港口，最终将目的港显示成“码头链接”。
+  const fourLabels = ['起始地', '始发港', '目的港', '目的地'];
+  for (let index = 0; index <= lines.length - fourLabels.length; index += 1) {
+    if (!fourLabels.every((label, offset) => lines[index + offset] === label)) continue;
+    const roles: TrackingRouteStop['role'][] = ['origin', 'loading', 'discharge', 'delivery'];
+    const routeStops = roles.flatMap((role, offset) => {
+      const location = coscoPortLocation(lines[index + fourLabels.length + offset] || '');
+      return location ? [{ name: location, role }] : [];
+    });
+    if (routeStops.length >= 2) return { headerIndex: index, routeStops };
+  }
+  return { headerIndex: -1, routeStops: [] as TrackingRouteStop[] };
 }
 
 function coscoTimelineEvents(lines: string[], routeHeaderIndex: number, routeStops: TrackingRouteStop[]) {
   if (routeHeaderIndex < 0 || !routeStops.length) return [];
-  const start = routeHeaderIndex + 10;
+  // 有中转港时页面是 5 个标题 + 5 个值；无中转港时是 4 + 4。
+  // 固定从 +10 开始会跳过四节点页面的第一条实际到港事件。
+  const hasTransshipmentHeader = lines.slice(routeHeaderIndex, routeHeaderIndex + 5).some((line) => /中转港|transshipment/i.test(line));
+  const start = routeHeaderIndex + (hasTransshipmentHeader ? 10 : 8);
   const end = lines.findIndex((line, index) => index > start && /运输详情|transportation details/i.test(line));
   const events: TrackingEventDetail[] = [];
   let routeIndex = 0;
@@ -444,8 +490,8 @@ function coscoScheduleEvents(lines: string[], knownEvents: TrackingEventDetail[]
   const limit = end >= 0 ? end : lines.length;
   for (let index = start + 1; index < limit - 4; index += 1) {
     if (!/^预计[：:]\s*\d{4}-\d{2}-\d{2}/.test(lines[index]) || !/^实际[：:]\s*\d{4}-\d{2}-\d{2}/.test(lines[index + 1])) continue;
-    const loadingPort = coscoLocation(lines[index - 1] || '');
-    const dischargePort = coscoLocation(lines[index + 2] || '');
+    const loadingPort = coscoPortLocation(lines[index - 1] || '');
+    const dischargePort = coscoPortLocation(lines[index + 2] || '');
     if (!loadingPort || !dischargePort || !/^预计[：:]\s*\d{4}-\d{2}-\d{2}/.test(lines[index + 3]) || !/^实际[：:]\s*\d{4}-\d{2}-\d{2}/.test(lines[index + 4])) continue;
     const pairs: Array<{ label: string; eventType: TrackingEventType; location: string; value: string; actual: boolean }> = [
       { label: '预计离港', eventType: 'departure', location: loadingPort, value: lines[index], actual: false },
@@ -456,7 +502,13 @@ function coscoScheduleEvents(lines: string[], knownEvents: TrackingEventDetail[]
     for (const item of pairs) {
       const value = item.value.replace(/^[^：:]+[：:]\s*/, '');
       const timezone = knownEvents.find((event) => event.location && coscoSameLocation(event.location, item.location) && event.timeText)?.timeText?.match(/\s([A-Z]{2,5})$/)?.[1];
-      const date = coscoDateWithTimezone(value, timezone);
+      const date = coscoDateWithTimezone(value, timezone)
+        || (timezone ? null : (() => {
+          const matched = value.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}(?::\d{2})?)/);
+          if (!matched) return null;
+          const fallback = new Date(`${matched[1]}T${matched[2]}Z`);
+          return Number.isNaN(fallback.getTime()) ? null : fallback;
+        })());
       if (date) events.push({ label: item.label, eventType: item.eventType, location: item.location, time: date.toISOString(), timeText: value, actual: item.actual, cargoState: 'unknown', sourceLine: item.value });
     }
     index += 4;
@@ -636,7 +688,9 @@ export function parseRenderedTrackingText(text: string, input: TrackingQuery): T
         : null;
   const preserveLocalTime = input.rule.code === 'COSCO' || input.rule.code === 'ONE';
   const arrivalTimeText = preserveLocalTime
-    ? coscoDestinationArrivalEvent?.timeText || coscoDestinationArrival?.text || findLabeledDateText(
+    // 页面“实际到港”通常带有单独的时区行（如 PDT），优先保留这段
+    // 官网原文；实时船期中的同一事件有时没有时区，不能覆盖它。
+    ? coscoDestinationArrival?.text || coscoDestinationArrivalEvent?.timeText || findLabeledDateText(
       lines,
       actualArrival ? actualArrivalLabel : /\bETA\b|estimated(?: time of)? arrival|expected arrival|预计到港|预计抵达/i,
       actualArrival ? /estimated|expected|预计/i : undefined,

@@ -2,12 +2,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { buildQueryBillNo, resolveCarrierRule } from './carriers.js';
 import { createApiEvidence } from './api-evidence.js';
-import { BrowserTrackingProvider, FallbackTrackingProvider, type BrowserVerificationCallbacks } from './browser.js';
+import { BrowserTrackingProvider, FallbackTrackingProvider, parseRenderedTrackingText, type BrowserVerificationCallbacks } from './browser.js';
 import { classifyTrackingError, trackingError } from './errors.js';
 import { EvergreenTrackingProvider } from './evergreen.js';
 import { MatsonTrackingProvider } from './matson.js';
 import { YangmingTrackingProvider } from './yangming.js';
 import { WanhaiPatchrightTrackingProvider } from './wanhai-patchright.js';
+import { parseWanhaiTrackingText } from './wanhai.js';
 import { ZimPatchrightTrackingProvider } from './zim-patchright.js';
 import { notifyWeCom } from './notifier.js';
 import { OoclPatchrightTrackingProvider } from './oocl-patchright.js';
@@ -23,7 +24,7 @@ import { OfficialSiteProbeProvider } from './official-probe.js';
 import { SmLineTrackingProvider } from './smline.js';
 import { RateLimiter } from './rate-limiter.js';
 import { CachedTrackingProvider, CarrierRoutingTrackingProvider, trackRecord, type TrackingProvider } from './tracker.js';
-import type { AutomationSettings, AutomationTask, AutomationTaskScope, FailedTrackingDetail, ManualMark, QueryProgress, RunProgress, RunSummary, TrackingTime, VesselState, WorkbookRecord } from './types.js';
+import type { AutomationSettings, AutomationTask, AutomationTaskScope, FailedTrackingDetail, ManualMark, QueryProgress, RunProgress, RunSummary, TrackingDetail, TrackingEventDetail, TrackingTime, VesselState, WorkbookRecord } from './types.js';
 import { WorkbookStore } from './workbook.js';
 import type { AppDatabase } from '../database.js';
 import { safeSourceCode, sourceEvidenceDirectory, sourceEvidenceUrl, sourceTrackingDetailKey, sourceTrackingDetailPath, sourceTrackingDetailUrl } from './source-storage.js';
@@ -191,6 +192,76 @@ function trackingMomentIdentity(value: TrackingTime) {
 function isSuspiciousArrivalAsDischarge(arrival: TrackingTime, discharge: TrackingTime) {
   const arrivalIdentity = trackingMomentIdentity(arrival);
   return Boolean(arrivalIdentity && arrivalIdentity === trackingMomentIdentity(discharge));
+}
+
+function trackingLocationMatches(left: string | null | undefined, right: string | null | undefined) {
+  if (!left || !right) return false;
+  const normalize = (value: string) => value.toUpperCase().replace(/[^A-Z0-9\u4e00-\u9fff]/g, '');
+  const a = normalize(left);
+  const b = normalize(right);
+  return Boolean(a && b && (a === b || (a.length >= 5 && b.length >= 5 && (a.includes(b) || b.includes(a)))));
+}
+
+function latestDetailEvent(detail: TrackingDetail, type: TrackingEventDetail['eventType'], actual: boolean) {
+  const destination = detail.estimatedArrivalPort || detail.routeStops.find((stop) => stop.role === 'discharge')?.name || '';
+  const candidates = detail.events.filter((event) => event.eventType === type && event.actual === actual);
+  return candidates.filter((event) => !destination || !event.location || trackingLocationMatches(event.location, destination)).at(-1)
+    || candidates.at(-1);
+}
+
+/**
+ * Older browser parsers occasionally persisted a page heading or a field
+ * label where a port should be.  Keep this check deliberately conservative:
+ * only values that are unambiguously UI metadata are considered stale.  Real
+ * ports can contain spaces, punctuation and Chinese characters, so they must
+ * not be rejected by a generic "looks unusual" heuristic.
+ */
+function hasStalePortMetadata(detail: TrackingDetail) {
+  const values = [
+    detail.estimatedArrivalPort || '',
+    detail.estimatedArrivalTimeText || '',
+    // Fact labels such as "预计到港时间" are legitimate field names.  Only
+    // inspect their values; old parsers put the UI headings themselves into
+    // the value/port fields.
+    ...(detail.facts || []).map((fact) => fact.value),
+    ...(detail.routeStops || []).map((stop) => stop.name),
+  ].join('|');
+  return /装货港预计离港时间|卸货港预计到港时间|预计到港时间|码头链接|集装箱信息|实时船期|提单信息/.test(values);
+}
+
+/**
+ * 页面详情修复后，旧 Excel 可能仍保留上一次错误解析的时间/状态。
+ * 列表展示优先采用同一条官网详情的核验结果；人工修改和失败记录仍
+ * 以 Excel 为准，避免自动修复覆盖人工输入或失败原因。
+ */
+function displayRecordFromDetail(record: WorkbookRecord, detail?: TrackingDetail) {
+  if (!detail || (!detail.events.length && !detail.estimatedArrivalTimeText) || record.progress === '失败' || /人工补录|人工修改/.test(record.note)) {
+    return { record, arrivalKind: null as 'ATA' | 'ETA' | null };
+  }
+  const actualArrival = latestDetailEvent(detail, 'arrival', true);
+  const estimatedArrival = latestDetailEvent(detail, 'arrival', false);
+  const discharge = latestDetailEvent(detail, 'discharge', true);
+  const completion = detail.events.filter((event) => event.actual && ['pickup', 'empty-return', 'delivery'].includes(event.eventType)).at(-1);
+  const arrivalTime = actualArrival?.timeText || actualArrival?.time || estimatedArrival?.timeText || detail.estimatedArrivalTimeText || null;
+  const dischargeTime = discharge?.timeText || discharge?.time || null;
+  const vesselState: VesselState = discharge || completion
+    ? '已到港已卸船'
+    : actualArrival
+      ? '已到港未卸船'
+      : estimatedArrival || detail.estimatedArrivalTimeText
+        ? '未到港未卸船'
+        : record.vesselState || '未到港未卸船';
+  // 详情中可能只保存了路线/到港事件，而本次查询结果已明确确认
+  // “已卸船”（例如后端 provider 的摘要证据）。已有更强状态不能因
+  // 详情事件不完整而降级。
+  const resolvedVesselState = !discharge && !completion && record.vesselState === '已到港已卸船'
+    && Boolean(actualArrival)
+    ? '已到港已卸船'
+    : vesselState;
+  return {
+    record: { ...record, arrivalTime, dischargeTime, vesselState: resolvedVesselState },
+    arrivalKind: actualArrival ? 'ATA' as const : (estimatedArrival || detail.estimatedArrivalTimeText) ? 'ETA' as const : null,
+  };
 }
 
 export class AutomationEngine {
@@ -380,7 +451,42 @@ export class AutomationEngine {
     if (!expectedCarrier || safeName !== fileName || !/\.json$/i.test(safeName)) throw new RequestValidationError('轨迹详情路径不合法');
     const filePath = sourceTrackingDetailPath(this.store.dataDirectory, code, safeName.replace(/\.json$/i, ''));
     const raw = await fs.readFile(filePath, 'utf8');
-    return JSON.parse(raw) as StoredTrackingDetail;
+    const stored = JSON.parse(raw) as StoredTrackingDetail;
+    // 早期版本曾把页面字段标题（如“码头链接”“卸货港预计到港时间”）
+    // 当作港口保存。读取旧缓存时按原始官网页面重新解析并覆盖，避免用户
+    // 必须手动删除缓存或重新查询；解析失败则保留原文件供人工核验。
+    const routeNames = (stored.trackingDetail?.routeStops || []).map((stop) => stop.name).join('|');
+    const eventKeys = (stored.trackingDetail?.events || []).map((event) => `${event.eventType}|${event.label}|${event.location || ''}|${event.timeText || ''}`.toUpperCase());
+    const hasDuplicateEvents = new Set(eventKeys).size !== eventKeys.length;
+    const staleWanhai = carrierCode === 'WANHAI' && (
+      /装货港预计|卸货港预计|预计到港时间/.test(routeNames)
+      || hasStalePortMetadata(stored.trackingDetail)
+      || hasDuplicateEvents
+      || (stored.rawPageText && /\[WANHAI API [^\]]*wdcec109_m\.do/i.test(stored.rawPageText)
+        && !stored.trackingDetail?.events.some((event) => event.eventType === 'arrival' && event.actual)
+        && /已到(?:达|達)[A-Z]{5}/.test(stored.rawPageText))
+    );
+    const staleCosco = carrierCode === 'COSCO' && (
+      /码头链接|集装箱信息|实时船期|提单信息/.test(routeNames)
+      || hasStalePortMetadata(stored.trackingDetail)
+    );
+    if (stored.rawPageText && (staleWanhai || staleCosco)) {
+      try {
+        const rule = resolveCarrierRule({ billNo: stored.billNo, carrierHint: '' });
+        const queryType = stored.trackingDetail?.queryType || 'bill';
+        const queryValue = stored.trackingDetail?.queryValue || (queryType === 'container' ? stored.containerNo : buildQueryBillNo(stored.billNo, rule));
+        const query = { rule, originalBillNo: stored.billNo, queryBillNo: queryValue, containerNo: stored.containerNo, queryType } as const;
+        const parsed = carrierCode === 'WANHAI'
+          ? parseWanhaiTrackingText(stored.rawPageText, query)
+          : parseRenderedTrackingText(stored.rawPageText, query);
+        const repaired: StoredTrackingDetail = { ...stored, capturedAt: parsed.trackingDetail?.capturedAt || stored.capturedAt, trackingDetail: parsed.trackingDetail || stored.trackingDetail };
+        await writeJsonAtomic(filePath, repaired);
+        return repaired;
+      } catch {
+        // 旧证据可能是截断页面，读取仍应向上层返回原始缓存。
+      }
+    }
+    return stored;
   }
 
   async listRuns(): Promise<RunSummary[]> {
@@ -1315,11 +1421,12 @@ export class AutomationEngine {
           // 详情文件可能尚未采集，不能因此影响总览列表。
         }
       }
+      const displayed = displayRecordFromDetail(record, trackingDetail);
       return {
         record: {
-          ...record,
-          arrivalTime: publicTime(record.arrivalTime),
-          dischargeTime: publicTime(record.dischargeTime),
+          ...displayed.record,
+          arrivalTime: publicTime(displayed.record.arrivalTime),
+          dischargeTime: publicTime(displayed.record.dischargeTime),
         },
         carrier,
         carrierCode,
@@ -1327,7 +1434,8 @@ export class AutomationEngine {
         evidencePath: evidencePathFromNote(record.note),
         failureEvidencePath: failureEvidencePathFromNote(record.note),
         verificationNo,
-        route: routeTextFromNote(record.note),
+        route: trackingDetail?.routeStops?.map((stop) => stop.name).filter(Boolean).join(' → ') || routeTextFromNote(record.note),
+        arrivalKind: displayed.arrivalKind || undefined,
         trackingDetail,
         trackingDetailUrl,
       };
