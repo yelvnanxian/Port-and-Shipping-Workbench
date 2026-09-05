@@ -1,5 +1,6 @@
 import { trackingError } from './errors.js';
 import { parseOoclDate } from './oocl.js';
+import { requestContext } from './official-http.js';
 import type { TrackingProvider } from './tracker.js';
 import type { TrackingCargoState, TrackingDetail, TrackingEventDetail, TrackingEventType, TrackingQuery, TrackingResult, TrackingRouteStop } from './types.js';
 
@@ -371,26 +372,25 @@ export class YangmingTrackingProvider implements TrackingProvider {
     const containerNo = input.containerNo.trim().toUpperCase();
     if (input.queryType === 'bill' && !billNo) throw trackingError('订单号验证失败', '阳明提单号为空');
     if (input.queryType === 'container' && !/^[A-Z]{4}\d{7}$/.test(containerNo)) throw trackingError('订单号验证失败', `阳明柜号格式不正确：${containerNo || '空'}`);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const request = requestContext(this.timeoutMs);
     try {
       if (input.queryType === 'container') {
-        const detailPayload = await this.fetchPayload(containerNo, 'SEARCH', '', controller, '柜号详情接口');
+        const detailPayload = await this.fetchPayload(containerNo, 'SEARCH', '', request.controller, '柜号详情接口');
         return parseYangmingTrackingResponses(null, detailPayload, input.originalBillNo, containerNo, { queryType: 'container', queryValue: containerNo });
       }
-      const summaryPayload = await this.fetchPayload(billNo, 'SEARCH', '', controller, '提单摘要接口');
+      const summaryPayload = await this.fetchPayload(billNo, 'SEARCH', '', request.controller, '提单摘要接口');
       const selected = selectBill(summaryPayload, billNo);
       const summary = selectContainerSummary(selected.bill, containerNo);
       const returnedContainer = text(summary.ctnrNo);
       if (!returnedContainer) throw trackingError('解析失败', '阳明提单摘要缺少柜号，无法读取完整货柜轨迹');
       const position = text(summary.trackPositionOut) || 'BL_CT';
-      const detailPayload = await this.fetchPayload(returnedContainer, position, selected.detailRefNo, controller, '柜号详情接口');
+      const detailPayload = await this.fetchPayload(returnedContainer, position, selected.detailRefNo, request.controller, '柜号详情接口');
       return parseYangmingTrackingResponses(summaryPayload, detailPayload, billNo, returnedContainer, { queryType: 'bill', queryValue: billNo });
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') throw trackingError('查询超时', '阳明官方接口查询超时，请稍后重试');
       throw error;
     } finally {
-      clearTimeout(timer);
+      request.dispose();
     }
   }
 }

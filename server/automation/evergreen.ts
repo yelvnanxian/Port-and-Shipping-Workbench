@@ -1,4 +1,5 @@
 import { trackingError } from './errors.js';
+import { requestContext } from './official-http.js';
 import type { TrackingProvider } from './tracker.js';
 import type { TrackingCargoState, TrackingDetail, TrackingEventDetail, TrackingEventType, TrackingQuery, TrackingResult, TrackingRouteStop } from './types.js';
 
@@ -268,10 +269,9 @@ export class EvergreenTrackingProvider implements TrackingProvider {
     const requestedContainerNo = input.containerNo.trim().toUpperCase();
     if (input.queryType === 'bill' && !/^\d{10,14}$/.test(requestedBillNo)) throw trackingError('订单号验证失败', `长荣提单号格式不正确：EGLV${requestedBillNo || '空'}`);
     if (input.queryType === 'container' && !/^[A-Z]{4}\d{7}$/.test(requestedContainerNo)) throw trackingError('订单号验证失败', `长荣柜号格式不正确：${requestedContainerNo || '空'}`);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const request = requestContext(this.timeoutMs);
     try {
-      const homeResponse = await this.fetcher(EVERGREEN_ENDPOINT, { headers: { accept: 'text/html' }, signal: controller.signal });
+      const homeResponse = await this.fetcher(EVERGREEN_ENDPOINT, { headers: { accept: 'text/html' }, signal: request.signal });
       await responseText(homeResponse, '首页');
       const cookie = cookiesFrom(homeResponse);
       const commonHeaders = { accept: 'text/html,application/xhtml+xml', 'content-type': 'application/x-www-form-urlencoded', ...(cookie ? { cookie } : {}) };
@@ -281,7 +281,7 @@ export class EvergreenTrackingProvider implements TrackingProvider {
           method: 'POST',
           headers: commonHeaders,
           body: new URLSearchParams({ BL: '', CNTR: requestedContainerNo, bkno: '', TYPE: 'CNTR', SEL: 's_cntr', NO: requestedContainerNo }),
-          signal: controller.signal,
+          signal: request.signal,
         });
         const containerHtml = await responseText(containerResponse, '柜号查询');
         if (!new RegExp(escapeRegex(requestedContainerNo), 'i').test(containerHtml)) {
@@ -294,7 +294,7 @@ export class EvergreenTrackingProvider implements TrackingProvider {
         method: 'POST',
         headers: commonHeaders,
         body: new URLSearchParams({ BL: billNo, CNTR: '', bkno: '', TYPE: 'BL', SEL: 's_bl', NO: billNo }),
-        signal: controller.signal,
+        signal: request.signal,
       });
       const billHtml = await responseText(billResponse, '提单查询');
       const expected = requestedContainerNo;
@@ -314,7 +314,7 @@ export class EvergreenTrackingProvider implements TrackingProvider {
         method: 'POST',
         headers: commonHeaders,
         body: new URLSearchParams(params),
-        signal: controller.signal,
+        signal: request.signal,
       });
       const movementHtml = await responseText(movementResponse, '货柜动态查询');
       return parseEvergreenTrackingHtml(billHtml, movementHtml, billNo, containerNo, {
@@ -325,7 +325,7 @@ export class EvergreenTrackingProvider implements TrackingProvider {
       if (error instanceof Error && error.name === 'AbortError') throw trackingError('查询超时', '长荣官网查询超时，请稍后重试');
       throw error;
     } finally {
-      clearTimeout(timer);
+      request.dispose();
     }
   }
 }

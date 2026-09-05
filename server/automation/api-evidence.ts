@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { sourceEvidenceDirectory, sourceEvidenceUrl } from './source-storage.js';
+import { evidenceReference, removeOlderEvidence, sourceEvidenceDirectory, sourceEvidenceUrl } from './source-storage.js';
 import type { CarrierRule, TrackingResult, WorkbookRecord } from './types.js';
 
 function xml(value: unknown) {
@@ -106,8 +106,12 @@ export async function createApiEvidence(
 ) {
   const evidenceDirectory = sourceEvidenceDirectory(dataDirectory, rule.code);
   await fs.mkdir(evidenceDirectory, { recursive: true });
-  const reference = `${record.billNo}_${record.containerNo}`.toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 48) || 'UNKNOWN';
+  // Use the same primary reference as browser screenshots so an API evidence
+  // refresh replaces the previous item for this shipment instead of growing a
+  // new file on every scheduled run.
+  const reference = evidenceReference(`${record.billNo}_${record.containerNo}`, 64);
   const fileName = `${new Date().toISOString().replace(/[:.]/g, '-')}_${rule.code}_${reference}_api-success.svg`;
   await fs.writeFile(path.join(evidenceDirectory, fileName), renderApiEvidenceSvg(record, rule, result), { encoding: 'utf8', mode: 0o600 });
+  await removeOlderEvidence(evidenceDirectory, rule.code, `${record.billNo}_${record.containerNo}`, fileName);
   return sourceEvidenceUrl(rule.code, fileName);
 }

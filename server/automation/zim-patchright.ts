@@ -3,7 +3,7 @@ import path from 'node:path';
 import { chromium, type BrowserContext, type Locator, type Page, type Response } from 'patchright';
 import { browserExecutablePath, type BrowserVerificationCallbacks } from './browser.js';
 import { classifyTrackingError, trackingError } from './errors.js';
-import { sourceEvidenceDirectory, sourceEvidenceUrl } from './source-storage.js';
+import { saveEvidenceScreenshot } from './source-storage.js';
 import type { TrackingProvider } from './tracker.js';
 import type { TrackingQuery, TrackingResult } from './types.js';
 import { parseZimTrackingText } from './zim.js';
@@ -265,16 +265,8 @@ export class ZimPatchrightTrackingProvider implements TrackingProvider {
   }
 
   private async saveEvidence(page: Page, input: TrackingQuery, outcome: 'success' | 'failure') {
-    const directory = sourceEvidenceDirectory(this.dataDirectory, 'ZIM');
-    await fs.mkdir(directory, { recursive: true });
-    const reference = normalizedReference(input.queryType === 'container' ? input.containerNo : input.originalBillNo).slice(0, 32) || 'UNKNOWN';
-    const fileName = `${new Date().toISOString().replace(/[:.]/g, '-')}_ZIM_${reference}_patchright-${outcome}.png`;
-    try {
-      await page.screenshot({ path: path.join(directory, fileName), fullPage: true });
-      return sourceEvidenceUrl('ZIM', fileName);
-    } catch {
-      return undefined;
-    }
+    const reference = `${input.originalBillNo}_${input.containerNo}`;
+    return saveEvidenceScreenshot(page, this.dataDirectory, 'ZIM', reference, `patchright-${outcome}`);
   }
 
   private async execute(input: TrackingQuery): Promise<TrackingResult> {

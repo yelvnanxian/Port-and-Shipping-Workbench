@@ -4,7 +4,7 @@ import { chromium, type BrowserContext, type Page, type Response } from 'patchri
 import { browserExecutablePath, type BrowserVerificationCallbacks } from './browser.js';
 import { classifyTrackingError, trackingError } from './errors.js';
 import { parseOoclControlTowerText } from './oocl.js';
-import { sourceEvidenceDirectory, sourceEvidenceUrl } from './source-storage.js';
+import { saveEvidenceScreenshot } from './source-storage.js';
 import type { TrackingProvider } from './tracker.js';
 import type { TrackingQuery, TrackingResult } from './types.js';
 
@@ -177,16 +177,8 @@ export class OoclPatchrightTrackingProvider implements TrackingProvider {
   }
 
   private async saveEvidence(page: Page, input: TrackingQuery, outcome: 'success' | 'failure') {
-    const directory = sourceEvidenceDirectory(this.dataDirectory, 'OOCL');
-    await fs.mkdir(directory, { recursive: true });
-    const reference = normalizedReference(input.queryType === 'container' ? input.containerNo : input.originalBillNo).slice(0, 32) || 'UNKNOWN';
-    const fileName = `${new Date().toISOString().replace(/[:.]/g, '-')}_OOCL_${reference}_patchright-${outcome}.png`;
-    try {
-      await page.screenshot({ path: path.join(directory, fileName), fullPage: true });
-      return sourceEvidenceUrl('OOCL', fileName);
-    } catch {
-      return undefined;
-    }
+    const reference = `${input.originalBillNo}_${input.containerNo}`;
+    return saveEvidenceScreenshot(page, this.dataDirectory, 'OOCL', reference, `patchright-${outcome}`);
   }
 
   private async execute(input: TrackingQuery): Promise<TrackingResult> {

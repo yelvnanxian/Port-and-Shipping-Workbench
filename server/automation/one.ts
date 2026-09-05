@@ -1,4 +1,5 @@
 import { trackingError } from './errors.js';
+import { requestContext } from './official-http.js';
 import type { TrackingProvider } from './tracker.js';
 import type { ArrivalKind, TrackingCargoState, TrackingDetail, TrackingEventDetail, TrackingEventType, TrackingQuery, TrackingResult, TrackingRouteStop } from './types.js';
 
@@ -353,8 +354,7 @@ export class OneTrackingProvider implements TrackingProvider {
       filters: { search_text: queryValue, search_type: searchType },
       timestamp: Date.now(),
     });
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const request = requestContext(this.timeoutMs);
     try {
       const response = await this.fetcher(ONE_ENDPOINT, {
         method: 'POST',
@@ -367,7 +367,7 @@ export class OneTrackingProvider implements TrackingProvider {
           'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131 Safari/537.36',
         },
         body,
-        signal: controller.signal,
+        signal: request.signal,
       });
       const raw = await response.text();
       let payload: unknown;
@@ -408,7 +408,7 @@ export class OneTrackingProvider implements TrackingProvider {
           referer: ONE_SOURCE,
           'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131 Safari/537.36',
         },
-        signal: controller.signal,
+        signal: request.signal,
       });
       const eventsRaw = await eventsResponse.text();
       let eventPayload: unknown;
@@ -430,7 +430,7 @@ export class OneTrackingProvider implements TrackingProvider {
       if (error instanceof Error && error.name === 'AbortError') throw trackingError('查询超时', '海洋网联官方接口查询超时，请稍后重试');
       throw error;
     } finally {
-      clearTimeout(timer);
+      request.dispose();
     }
   }
 }

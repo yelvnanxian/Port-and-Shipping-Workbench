@@ -1,4 +1,5 @@
 import { trackingError } from './errors.js';
+import { requestContext } from './official-http.js';
 import type { TrackingProvider } from './tracker.js';
 import type { TrackingCargoState, TrackingEventDetail, TrackingEventType, TrackingQuery, TrackingResult, TrackingRouteStop } from './types.js';
 
@@ -344,10 +345,9 @@ export class HedeTrackingProvider implements TrackingProvider {
     if (input.queryType === 'container' && !/^[A-Z]{4}\d{7}$/.test(containerNo)) {
       throw trackingError('订单号验证失败', `合德柜号格式不正确：${containerNo || '空'}`);
     }
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const request = requestContext(this.timeoutMs);
     const fetchText = async (url: string, init?: RequestInit) => {
-      const response = await this.fetcher(url, { ...init, signal: controller.signal });
+      const response = await this.fetcher(url, { ...init, signal: request.signal });
       if (!response.ok) throw trackingError('官网接口异常', `合德官网 HTTP ${response.status}`);
       return response.text();
     };
@@ -391,7 +391,7 @@ export class HedeTrackingProvider implements TrackingProvider {
       if (error instanceof Error && error.name === 'AbortError') throw trackingError('查询超时', '合德官网完整查询超时，请稍后重试');
       throw error;
     } finally {
-      clearTimeout(timer);
+      request.dispose();
     }
   }
 }

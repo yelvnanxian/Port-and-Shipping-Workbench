@@ -1,4 +1,5 @@
 import { trackingError } from './errors.js';
+import { requestContext } from './official-http.js';
 import type { TrackingProvider } from './tracker.js';
 import type { TrackingCargoState, TrackingEventDetail, TrackingEventType, TrackingFact, TrackingQuery, TrackingResult, TrackingRouteStop } from './types.js';
 
@@ -291,10 +292,9 @@ export class SmLineTrackingProvider implements TrackingProvider {
     const queryValue = input.queryType === 'container' ? expected : billNo;
     const searchType = input.queryType === 'container' ? 'C' : 'B';
     const queryLabel = input.queryType === 'container' ? '柜号查询' : '提单查询';
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const request = requestContext(this.timeoutMs);
     try {
-      const searchPayload = await this.post({ f_cmd: '121', search_type: searchType, search_name: queryValue }, queryLabel, controller.signal);
+      const searchPayload = await this.post({ f_cmd: '121', search_type: searchType, search_name: queryValue }, queryLabel, request.signal);
       const shipments = payloadList(searchPayload, queryLabel);
       if (!shipments.length) throw trackingError('订单号验证失败', `森罗官网未找到${input.queryType === 'container' ? `柜号 ${expected}` : `提单 ${input.originalBillNo}`}`);
       const exactSelected = shipments.find((item) => {
@@ -321,8 +321,8 @@ export class SmLineTrackingProvider implements TrackingProvider {
       const copNo = text(selected.copNo);
       if (!containerNo || !copNo) throw trackingError('解析失败', `森罗官网${queryLabel}结果缺少柜号或追踪流水号`);
       const [routePayload, eventPayload] = await Promise.all([
-        this.post({ f_cmd: '124', bkg_no: bookingNo }, '航线查询', controller.signal),
-        this.post({ f_cmd: '125', cntr_no: containerNo, bkg_no: bookingNo, cop_no: copNo }, '货柜事件查询', controller.signal),
+        this.post({ f_cmd: '124', bkg_no: bookingNo }, '航线查询', request.signal),
+        this.post({ f_cmd: '125', cntr_no: containerNo, bkg_no: bookingNo, cop_no: copNo }, '货柜事件查询', request.signal),
       ]);
       const result = parseSmLineTrackingResponses(searchPayload, routePayload, eventPayload, expected, billNo, input.queryType);
       return {
@@ -333,7 +333,7 @@ export class SmLineTrackingProvider implements TrackingProvider {
       if (error instanceof Error && error.name === 'AbortError') throw trackingError('查询超时', '森罗官网查询超时，请稍后重试');
       throw error;
     } finally {
-      clearTimeout(timer);
+      request.dispose();
     }
   }
 }

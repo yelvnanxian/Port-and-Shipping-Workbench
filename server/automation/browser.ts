@@ -8,7 +8,7 @@ import { parseMscTrackingPayload } from './msc.js';
 import { parseOoclDate } from './oocl.js';
 import { probeUrl } from './official-probe.js';
 import { parseZimTrackingText } from './zim.js';
-import { legacyStatePath, sourceEvidenceDirectory, sourceEvidenceUrl, sourceStatePath } from './source-storage.js';
+import { legacyStatePath, saveEvidenceScreenshot, sourceStatePath } from './source-storage.js';
 import type { TrackingProvider } from './tracker.js';
 import type { ArrivalKind, TrackingEventDetail, TrackingQuery, TrackingResult, TrackingDetail, TrackingEventType, TrackingCargoState, RunProgress, TrackingRouteStop } from './types.js';
 import { parseCarrierRoute } from './routes/index.js';
@@ -1091,16 +1091,8 @@ export class BrowserTrackingProvider implements TrackingProvider {
   }
 
   private async saveEvidence(page: Page, input: TrackingQuery, outcome: 'success' | 'failure') {
-    const evidenceDirectory = sourceEvidenceDirectory(this.dataDirectory, input.rule.code);
-    await fs.mkdir(evidenceDirectory, { recursive: true });
-    const reference = normalizedReference(input.queryType === 'container' ? input.containerNo : input.originalBillNo).slice(0, 32) || 'UNKNOWN';
-    const fileName = `${new Date().toISOString().replace(/[:.]/g, '-')}_${input.rule.code}_${reference}_${outcome}.png`;
-    try {
-      await page.screenshot({ path: path.join(evidenceDirectory, fileName), fullPage: true });
-      return sourceEvidenceUrl(input.rule.code, fileName);
-    } catch {
-      return undefined;
-    }
+    const reference = `${input.originalBillNo}_${input.containerNo}`;
+    return saveEvidenceScreenshot(page, this.dataDirectory, input.rule.code, reference, outcome);
   }
 
   private statePath(input: TrackingQuery) {

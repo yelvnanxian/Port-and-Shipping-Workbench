@@ -1,4 +1,5 @@
 import { trackingError } from './errors.js';
+import { requestContext } from './official-http.js';
 import type { TrackingProvider } from './tracker.js';
 import type { TrackingCargoState, TrackingDetail, TrackingEventDetail, TrackingEventType, TrackingQuery, TrackingResult, TrackingRouteStop } from './types.js';
 
@@ -368,10 +369,9 @@ export class MatsonTrackingProvider implements TrackingProvider {
     // CargoPortal 的公开查询端点统一使用 bk。它既接受订舱/提单号，
     // 也接受柜号，并在后者场景返回关联订舱号供 detailpub 继续读取完整轨迹。
     summaryUrl.searchParams.set('type', 'bk');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const request = requestContext(this.timeoutMs);
     try {
-      const summaryPayload = await this.fetchPayload(summaryUrl, controller, '摘要接口');
+      const summaryPayload = await this.fetchPayload(summaryUrl, request.controller, '摘要接口');
       const summary = selectSummary(summaryPayload, input.containerNo);
       if (!summary.bookingNumber) throw trackingError('解析失败', '美森官网摘要缺少订舱号，无法请求完整详情');
       const detailUrl = new URL(MATSON_DETAIL_ENDPOINT);
@@ -379,7 +379,7 @@ export class MatsonTrackingProvider implements TrackingProvider {
       detailUrl.searchParams.set('cn', summary.returnedContainer);
       // CargoPortal 未登录页面固定以 anonymousUser WebId 请求公开详情。
       detailUrl.searchParams.set('webId', 'anonymousUser');
-      const detailPayload = await this.fetchPayload(detailUrl, controller, '详情接口');
+      const detailPayload = await this.fetchPayload(detailUrl, request.controller, '详情接口');
       return parseMatsonTrackingResponse(summaryPayload, input.containerNo, detailPayload, {
         expectedBillNo: input.originalBillNo,
         queryType: input.queryType,
@@ -389,7 +389,7 @@ export class MatsonTrackingProvider implements TrackingProvider {
       if (error instanceof Error && error.name === 'AbortError') throw trackingError('查询超时', '美森官方接口查询超时，请稍后重试');
       throw error;
     } finally {
-      clearTimeout(timer);
+      request.dispose();
     }
   }
 }

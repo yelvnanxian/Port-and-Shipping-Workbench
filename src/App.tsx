@@ -1619,10 +1619,13 @@ function ModulePage({ page, data, automation, authEnabled, currentUser, syncing,
     if (!window.confirm('确认清理工作台自动化 Chrome？当前没有运行中的查询任务时才可执行；日常使用的 Chrome 不受影响。')) return;
     setBrowserCleanup(true);
     try {
-      const payload = await apiRequest<{ automation: AutomationStatus; cleanup?: { orphanedProcesses?: number } }>('/api/automation/browser/cleanup', { method: 'POST' });
+      const payload = await apiRequest<{ automation: AutomationStatus; cleanup?: { orphanedProcesses?: number; cacheDirectories?: number; cacheBytes?: number } }>('/api/automation/browser/cleanup', { method: 'POST' });
       onAutomationUpdated(payload.automation);
       const count = payload.cleanup?.orphanedProcesses || 0;
-      onToast(count ? `自动化 Chrome 已清理（${count} 个进程）；下次网页查询会重新打开会话` : '自动化 Chrome 已清理；下次网页查询会重新打开会话');
+      const cacheCount = payload.cleanup?.cacheDirectories || 0;
+      const cacheBytes = payload.cleanup?.cacheBytes || 0;
+      const cacheSummary = cacheCount ? `，清理 ${cacheCount} 个缓存目录（${(cacheBytes / 1024 / 1024).toFixed(1)} MB）` : '';
+      onToast(count ? `自动化 Chrome 已清理（${count} 个进程）${cacheSummary}` : `自动化 Chrome 已清理${cacheSummary}`);
     } catch (error) {
       onToast(error instanceof Error ? error.message : '自动化 Chrome 清理失败');
     } finally {

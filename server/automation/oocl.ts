@@ -1,5 +1,6 @@
 import type { TrackingProvider } from './tracker.js';
 import { trackingError } from './errors.js';
+import { requestContext } from './official-http.js';
 import type { ArrivalKind, TrackingCargoState, TrackingEventDetail, TrackingEventType, TrackingQuery, TrackingResult, TrackingRouteStop } from './types.js';
 
 const OOCL_TRACKING_ENDPOINT = 'https://moc.oocl.com/appleapp/rest/ctLite/getCTDetails';
@@ -416,12 +417,11 @@ export class OoclTrackingProvider implements TrackingProvider {
 
     const url = new URL(OOCL_TRACKING_ENDPOINT);
     url.searchParams.set('paramString', `blNumber=${billNo}`);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const request = requestContext(this.timeoutMs);
     try {
       const response = await this.fetcher(url, {
         headers: { accept: 'application/json' },
-        signal: controller.signal,
+        signal: request.signal,
       });
       if (!response.ok) {
         const category = response.status === 401
@@ -447,7 +447,7 @@ export class OoclTrackingProvider implements TrackingProvider {
       if (error instanceof Error && error.name === 'AbortError') throw trackingError('查询超时', 'OOCL 官方查询超时，请稍后重试');
       throw error;
     } finally {
-      clearTimeout(timer);
+      request.dispose();
     }
   }
 }

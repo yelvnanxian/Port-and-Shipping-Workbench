@@ -4,7 +4,7 @@ import { chromium, type BrowserContext, type Page } from 'playwright-core';
 import { browserExecutablePath } from './browser.js';
 import type { BrowserVerificationCallbacks } from './browser.js';
 import { classifyTrackingError, trackingError } from './errors.js';
-import { legacyStatePath, sourceEvidenceDirectory, sourceEvidenceUrl, sourceStatePath } from './source-storage.js';
+import { legacyStatePath, saveEvidenceScreenshot, sourceStatePath } from './source-storage.js';
 import type { TrackingProvider } from './tracker.js';
 import type { TrackingCargoState, TrackingEventDetail, TrackingEventType, TrackingFact, TrackingQuery, TrackingResult, TrackingRouteStop } from './types.js';
 
@@ -589,16 +589,7 @@ export class HmmTrackingProvider implements TrackingProvider {
   }
 
   private async saveEvidence(page: Page, input: TrackingQuery, outcome: 'success' | 'failure') {
-    const evidenceDirectory = sourceEvidenceDirectory(this.dataDirectory, 'HMM');
-    await fs.mkdir(evidenceDirectory, { recursive: true });
-    const reference = normalizedReference(input.originalBillNo).slice(0, 32) || 'UNKNOWN';
-    const fileName = `${new Date().toISOString().replace(/[:.]/g, '-')}_HMM_${reference}_${outcome}.png`;
-    try {
-      await page.screenshot({ path: path.join(evidenceDirectory, fileName), fullPage: true });
-      return sourceEvidenceUrl('HMM', fileName);
-    } catch {
-      return undefined;
-    }
+    return saveEvidenceScreenshot(page, this.dataDirectory, 'HMM', `${input.originalBillNo}_${input.containerNo}`, outcome);
   }
 
   private async getPage(context: BrowserContext) {

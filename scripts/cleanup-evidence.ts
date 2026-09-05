@@ -12,18 +12,18 @@ type EvidenceFile = {
 
 const projectRoot = path.resolve(import.meta.dirname, '..');
 const dataDirectory = path.resolve(process.env.PORT_OPS_DATA_DIR?.trim() || path.join(projectRoot, 'data'));
-const retentionDays = Number(process.env.EVIDENCE_RETENTION_DAYS || 30);
-const maxPerKey = Number(process.env.EVIDENCE_MAX_PER_KEY || 3);
+const retentionDays = Number(process.env.EVIDENCE_RETENTION_DAYS || 7);
+const maxPerKey = 1;
 const apply = process.argv.includes('--apply');
 
 function evidenceReference(value: string) {
-  const match = value.match(/(?:^|[\\/])([^\\/]+\.png)$/i);
+  const match = value.match(/(?:^|[\\/])([^\\/]+\.(?:png|svg))$/i);
   return match?.[1] || '';
 }
 
 function referencedFileNames(value: unknown, target: Set<string>) {
   if (typeof value !== 'string') return;
-  for (const match of value.matchAll(/(?:\/api\/browser-evidence\/|browser-evidence[\\/])([^?\s；"']+\.png)/gi)) {
+  for (const match of value.matchAll(/(?:\/api\/browser-evidence\/|browser-evidence[\\/])([^?\s；"']+\.(?:png|svg))/gi)) {
     const name = decodeURIComponent(match[1]);
     target.add(evidenceReference(name));
   }
@@ -60,13 +60,14 @@ async function walkEvidence(directory: string): Promise<EvidenceFile[]> {
       files.push(...await walkEvidence(target));
       continue;
     }
-    if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.png')) continue;
+    if (!entry.isFile() || !/\.(?:png|svg)$/i.test(entry.name)) continue;
     const stat = await fs.stat(target);
-    // 新版文件名：时间_船司_单号_success|failure.png；旧版文件名没有结果后缀。
-    const normalized = entry.name.replace(/\.png$/i, '');
+    // 文件名：时间_船司_单号_success|failure.(png|svg)。同一单号不再按
+    // success/failure 分组，始终只保留最后一次截图/凭证。
+    const normalized = entry.name.replace(/\.(?:png|svg)$/i, '');
     const parts = normalized.split('_');
-    // 把 success/failure 作为分组的一部分，避免失败证据挤掉成功证据的保留名额。
-    const key = parts.slice(1).join('_');
+    const semantic = parts.slice(2).join('_').replace(/_(?:patchright-)?(?:success|failure|api-success)$/i, '');
+    const key = parts.length >= 3 ? `${parts[1]}_${semantic}` : normalized;
     files.push({ path: target, name: entry.name, mtimeMs: stat.mtimeMs, size: stat.size, key });
   }
   return files;
@@ -80,8 +81,6 @@ function formatBytes(value: number) {
 
 async function main() {
   if (!Number.isFinite(retentionDays) || retentionDays < 1) throw new Error('EVIDENCE_RETENTION_DAYS 必须是大于 0 的数字');
-  if (!Number.isFinite(maxPerKey) || maxPerKey < 1) throw new Error('EVIDENCE_MAX_PER_KEY 必须是大于 0 的数字');
-
   const [files, referenced] = await Promise.all([
     Promise.all([
       walkEvidence(path.join(dataDirectory, 'browser-evidence')),
@@ -96,14 +95,18 @@ async function main() {
   for (const group of grouped.values()) {
     group.sort((a, b) => b.mtimeMs - a.mtimeMs);
     group.forEach((file, index) => {
-      if (referenced.has(file.name)) return;
+      // Keep the newest currently referenced evidence so the active workbook
+      // does not immediately expose a broken link. Older retries are removed
+      // even when historical run records still reference them; otherwise the
+      // retention rule could never reduce duplicate screenshots.
+      if (index === 0 && referenced.has(file.name)) return;
       if (file.mtimeMs < cutoff || index >= maxPerKey) candidates.push(file);
     });
   }
   const bytes = candidates.reduce((sum, file) => sum + file.size, 0);
   console.log(`证据文件总数：${files.length}`);
   console.log(`保留引用文件：${referenced.size}`);
-  console.log(`清理策略：${retentionDays} 天，单号每类最多 ${maxPerKey} 个文件`);
+  console.log(`清理策略：${retentionDays} 天，同一船司/单号（或柜号）仅保留最新 1 个文件`);
   console.log(`${apply ? '将删除' : '预计删除'}：${candidates.length} 个文件，${formatBytes(bytes)}`);
   if (!apply) {
     console.log('当前为预览模式；确认结果后执行：npm run cleanup:evidence -- --apply');
